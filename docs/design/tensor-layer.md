@@ -1,5 +1,7 @@
 # Tensor 层设计
 
+[English](tensor-layer.en.md)
+
 ## 1. 职责
 
 Tensor 层是 cuDNN Frontend Graph 到结构化 MLIR 的第一段。它负责表达形状、

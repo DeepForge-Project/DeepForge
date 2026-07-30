@@ -3,7 +3,7 @@
 [中文](user-guide.zh-CN.md)
 
 This guide is for users compiling and executing cuDNN Frontend serialized
-Graphs with the DeepForge CPU MVP. See the [design overview](design/overview.md)
+Graphs with the DeepForge CPU MVP. See the [design overview](design/overview.en.md)
 for implementation details.
 
 ## 1. Supported Scope
@@ -308,6 +308,6 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 | `DFE_UNSUPPORTED_CPU_FEATURE` | Do not force an unsupported variant; use automatic `execute` |
 | Artifact target mismatch | Recompile on the target host or an identical target triple |
 
-See the [MVP compatibility and runtime contract](design/contracts.md) for the
-normative specification and [DFO Artifact Format](artifact-format.md) for the
+See the [MVP compatibility and runtime contract](design/contracts.en.md) for the
+normative specification and [DFO Artifact Format](artifact-format.en.md) for the
 binary layout.

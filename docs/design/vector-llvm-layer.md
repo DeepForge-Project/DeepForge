@@ -1,5 +1,7 @@
 # Vector 与 LLVM 层设计
 
+[English](vector-llvm-layer.en.md)
+
 ## 1. 职责
 
 本层把标准 Vector/Arith/MemRef/Func/ControlFlow 等方言完整转换为 LLVM Dialect，

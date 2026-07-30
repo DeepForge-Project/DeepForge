@@ -1,5 +1,7 @@
 # Machine Dialect：延后设计说明
 
+[English](machine-dialect.en.md)
+
 ## 1. 当前状态
 
 Machine Dialect **不属于 MVP**。当前代码和主 pipeline 不应注册、生成或依赖

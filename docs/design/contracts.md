@@ -1,5 +1,7 @@
 # MVP 兼容性与运行契约
 
+[English](contracts.en.md)
+
 本文档是 DeepForge MVP 的规范性边界。其他设计文档与本文冲突时，以本文为准。
 
 ## 1. 版本策略

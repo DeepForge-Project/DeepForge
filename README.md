@@ -32,7 +32,7 @@ call-interface reference.
 | C++ language mode | `C++20` | Enforced by CMake |
 
 LLVM `main`, rolling MLIR revisions, and LLVM 23 release candidates are not
-supported. See the [MVP compatibility and runtime contract](docs/design/contracts.md)
+supported. See the [MVP compatibility and runtime contract](docs/design/contracts.en.md)
 for the normative compatibility boundary.
 
 ## External Toolchain Versions
@@ -164,18 +164,18 @@ Dialect.
 |---|---|
 | [English User Guide](docs/user-guide.en.md) | Build, CLI, runtime API, benchmark, and troubleshooting |
 | [中文用户指南](docs/user-guide.zh-CN.md) | Build, CLI, runtime API, benchmark, and troubleshooting in Chinese |
-| [MVP Contract](docs/design/contracts.md) | Versions, input schema, support matrix, Frontend-shaped API, and numeric rules |
-| [Architecture Overview](docs/design/overview.md) | Components, IR stages, and major design decisions |
-| [Tensor Layer](docs/design/tensor-layer.md) | Serialized Graph import, shape conversion, and padding |
-| [Linalg Layer](docs/design/linalg-layer.md) | `linalg.conv_2d_nhwc_fhwc` semantics and layouts |
-| [Loop and Schedule Layer](docs/design/loop-schedule-layer.md) | Direct Conv loops, reduction vectorization, and deferred tiling |
-| [Machine Dialect](docs/design/machine-dialect.md) | Deferral rationale and criteria for reconsideration |
-| [Vector and LLVM Layer](docs/design/vector-llvm-layer.md) | Complete LLVM lowering and CPU variants |
-| [Pass Pipeline](docs/design/pass-pipeline.md) | MVP pass order, preconditions, and verification |
-| [Conv2D Example](docs/design/example-conv2d.md) | End-to-end IR example |
-| [DFO Artifact Format](docs/artifact-format.md) | Binary layout, ORC loading, and trust boundary |
-| [Benchmark Baseline](docs/benchmark-baseline.md) | Small, medium, and large profiles and reproduction steps |
-| [Development Plan](docs/development-plan.md) | Phase order, exit criteria, and test gates |
+| [MVP Contract](docs/design/contracts.en.md) | Versions, input schema, support matrix, Frontend-shaped API, and numeric rules |
+| [Architecture Overview](docs/design/overview.en.md) | Components, IR stages, and major design decisions |
+| [Tensor Layer](docs/design/tensor-layer.en.md) | Serialized Graph import, shape conversion, and padding |
+| [Linalg Layer](docs/design/linalg-layer.en.md) | `linalg.conv_2d_nhwc_fhwc` semantics and layouts |
+| [Loop and Schedule Layer](docs/design/loop-schedule-layer.en.md) | Direct Conv loops, reduction vectorization, cost-model ownership, and deferred tiling |
+| [Machine Dialect](docs/design/machine-dialect.en.md) | Deferral rationale and criteria for reconsideration |
+| [Vector and LLVM Layer](docs/design/vector-llvm-layer.en.md) | Complete LLVM lowering and CPU variants |
+| [Pass Pipeline](docs/design/pass-pipeline.en.md) | MVP pass order, preconditions, and verification |
+| [Conv2D Example](docs/design/example-conv2d.en.md) | End-to-end IR example |
+| [DFO Artifact Format](docs/artifact-format.en.md) | Binary layout, ORC loading, and trust boundary |
+| [Benchmark Baseline](docs/benchmark-baseline.en.md) | Small, medium, and large profiles and reproduction steps |
+| [Development Plan](docs/development-plan.en.md) | Phase order, exit criteria, and test gates |
 
 ## Build
 

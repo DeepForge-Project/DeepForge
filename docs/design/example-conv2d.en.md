@@ -1,14 +1,15 @@
-# Conv2D FWD 端到端示例
+# Conv2D Forward End-to-End Example
 
-[English](example-conv2d.en.md)
+[中文](example-conv2d.md)
 
-本文示例固定为：`N=1, H=W=56, C=64, K=64, R=S=3`，stride/dilation 为
-`[1,1]`，四边 padding 为 `1`，所有数据类型为 f32。它展示的是 MVP 的正确
-语义路径，不是某个 pass 的完整 printer 输出。
+This example uses `N=1, H=W=56, C=64, K=64, R=S=3`, stride and dilation
+`[1,1]`, padding of 1 on every side, and f32 throughout. It demonstrates the
+correct semantic path for the MVP rather than the complete printer output of a
+particular pass.
 
-## 1. cuDNN Frontend Graph 输入
+## 1. cuDNN Frontend Graph Input
 
-cuDNN Frontend 的 logical dimensions 和 packed strides：
+cuDNN Frontend logical dimensions and packed strides are:
 
 ```text
 X:
@@ -33,7 +34,7 @@ CONV_FPROP:
   mode     = CROSS_CORRELATION
 ```
 
-cuDNN 的 stride 使实际内存顺序为：
+These cuDNN strides produce the physical memory order:
 
 ```text
 X: [N,H,W,C]
@@ -41,12 +42,13 @@ W: [K,R,S,C] = [F,H,W,C]
 Y: [N,P,Q,K]
 ```
 
-这里不能把 W 写成 `[R,S,C,K]`。那是另一种 K-contiguous packing，既不符合
-本输入的 stride，也不能直接配合 `linalg.conv_2d_nhwc_fhwc`。
+W must not be represented as `[R,S,C,K]`. That is a different K-contiguous
+packing, does not match the input strides, and cannot be passed directly to
+`linalg.conv_2d_nhwc_fhwc`.
 
-## 2. Import 后的 Tensor/Linalg IR
+## 2. Tensor/Linalg IR After Import
 
-padding 先物化，输出先初始化：
+Padding is materialized first and the output is initialized:
 
 ```mlir
 func.func @conv2d_fwd(
@@ -74,12 +76,13 @@ func.func @conv2d_fwd(
 }
 ```
 
-Importer metadata records that tensor arguments `%x`, `%w` and `%y_init` correspond
-to UIDs 101, 102 and 103. It does not insert a custom `cudnn.conv_fwd` operation.
+Importer metadata records that `%x`, `%w`, and `%y_init` correspond to UIDs
+101, 102, and 103. The importer does not insert a custom `cudnn.conv_fwd`
+operation.
 
-## 3. One-Shot Bufferize 后
+## 3. After One-Shot Bufferize
 
-概念性的 identity-layout 结果如下：
+A conceptual identity-layout result is:
 
 ```mlir
 func.func @conv2d_fwd_bufferized(
@@ -93,7 +96,8 @@ func.func @conv2d_fwd_bufferized(
 }
 ```
 
-`deepforge-workspace-plan` 把 `%padded` 改为 workspace 中的静态 view，例如：
+`deepforge-workspace-plan` rewrites `%padded` as a static workspace view, for
+example:
 
 ```text
 workspace alignment = 64
@@ -101,12 +105,14 @@ padded offset       = 0
 padded bytes        = 1 * 58 * 58 * 64 * 4
 ```
 
-实际 offset 由 planner 按所有临时 buffer 的生命周期和对齐计算，示例中的 0
-只是因为只有一个临时 buffer。最终 kernel 不调用 `malloc`。
+The planner computes real offsets from all temporary-buffer lifetimes and
+alignments. This example uses offset zero only because it has one temporary.
+The final kernel never calls `malloc`.
 
-## 4. Direct Conv 循环
+## 4. Direct Conv Loops
 
-对一个输出元素 `Y[n,oh,ow,k]`，正确的 SIMD 变换是沿 C reduction：
+For one output element `Y[n,oh,ow,k]`, the correct SIMD transform follows the C
+reduction:
 
 ```text
 for r = 0 .. 3:
@@ -120,10 +126,11 @@ sum = horizontal_add(vacc)
 Y[n,oh,ow,k] = sum + scalar_tail
 ```
 
-本例 C=64，所以没有 tail；通用 MVP 仍会生成 `C % VF` 的标量 cleanup。K 是
-标量循环，不能把 `W[k, ...]` 误写成 `W[..., k:k+16]`。
+C is 64 here, so this instance has no tail. The general MVP still emits scalar
+cleanup for `C % VF`. K remains a scalar loop; `W[k, ...]` must not become
+`W[..., k:k+16]`.
 
-概念性 Vector IR：
+Conceptual Vector IR is:
 
 ```mlir
 %vzero = arith.constant dense<0.0> : vector<16xf32>
@@ -132,20 +139,20 @@ Y[n,oh,ow,k] = sum + scalar_tail
 %wv = vector.load %w[%k, %r, %s, %c]
     : memref<64x3x3x64xf32>, vector<16xf32>
 %vacc = vector.fma %xv, %wv, %vzero : vector<16xf32>
-// 实际 IR 在所有 r/s/c block 中传递 %vacc
+// Real IR carries %vacc across all r/s/c blocks.
 %sum = vector.reduction <add>, %vacc : vector<16xf32> into f32
 memref.store %sum, %y[%n, %oh, %ow, %k]
     : memref<1x56x56x64xf32>
 ```
 
-`%sum` 是一个 output scalar，因此使用 scalar `memref.store`；不能把 reduction
-结果当成 vector 存储。
+`%sum` is one output scalar, so the store is scalar. The reduction result must
+not be treated as a vector output.
 
-## 5. LLVM lowering
+## 5. LLVM Lowering
 
-完成 `lower-affine`、`convert-vector-to-llvm`、`convert-scf-to-cf`、
-`convert-index/arithmetic/memref/func/cf-to-llvm` 和 cast reconcile 后，概念性
-LLVM IR 包含：
+After `lower-affine`, `convert-vector-to-llvm`, `convert-scf-to-cf`, the
+index/arith/memref/func/cf-to-LLVM conversions, and cast reconciliation,
+conceptual LLVM IR contains:
 
 ```llvm
 %xv = load <16 x float>, ptr %x_ptr, align 4
@@ -156,11 +163,11 @@ LLVM IR 包含：
 store float %sum, ptr %y_ptr, align 4
 ```
 
-在启用 `+avx512f,+fma` 的 object 变体中，LLVM backend 可以选择 zmm FMA；
-DeepForge 不依赖某个 intrinsic 文本名称。scalar/AVX2 变体保持相同的内部
-参数和输出语义。
+With `+avx512f,+fma`, the LLVM backend may select a zmm FMA for the object
+variant. DeepForge does not depend on a particular intrinsic name. Scalar and
+AVX2 variants preserve the same internal arguments and output semantics.
 
-## 6. Runtime variant-pack
+## 6. Runtime Variant Pack
 
 ```cpp
 std::unordered_map<int64_t, void *> variant_pack = {
@@ -173,13 +180,14 @@ deepforge::runtime::FrontendHandle handle = nullptr;
 auto status = executable.execute(handle, variant_pack, workspace_host);
 ```
 
-Runtime 忽略兼容用 handle，按编译 metadata 查找三个 UID，检查非空、范围和
-不重叠，然后按 CPUID 选择 AVX-512、AVX2 或 scalar 内部函数。它不会改变
-variant-pack 中的地址，也不会要求调用者提供另一个 descriptor。
+The runtime ignores the compatibility handle, resolves three UIDs from compile
+metadata, checks null pointers, ranges, and non-overlap, then selects an
+AVX-512, AVX2, or scalar internal function using CPUID. It neither changes
+addresses in the variant pack nor requires another descriptor from the caller.
 
-## 7. 正确性检查
+## 7. Correctness Check
 
-reference 使用同样的 f32 输入，以 f64 累加：
+The reference uses the same f32 input and accumulates in f64:
 
 ```text
 for n, oh, ow, k:
@@ -188,16 +196,18 @@ for n, oh, ow, k:
     ref += (f64)X[n,oh+r,ow+s,c] * (f64)W[k,r,s,c]
 ```
 
-scalar、AVX2 和 AVX-512 输出均检查：
+Scalar, AVX2, and AVX-512 outputs all satisfy:
 
 ```text
 abs(actual - ref) <= 1e-4 + 1e-3 * abs(ref)
 ```
 
-此外，fixture 测试确认：
+Fixture tests also verify:
 
-- JSON 与 UBJSON 导入得到相同 tensor/node metadata；
-- `[K,R,S,C]` filter indexing 正确；
-- C tail、padding 边界和 output shape 正确；
-- 最终 MLIR 没有 Tensor/Linalg/Affine/SCF/MemRef/Arith/Index/Func/CF 残留；
-- 不支持 layout 或 node 时编译失败，而不是生成可能错误的代码。
+- JSON and UBJSON import to identical tensor and node metadata;
+- `[K,R,S,C]` filter indexing is correct;
+- C tails, padding boundaries, and output shapes are correct;
+- final MLIR contains no Tensor, Linalg, Affine, SCF, MemRef, Arith, Index,
+  Func, or CF residue;
+- unsupported layouts or nodes fail compilation instead of producing
+  potentially incorrect code.

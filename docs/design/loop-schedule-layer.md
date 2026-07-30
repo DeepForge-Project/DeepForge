@@ -1,5 +1,7 @@
 # Loop 与 Schedule 层设计
 
+[English](loop-schedule-layer.en.md)
+
 ## 1. 职责
 
 本层把已经 bufferize 的 Linalg Conv2D 变成显式 SCF 循环，并为 SIMD 变体应用
@@ -102,6 +104,19 @@ unroll。C tail 由 SIMD lowering 生成；N/OH/OW/K 使用精确静态 upper bo
 后续候选 tiling/unroll 必须逐项通过正确性矩阵和绑核 benchmark。cost model 可以
 使用 cache size、cache line 和向量寄存器压力估算工作集，但不能生成 L1/L2/L3
 address space，也不能把数据“放入”某级 cache。软件 prefetch 当前关闭。
+
+### 6.1 Cost model 的归属和状态
+
+cost model 归属于编译期的 Loop/Schedule 层，因为它的输出是 schedule 决策：tile
+size、loop order 和可选 unroll factor。Target 配置只提供 cache capacity、cache
+line、vector width、register budget 等硬件事实，benchmark 用于验证或校准候选评分。
+
+MVP **尚未启用实际 cost model**；当前 schedule 固定且不做外层 tiling。运行时的
+CPUID/XGETBV 分发只筛选并选择可安全执行的 ISA 变体，是 capability check，不是
+性能 cost model；Machine Dialect 也不拥有这一决策。
+
+未来实现后，模型必须输出显式、可检查的 schedule；没有合法候选时回退到当前未
+分块 schedule。它不能改变 Graph 语义、公开 ABI、workspace ownership 或数值契约。
 
 ## 7. 依赖与合法性
 

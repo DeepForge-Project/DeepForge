@@ -1,5 +1,7 @@
 # CPU 性能基线
 
+[English](benchmark-baseline.en.md)
+
 ## 1. 复测方法
 
 `deepforge-benchmark` 生成三个满足 MVP 契约的 canonical Conv2D，编译 scalar、AVX2

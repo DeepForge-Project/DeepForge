@@ -1,5 +1,7 @@
 # Linalg 层设计
 
+[English](linalg-layer.en.md)
+
 ## 1. 职责
 
 Linalg 层把 Tensor 层的 Conv2D 表达为可分析、可变换的结构化运算。MVP 保留

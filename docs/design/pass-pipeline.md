@@ -1,5 +1,7 @@
 # MVP Pass Pipeline 设计
 
+[English](pass-pipeline.en.md)
+
 ## 1. 总览
 
 本 pipeline 把“输入协议解析”“结构化变换”“bufferization”“目标代码转换”
@@ -64,6 +66,10 @@ keep the named Conv op unchanged until One-Shot Bufferize
 可审计的 direct-convolution baseline；外层 N/OH/OW/K tiling 进入 Optimize 阶段，
 必须由 benchmark 证明收益。R/S/C 是 reduction 维度，不能把 C tile 当作 K
 vector lane。
+
+未来 cost model 在 Optimize 阶段的 Loop/Schedule 部分执行：输入 target 硬件事实，
+输出显式 schedule。当前 Stage A 不运行 cost model，importer 和 runtime 也不承担该
+职责。
 
 `deepforge-lower-direct-conv` 的 MVP 输入必须仍是 named
 `linalg.conv_2d_nhwc_fhwc`；若未来开启 `linalg-generalize-named-ops`，必须先

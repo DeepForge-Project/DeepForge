@@ -1,5 +1,7 @@
 # DeepForge 开发方案
 
+[English](development-plan.en.md)
+
 ## 1. 目标和基线
 
 本方案把当前设计文档转成可执行的开发顺序。它针对的是 MVP，不扩大支持范围。

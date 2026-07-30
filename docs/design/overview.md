@@ -1,5 +1,7 @@
 # DeepForge 总体架构设计
 
+[English](overview.en.md)
+
 ## 1. 项目定位
 
 DeepForge 将固定版本 cuDNN Frontend 的序列化 Graph 编译为 CPU object code。
@@ -154,6 +156,11 @@ host x86-64 triple + avx512f,fma
 vector width 分别为 1、8、16。`.dfo` 记录精确 target triple 和 required features，
 loader 拒绝与主机 triple 不一致的原生 artifact。cache profile、软件 prefetch 和
 外层 tiling 均留到 benchmark 驱动的 Optimize 阶段。
+
+MVP 当前没有实际运行的性能 cost model。未来 cost model 归属于 Loop/Schedule 层，
+用于选择 tile size、loop order 和 unroll factor；target 配置提供硬件事实，benchmark
+验证选择。runtime 的 CPUID/XGETBV 分发只做 ISA capability/safety 检查，不是 cost
+model。
 
 ## 7. Ownership 和 alias
 

@@ -53,20 +53,9 @@ AVX2 和 AVX-512 三个代码变体。Machine Dialect、AMX、bf16、多线程�
 binutils 或 parser 后，需要重新执行 P0 的 configure、MLIR smoke test 和
 端到端测试。`LLVM/MLIR` 的版本检查是硬失败，不允许静默使用其他版本。
 
-本机版本以当前 shell 的可执行文件解析结果为准，而不是以系统包管理器中可能
-残留的旧版本为准。当前解析路径为：
-
-```text
-cmake   -> /softhome/yanghesong/.local/bin/cmake  (4.4.0)
-ninja   -> /usr/bin/ninja                         (1.10.1)
-c++     -> /usr/bin/c++                           (GCC 13.4.0)
-ld      -> /usr/bin/ld                            (binutils 2.38)
-python3 -> /usr/bin/python3                       (3.10.12)
-git     -> /usr/bin/git                           (2.34.1)
-```
-
-在新环境中先执行下面的探测命令；若 `cmake` 低于 `3.27`，应先调整 `PATH` 或
-安装满足最低版本的 CMake：
+CMake 从 `PATH` 查找构建工具，DeepForge 不记录可执行文件的具体位置。在新环境
+中先执行下面的探测命令；若 `cmake` 低于 `3.27`，应先调整 `PATH` 或安装满足
+最低版本的 CMake：
 
 ```bash
 command -v cmake ninja c++ ld python3 git
@@ -78,14 +67,10 @@ python3 --version
 git --version
 ```
 
-本工作区当前已安装/下载的路径如下：
-
-| 内容 | 路径 |
-|---|---|
-| LLVM/MLIR 源码 | `/local_data/yanghesong/llvm-project` |
-| LLVM/MLIR 安装前缀 | `/local_data/yanghesong/opt/llvm-22.1.8` |
-| cuDNN Frontend 源码 | `/local_data/yanghesong/cudnn-frontend` |
-| Frontend vendored JSON header | `/local_data/yanghesong/cudnn-frontend/include/cudnn_frontend/thirdparty/nlohmann/json.hpp` |
+CMake 不写死依赖位置。MLIR 通过 `find_package(MLIR CONFIG)` 发现，cuDNN
+Frontend header 通过 `find_path` 发现。配置时将 LLVM/MLIR 安装前缀和 cuDNN
+Frontend checkout 加入 `CMAKE_PREFIX_PATH`。非标准目录结构可以显式设置
+`MLIR_DIR` 或 `DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR`。
 
 对 DeepForge 当前 CPU MVP，cuDNN Frontend 的依赖边界是“下载源码、读取协议和
 复用 vendored JSON header”，不执行 Frontend 自身的 CMake 构建，也不链接 GPU
@@ -93,10 +78,9 @@ backend。Frontend 仓库的 C++ samples/tests 若要单独编译，仍需要 CU
 其总头文件还会包含 `cudnn.h`。因此下载源码足够支持当前 importer/reference
 工作，但不等于已经安装了可编译或可执行的 CUDA/cuDNN backend。
 
-当前系统没有可用的 `nvcc`、CUDA development headers 或 cuDNN development
-package；`/usr/include/linux/cuda.h` 属于 Linux UAPI header，不计作 CUDA
-Toolkit。官方 `cudnnHandle_t`/`cudnn_frontend::error_t` exact types 以及 GPU
-execution 不属于当前 MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
+当前构建不会查找 CUDA。官方 `cudnnHandle_t`/`cudnn_frontend::error_t` exact
+types、GPU execution 以及与 Frontend `Graph` object 的二进制互换不属于当前
+CPU-only MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
 
 ## 架构
 
@@ -149,59 +133,56 @@ DeepForge 逻辑。IR 主干复用上游 MLIR 方言，不引入临时 `cudnn.*`
 
 ## 构建
 
-本工作区已将 `llvmorg-22.1.8` 构建并安装到
-`/local_data/yanghesong/opt/llvm-22.1.8`。其他环境应把前缀改成可写目录，
-然后使用该安装目录配置：
+请自行选择依赖的源码、构建和安装目录。下面使用的变量不带项目默认值，必须由
+当前环境显式设置：
 
 ```bash
-export DEEPFORGE_SOURCE="${DEEPFORGE_SOURCE:-/local_data/yanghesong/DeepForge}"
-export DEEPFORGE_DEPS_ROOT="${DEEPFORGE_DEPS_ROOT:-/local_data/yanghesong}"
-export DEEPFORGE_LLVM_PREFIX="${DEEPFORGE_LLVM_PREFIX:-$DEEPFORGE_DEPS_ROOT/opt/llvm-22.1.8}"
-export DEEPFORGE_CUDNN_FRONTEND_ROOT="${DEEPFORGE_CUDNN_FRONTEND_ROOT:-$DEEPFORGE_DEPS_ROOT/cudnn-frontend}"
+: "${LLVM_SOURCE_DIR:?请设置 LLVM_SOURCE_DIR}"
+: "${LLVM_BUILD_DIR:?请设置 LLVM_BUILD_DIR}"
+: "${LLVM_INSTALL_PREFIX:?请设置 LLVM_INSTALL_PREFIX}"
+: "${CUDNN_FRONTEND_SOURCE_DIR:?请设置 CUDNN_FRONTEND_SOURCE_DIR}"
 
 # cuDNN Frontend serialization 参考源码（当前不构建、不安装 CUDA）
 git clone --branch v1.24.0 --depth 1 \
   https://github.com/NVIDIA/cudnn-frontend.git \
-  "$DEEPFORGE_DEPS_ROOT/cudnn-frontend"
+  "$CUDNN_FRONTEND_SOURCE_DIR"
 
 # LLVM/MLIR（只需构建一次）
 git clone --branch llvmorg-22.1.8 --depth 1 \
   https://github.com/llvm/llvm-project.git \
-  "$DEEPFORGE_DEPS_ROOT/llvm-project"
-cmake -S "$DEEPFORGE_DEPS_ROOT/llvm-project/llvm" \
-  -B "$DEEPFORGE_DEPS_ROOT/llvm-project/build" -G Ninja \
+  "$LLVM_SOURCE_DIR"
+cmake -S "$LLVM_SOURCE_DIR/llvm" -B "$LLVM_BUILD_DIR" -G Ninja \
   -DLLVM_ENABLE_PROJECTS=mlir \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_BUILD_TESTS=OFF \
   -DMLIR_INCLUDE_TESTS=OFF \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$DEEPFORGE_LLVM_PREFIX"
-cmake --build "$DEEPFORGE_DEPS_ROOT/llvm-project/build" \
-  --target install -j96
+  -DCMAKE_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX"
+cmake --build "$LLVM_BUILD_DIR" --target install -j
 
-# DeepForge
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build" -G Ninja \
-  -DMLIR_DIR="$DEEPFORGE_LLVM_PREFIX/lib/cmake/mlir" \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT" \
+# 在 DeepForge 仓库根目录构建
+cmake -S . -B build -G Ninja \
+  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
   -DDEEPFORGE_BUILD_TESTS=ON \
   -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build "$DEEPFORGE_SOURCE/build"
-ctest --test-dir "$DEEPFORGE_SOURCE/build" --output-on-failure
+cmake --build build
+ctest --test-dir build --output-on-failure
 
 # 只构建/测试 P1 importer（不查找 MLIR，也不需要 CUDA/cuDNN backend）
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build-p1" -G Ninja \
+cmake -S . -B build-p1 -G Ninja \
+  -DCMAKE_PREFIX_PATH="$CUDNN_FRONTEND_SOURCE_DIR" \
   -DDEEPFORGE_ENABLE_MLIR=OFF \
   -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=OFF \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT"
-cmake --build "$DEEPFORGE_SOURCE/build-p1"
-ctest --test-dir "$DEEPFORGE_SOURCE/build-p1" --output-on-failure
+  -DDEEPFORGE_BUILD_TOOLS=OFF
+cmake --build build-p1
+ctest --test-dir build-p1 --output-on-failure
 
 # P0 smoke test
-"$DEEPFORGE_LLVM_PREFIX/bin/llvm-config" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/mlir-opt" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/mlir-translate" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/llc" --version
+export PATH="${LLVM_INSTALL_PREFIX}/bin:${PATH}"
+llvm-config --version
+mlir-opt --version
+mlir-translate --version
+llc --version
 ```
 
 CMake 会校验 `LLVM_PACKAGE_VERSION`、cuDNN Frontend 和 vendored nlohmann/json；

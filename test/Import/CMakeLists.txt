@@ -5,7 +5,7 @@ add_executable(deepforge_importer_test
 target_link_libraries(deepforge_importer_test PRIVATE DeepForge::Import)
 target_include_directories(deepforge_importer_test SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)

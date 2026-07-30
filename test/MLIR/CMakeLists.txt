@@ -5,7 +5,7 @@ add_executable(deepforge_mlir_import_test
 target_link_libraries(deepforge_mlir_import_test PRIVATE DeepForge::MLIRImport)
 target_include_directories(deepforge_mlir_import_test SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)

@@ -5,7 +5,7 @@ add_executable(deepforge_bufferization_test
 target_link_libraries(deepforge_bufferization_test PRIVATE DeepForge::Transforms)
 target_include_directories(deepforge_bufferization_test SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)

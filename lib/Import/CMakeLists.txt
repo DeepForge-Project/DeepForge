@@ -1,13 +1,19 @@
-if(NOT DEEPFORGE_CUDNN_FRONTEND_ROOT)
+find_path(DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR
+    NAMES cudnn_frontend_version.h
+    PATH_SUFFIXES include
+    DOC "Directory containing pinned cudnn-frontend v1.24.0 headers"
+)
+
+if(NOT DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR)
     message(FATAL_ERROR
-        "DEEPFORGE_CUDNN_FRONTEND_ROOT is required for the importer. "
-        "Set it to the pinned cudnn-frontend v1.24.0 checkout.")
+        "Cannot find cudnn-frontend headers. Add the v1.24.0 checkout to "
+        "CMAKE_PREFIX_PATH, or set DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
 
 set(DEEPFORGE_NLOHMANN_JSON_HEADER
-    "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include/cudnn_frontend/thirdparty/nlohmann/json.hpp")
+    "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend/thirdparty/nlohmann/json.hpp")
 set(DEEPFORGE_CUDNN_FRONTEND_VERSION_HEADER
-    "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include/cudnn_frontend_version.h")
+    "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend_version.h")
 if(NOT EXISTS "${DEEPFORGE_NLOHMANN_JSON_HEADER}")
     message(FATAL_ERROR
         "Cannot find the pinned nlohmann/json header at "
@@ -51,7 +57,7 @@ if(NOT DEEPFORGE_JSON_MAJOR_LINE OR
         "DeepForge requires the cudnn-frontend vendored nlohmann/json 3.11.3 header")
 endif()
 
-message(STATUS "Using cuDNN Frontend source: ${DEEPFORGE_CUDNN_FRONTEND_ROOT} (v1.24.0)")
+message(STATUS "Using cuDNN Frontend headers: ${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR} (v1.24.0)")
 message(STATUS "Using vendored nlohmann/json: 3.11.3")
 
 add_library(deepforge_import STATIC
@@ -66,7 +72,7 @@ target_include_directories(deepforge_import
 )
 target_include_directories(deepforge_import SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)

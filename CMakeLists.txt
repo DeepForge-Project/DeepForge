@@ -20,10 +20,6 @@ option(DEEPFORGE_BUILD_TOOLS "Build DeepForge command-line tools" ON)
 option(DEEPFORGE_BUILD_IMPORTER "Build the CPU-only serialized Graph importer" ON)
 option(DEEPFORGE_ENABLE_MLIR "Enable the MLIR-dependent compiler components" ON)
 
-set(DEEPFORGE_CUDNN_FRONTEND_ROOT
-    "$ENV{DEEPFORGE_CUDNN_FRONTEND_ROOT}"
-    CACHE PATH "Root of the pinned cudnn-frontend source checkout")
-
 # ---- Find MLIR (optional for the importer-only build) ----
 if(DEEPFORGE_ENABLE_MLIR)
     find_package(MLIR REQUIRED CONFIG)

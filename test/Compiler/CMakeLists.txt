@@ -23,7 +23,7 @@ target_link_libraries(deepforge_compiler_test
 )
 target_include_directories(deepforge_compiler_test SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)
@@ -55,7 +55,7 @@ target_link_libraries(deepforge_artifact_test
 )
 target_include_directories(deepforge_artifact_test SYSTEM
     PRIVATE
-        "${DEEPFORGE_CUDNN_FRONTEND_ROOT}/include"
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
 )
 
 if(MSVC)

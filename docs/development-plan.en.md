@@ -98,8 +98,7 @@ of tracking rolling revisions during implementation.
 
 **Deliverables:**
 
-- a local prefix such as `$DEEPFORGE_LLVM_PREFIX`; this workspace uses
-  `/local_data/yanghesong/opt/llvm-22.1.8`;
+- a caller-selected local install prefix discovered through `CMAKE_PREFIX_PATH`;
 - successful CMake configuration logs and a version manifest;
 - the [external toolchain table](../README.md#external-toolchain-versions),
   recording LLVM tag/commit, C++ compiler, parser, and fixture versions.

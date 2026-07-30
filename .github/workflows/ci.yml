@@ -33,7 +33,7 @@ jobs:
             -DDEEPFORGE_ENABLE_MLIR=OFF \
             -DDEEPFORGE_BUILD_TOOLS=OFF \
             -DDEEPFORGE_BUILD_TESTS=ON \
-            -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$GITHUB_WORKSPACE/.deps/cudnn-frontend"
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/cudnn-frontend"
       - name: Build and test importer
         run: |
           cmake --build build-importer -j2
@@ -75,8 +75,7 @@ jobs:
       - name: Configure DeepForge
         run: |
           cmake -S . -B build -G Ninja \
-            -DMLIR_DIR="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION}/lib/cmake/mlir" \
-            -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION};$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
             -DDEEPFORGE_BUILD_TESTS=ON \
             -DDEEPFORGE_BUILD_TOOLS=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -140,8 +139,7 @@ jobs:
       - name: Configure ${{ matrix.name }}
         run: |
           cmake -S . -B "build-${{ matrix.name }}" -G Ninja \
-            -DMLIR_DIR="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION}/lib/cmake/mlir" \
-            -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION};$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
             -DDEEPFORGE_BUILD_TESTS=ON \
             -DDEEPFORGE_BUILD_TOOLS=OFF \
             -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \

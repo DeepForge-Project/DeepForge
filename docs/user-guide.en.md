@@ -43,12 +43,12 @@ The pinned and verified dependencies are:
 | C++ compiler | C++20; GCC `13.4.0` is verified |
 | Ninja | `1.10.1` is verified |
 
-For the existing workspace, set:
+Select dependency locations for the current environment. DeepForge does not
+provide machine-specific defaults:
 
 ```bash
-export DEEPFORGE_SOURCE=/local_data/yanghesong/DeepForge
-export DEEPFORGE_LLVM_PREFIX=/local_data/yanghesong/opt/llvm-22.1.8
-export DEEPFORGE_CUDNN_FRONTEND_ROOT=/local_data/yanghesong/cudnn-frontend
+: "${LLVM_INSTALL_PREFIX:?set LLVM_INSTALL_PREFIX}"
+: "${CUDNN_FRONTEND_SOURCE_DIR:?set CUDNN_FRONTEND_SOURCE_DIR}"
 ```
 
 In a new environment, only the cuDNN Frontend source checkout is needed; it
@@ -57,34 +57,33 @@ does not need to be built:
 ```bash
 git clone --branch v1.24.0 --depth 1 \
   https://github.com/NVIDIA/cudnn-frontend.git \
-  "$DEEPFORGE_CUDNN_FRONTEND_ROOT"
+  "$CUDNN_FRONTEND_SOURCE_DIR"
 ```
 
 See the [README build section](../README.md#build) for the complete LLVM/MLIR
-build commands. CMake rejects MLIR versions other than `22.1.8` and mismatched
-Frontend or JSON headers.
+build commands. CMake finds both dependencies through `CMAKE_PREFIX_PATH`. It
+rejects MLIR versions other than `22.1.8` and mismatched Frontend or JSON
+headers.
 
 ## 3. Build and Install
 
 Build the complete compiler, tools, benchmark, and tests:
 
 ```bash
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build-full" -G Ninja \
+cmake -S . -B build-full -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMLIR_DIR="$DEEPFORGE_LLVM_PREFIX/lib/cmake/mlir" \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT" \
+  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
   -DDEEPFORGE_BUILD_TESTS=ON \
   -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build "$DEEPFORGE_SOURCE/build-full" -j
-ctest --test-dir "$DEEPFORGE_SOURCE/build-full" --output-on-failure
+cmake --build build-full -j
+ctest --test-dir build-full --output-on-failure
 ```
 
 Optional installation:
 
 ```bash
-cmake --install "$DEEPFORGE_SOURCE/build-full" \
-  --prefix "$DEEPFORGE_SOURCE/install"
-export PATH="$DEEPFORGE_SOURCE/install/bin:$PATH"
+cmake --install build-full --prefix install
+export PATH="$PWD/install/bin:$PATH"
 ```
 
 The current install rules publish only `deepforge-compile` and
@@ -103,7 +102,7 @@ DeepForge does not define a private JSON schema. Use a repository fixture to
 verify an installation:
 
 ```bash
-cp "$DEEPFORGE_SOURCE/test/fixtures/conv2d_f32_c17.json" /tmp/graph.json
+cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
 Logical dimensions and packed strides must be:
@@ -131,7 +130,7 @@ CPU MVP.
 Run from the build tree:
 
 ```bash
-DEEPFORGE_COMPILE="$DEEPFORGE_SOURCE/build-full/tools/deepforge-compile"
+DEEPFORGE_COMPILE=build-full/tools/deepforge-compile
 
 "$DEEPFORGE_COMPILE" /tmp/graph.json \
   --input-format=auto \
@@ -284,7 +283,7 @@ Runtime contract:
 ## 9. Benchmark
 
 ```bash
-DEEPFORGE_BENCHMARK="$DEEPFORGE_SOURCE/build-full/tools/deepforge-benchmark"
+DEEPFORGE_BENCHMARK=build-full/tools/deepforge-benchmark
 "$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
 ```
 
@@ -297,8 +296,8 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 
 | Diagnostic | Action |
 |---|---|
-| CMake reports an LLVM version mismatch | Point `MLIR_DIR` at the `22.1.8` prefix |
-| Frontend or JSON header is missing | Verify that `DEEPFORGE_CUDNN_FRONTEND_ROOT` is a `v1.24.0` checkout |
+| CMake reports an LLVM version mismatch | Put the `22.1.8` prefix first in `CMAKE_PREFIX_PATH`, or set `MLIR_DIR` explicitly |
+| Frontend or JSON header is missing | Add the `v1.24.0` checkout to `CMAKE_PREFIX_PATH`, or set `DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR` explicitly |
 | `DFE_SCHEMA_VERSION_MISMATCH` | Use Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | Re-serialize with cuDNN Frontend `v1.24.0` |
 | `DFE_UNSUPPORTED_NODE` | Reduce the Graph to one `CONV_FPROP` |

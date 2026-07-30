@@ -64,18 +64,8 @@ the configuration smoke tests and the full end-to-end test suite to be rerun.
 The LLVM/MLIR version check fails hard rather than silently accepting another
 version.
 
-The current shell resolves the verified tools as follows:
-
-```text
-cmake   -> /softhome/yanghesong/.local/bin/cmake  (4.4.0)
-ninja   -> /usr/bin/ninja                         (1.10.1)
-c++     -> /usr/bin/c++                           (GCC 13.4.0)
-ld      -> /usr/bin/ld                            (binutils 2.38)
-python3 -> /usr/bin/python3                       (3.10.12)
-git     -> /usr/bin/git                           (2.34.1)
-```
-
-Probe a new environment before configuring the project:
+CMake resolves build tools from `PATH`; DeepForge does not encode executable
+locations. Probe a new environment before configuring the project:
 
 ```bash
 command -v cmake ninja c++ ld python3 git
@@ -90,16 +80,13 @@ git --version
 If CMake is older than `3.27`, update `PATH` or install a supported CMake
 before configuring DeepForge.
 
-## Dependency Boundary
+## Dependency Discovery
 
-The current workspace uses these paths:
-
-| Content | Path |
-|---|---|
-| LLVM/MLIR source | `/local_data/yanghesong/llvm-project` |
-| LLVM/MLIR install prefix | `/local_data/yanghesong/opt/llvm-22.1.8` |
-| cuDNN Frontend source | `/local_data/yanghesong/cudnn-frontend` |
-| Frontend-vendored JSON header | `/local_data/yanghesong/cudnn-frontend/include/cudnn_frontend/thirdparty/nlohmann/json.hpp` |
+DeepForge does not encode dependency locations. CMake discovers MLIR with
+`find_package(MLIR CONFIG)` and the cuDNN Frontend headers with `find_path`.
+Add the LLVM/MLIR install prefix and cuDNN Frontend checkout to
+`CMAKE_PREFIX_PATH`. For nonstandard layouts, `MLIR_DIR` and
+`DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR` are explicit overrides.
 
 For the CPU MVP, downloading the cuDNN Frontend source is sufficient. DeepForge
 reads the serializer implementation and reuses its vendored JSON header; it
@@ -107,11 +94,9 @@ does not run the Frontend CMake build or link the GPU backend. Frontend samples
 and aggregate headers may require the CUDA Toolkit and `cudnn.h`, but those are
 not needed to build or run DeepForge.
 
-The system currently has no usable `nvcc`, CUDA development headers, or cuDNN
-development package. `/usr/include/linux/cuda.h` is a Linux UAPI header and is
-not a CUDA Toolkit installation. Exact `cudnnHandle_t` and
+CUDA discovery is intentionally absent. Exact `cudnnHandle_t` and
 `cudnn_frontend::error_t` types, GPU execution, and binary interchangeability
-with a Frontend `Graph` object are intentionally outside this CPU-only build.
+with a Frontend `Graph` object are outside this CPU-only build.
 
 ## Supported Input
 
@@ -179,67 +164,65 @@ Dialect.
 
 ## Build
 
-The current workspace has `llvmorg-22.1.8` installed under
-`/local_data/yanghesong/opt/llvm-22.1.8`. Use a writable dependency root on
-other systems.
+Choose writable source, build, and install directories for the dependencies.
+The variables used below intentionally have no project-defined defaults.
 
 ```bash
-export DEEPFORGE_SOURCE="${DEEPFORGE_SOURCE:-/local_data/yanghesong/DeepForge}"
-export DEEPFORGE_DEPS_ROOT="${DEEPFORGE_DEPS_ROOT:-/local_data/yanghesong}"
-export DEEPFORGE_LLVM_PREFIX="${DEEPFORGE_LLVM_PREFIX:-$DEEPFORGE_DEPS_ROOT/opt/llvm-22.1.8}"
-export DEEPFORGE_CUDNN_FRONTEND_ROOT="${DEEPFORGE_CUDNN_FRONTEND_ROOT:-$DEEPFORGE_DEPS_ROOT/cudnn-frontend}"
+# Set these variables to locations selected for your environment.
+: "${LLVM_SOURCE_DIR:?set LLVM_SOURCE_DIR}"
+: "${LLVM_BUILD_DIR:?set LLVM_BUILD_DIR}"
+: "${LLVM_INSTALL_PREFIX:?set LLVM_INSTALL_PREFIX}"
+: "${CUDNN_FRONTEND_SOURCE_DIR:?set CUDNN_FRONTEND_SOURCE_DIR}"
 
 # Serialization reference source only; no CUDA installation or build step.
 git clone --branch v1.24.0 --depth 1 \
   https://github.com/NVIDIA/cudnn-frontend.git \
-  "$DEEPFORGE_CUDNN_FRONTEND_ROOT"
+  "$CUDNN_FRONTEND_SOURCE_DIR"
 
 # Build and install LLVM/MLIR once.
 git clone --branch llvmorg-22.1.8 --depth 1 \
   https://github.com/llvm/llvm-project.git \
-  "$DEEPFORGE_DEPS_ROOT/llvm-project"
-cmake -S "$DEEPFORGE_DEPS_ROOT/llvm-project/llvm" \
-  -B "$DEEPFORGE_DEPS_ROOT/llvm-project/build" -G Ninja \
+  "$LLVM_SOURCE_DIR"
+cmake -S "$LLVM_SOURCE_DIR/llvm" -B "$LLVM_BUILD_DIR" -G Ninja \
   -DLLVM_ENABLE_PROJECTS=mlir \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_BUILD_TESTS=OFF \
   -DMLIR_INCLUDE_TESTS=OFF \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$DEEPFORGE_LLVM_PREFIX"
-cmake --build "$DEEPFORGE_DEPS_ROOT/llvm-project/build" \
-  --target install -j
+  -DCMAKE_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX"
+cmake --build "$LLVM_BUILD_DIR" --target install -j
 
-# Build DeepForge.
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build" -G Ninja \
+# Build DeepForge from the repository root.
+cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMLIR_DIR="$DEEPFORGE_LLVM_PREFIX/lib/cmake/mlir" \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT" \
+  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
   -DDEEPFORGE_BUILD_TESTS=ON \
   -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build "$DEEPFORGE_SOURCE/build" -j
-ctest --test-dir "$DEEPFORGE_SOURCE/build" --output-on-failure
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
 Build only the CPU importer without finding MLIR or any CUDA/cuDNN backend:
 
 ```bash
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build-p1" -G Ninja \
+cmake -S . -B build-p1 -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$CUDNN_FRONTEND_SOURCE_DIR" \
   -DDEEPFORGE_ENABLE_MLIR=OFF \
   -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=OFF \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT"
-cmake --build "$DEEPFORGE_SOURCE/build-p1" -j
-ctest --test-dir "$DEEPFORGE_SOURCE/build-p1" --output-on-failure
+  -DDEEPFORGE_BUILD_TOOLS=OFF
+cmake --build build-p1 -j
+ctest --test-dir build-p1 --output-on-failure
 ```
 
 Verify the pinned LLVM/MLIR tools:
 
 ```bash
-"$DEEPFORGE_LLVM_PREFIX/bin/llvm-config" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/mlir-opt" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/mlir-translate" --version
-"$DEEPFORGE_LLVM_PREFIX/bin/llc" --version
+export PATH="${LLVM_INSTALL_PREFIX}/bin:${PATH}"
+llvm-config --version
+mlir-opt --version
+mlir-translate --version
+llc --version
 ```
 
 CMake validates LLVM/MLIR `22.1.8`, cuDNN Frontend `1.24.0`, and the vendored
@@ -248,8 +231,7 @@ nlohmann/json `3.11.3` header. A mismatch is a configuration error.
 Optional CLI installation:
 
 ```bash
-cmake --install "$DEEPFORGE_SOURCE/build" \
-  --prefix "$DEEPFORGE_SOURCE/install"
+cmake --install build --prefix install
 ```
 
 The current install rules publish `deepforge-compile` and

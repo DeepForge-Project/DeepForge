@@ -85,8 +85,7 @@ P1 的 parser 单元测试和 P0 的工具链安装可以并行准备，但任�
 
 **产物**：
 
-- 本地安装前缀，例如 `$DEEPFORGE_LLVM_PREFIX`；当前工作区使用
-  `/local_data/yanghesong/opt/llvm-22.1.8`；
+- 调用者选择的本地安装前缀，通过 `CMAKE_PREFIX_PATH` 交给 CMake 发现；
 - CMake configure 成功日志和版本清单；
 - 中文 README 的[外部工具链版本表](../README.zh-CN.md#外部工具链版本)，记录 LLVM commit/tag、
   C++ 编译器、parser 和 fixture 版本。

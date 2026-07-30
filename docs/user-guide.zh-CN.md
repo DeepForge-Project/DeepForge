@@ -40,12 +40,11 @@ CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-front
 | C++ compiler | 支持 C++20；已验证 GCC `13.4.0` |
 | Ninja | 已验证 `1.10.1` |
 
-已有本工作区依赖时可直接设置：
+请为当前环境自行选择依赖位置；DeepForge 不提供与具体机器绑定的默认值：
 
 ```bash
-export DEEPFORGE_SOURCE=/local_data/yanghesong/DeepForge
-export DEEPFORGE_LLVM_PREFIX=/local_data/yanghesong/opt/llvm-22.1.8
-export DEEPFORGE_CUDNN_FRONTEND_ROOT=/local_data/yanghesong/cudnn-frontend
+: "${LLVM_INSTALL_PREFIX:?请设置 LLVM_INSTALL_PREFIX}"
+: "${CUDNN_FRONTEND_SOURCE_DIR:?请设置 CUDNN_FRONTEND_SOURCE_DIR}"
 ```
 
 新环境只需下载 cuDNN Frontend 源码，不需要构建它：
@@ -53,33 +52,32 @@ export DEEPFORGE_CUDNN_FRONTEND_ROOT=/local_data/yanghesong/cudnn-frontend
 ```bash
 git clone --branch v1.24.0 --depth 1 \
   https://github.com/NVIDIA/cudnn-frontend.git \
-  "$DEEPFORGE_CUDNN_FRONTEND_ROOT"
+  "$CUDNN_FRONTEND_SOURCE_DIR"
 ```
 
-LLVM/MLIR 的完整构建命令见 [中文 README](../README.zh-CN.md#构建)。CMake 会拒绝非
-`22.1.8` 的 MLIR 和版本不匹配的 Frontend/JSON header。
+LLVM/MLIR 的完整构建命令见 [中文 README](../README.zh-CN.md#构建)。CMake 通过
+`CMAKE_PREFIX_PATH` 发现两个依赖，并拒绝非 `22.1.8` 的 MLIR 和版本不匹配的
+Frontend/JSON header。
 
 ## 3. 构建和安装
 
 构建完整编译器、CLI、benchmark 和测试：
 
 ```bash
-cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build-full" -G Ninja \
+cmake -S . -B build-full -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMLIR_DIR="$DEEPFORGE_LLVM_PREFIX/lib/cmake/mlir" \
-  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT" \
+  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
   -DDEEPFORGE_BUILD_TESTS=ON \
   -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build "$DEEPFORGE_SOURCE/build-full" -j
-ctest --test-dir "$DEEPFORGE_SOURCE/build-full" --output-on-failure
+cmake --build build-full -j
+ctest --test-dir build-full --output-on-failure
 ```
 
 可选安装：
 
 ```bash
-cmake --install "$DEEPFORGE_SOURCE/build-full" \
-  --prefix "$DEEPFORGE_SOURCE/install"
-export PATH="$DEEPFORGE_SOURCE/install/bin:$PATH"
+cmake --install build-full --prefix install
+export PATH="$PWD/install/bin:$PATH"
 ```
 
 当前安装规则只发布 `deepforge-compile` 和 `deepforge-benchmark`。库 header、
@@ -96,7 +94,7 @@ CMake target 使用。
 DeepForge 不定义私有 JSON schema。可以先用仓库 fixture 验证安装：
 
 ```bash
-cp "$DEEPFORGE_SOURCE/test/fixtures/conv2d_f32_c17.json" /tmp/graph.json
+cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
 逻辑维度和 packed stride 必须满足：
@@ -123,7 +121,7 @@ X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 在构建树中运行：
 
 ```bash
-DEEPFORGE_COMPILE="$DEEPFORGE_SOURCE/build-full/tools/deepforge-compile"
+DEEPFORGE_COMPILE=build-full/tools/deepforge-compile
 
 "$DEEPFORGE_COMPILE" /tmp/graph.json \
   --input-format=auto \
@@ -270,7 +268,7 @@ auto status = deepforge::compiler::load_artifact_executable(
 ## 9. Benchmark
 
 ```bash
-DEEPFORGE_BENCHMARK="$DEEPFORGE_SOURCE/build-full/tools/deepforge-benchmark"
+DEEPFORGE_BENCHMARK=build-full/tools/deepforge-benchmark
 "$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
 ```
 
@@ -282,8 +280,8 @@ CSV 输出包含编译耗时、单次执行耗时、GFLOP/s，以及相对 scala
 
 | 诊断 | 处理 |
 |---|---|
-| CMake 报 LLVM version mismatch | 将 `MLIR_DIR` 指向 `22.1.8` 安装前缀 |
-| 找不到 Frontend 或 JSON header | 检查 `DEEPFORGE_CUDNN_FRONTEND_ROOT` 是否为 `v1.24.0` checkout |
+| CMake 报 LLVM version mismatch | 将 `22.1.8` 前缀放在 `CMAKE_PREFIX_PATH` 首位，或显式设置 `MLIR_DIR` |
+| 找不到 Frontend 或 JSON header | 将 `v1.24.0` checkout 加入 `CMAKE_PREFIX_PATH`，或显式设置 `DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR` |
 | `DFE_SCHEMA_VERSION_MISMATCH` | 使用 Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | 使用 cuDNN Frontend `v1.24.0` 重新序列化 |
 | `DFE_UNSUPPORTED_NODE` | 将 Graph 限制为单个 `CONV_FPROP` |

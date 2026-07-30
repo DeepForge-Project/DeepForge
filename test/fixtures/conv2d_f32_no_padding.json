@@ -1,0 +1,74 @@
+{
+  "context": {
+    "name": "deepforge_conv2d_f32_no_padding",
+    "compute_data_type": "FLOAT",
+    "intermediate_data_type": "FLOAT",
+    "io_data_type": "FLOAT",
+    "sm_count": -1,
+    "is_dynamic_shape_enabled": false,
+    "is_override_shape_enabled": false
+  },
+  "graph_uid": 3,
+  "json_version": "1.0",
+  "cudnn_backend_version": "not-used-by-cpu-importer",
+  "cudnn_frontend_version": 12400,
+  "nodes": [
+    {
+      "name": "conv_fprop",
+      "compute_data_type": "FLOAT",
+      "inputs": {"X": 31, "W": 32},
+      "outputs": {"Y": 33},
+      "pre_padding": [0, 0],
+      "post_padding": [0, 0],
+      "stride": [1, 1],
+      "dilation": [1, 1],
+      "math_mode": "CROSS_CORRELATION",
+      "tag": "CONV_FPROP"
+    }
+  ],
+  "tensors": {
+    "31": {
+      "name": "X",
+      "data_type": "FLOAT",
+      "dim": [1, 3, 2, 2],
+      "stride": [12, 1, 6, 3],
+      "is_virtual": false,
+      "pass_by_value": null,
+      "is_pass_by_value": false,
+      "reordering_type": "NONE",
+      "uid": 31,
+      "uid_assigned": true
+    },
+    "32": {
+      "name": "W",
+      "data_type": "FLOAT",
+      "dim": [5, 3, 1, 1],
+      "stride": [3, 1, 3, 3],
+      "is_virtual": false,
+      "pass_by_value": null,
+      "is_pass_by_value": false,
+      "reordering_type": "NONE",
+      "uid": 32,
+      "uid_assigned": true
+    },
+    "33": {
+      "name": "Y",
+      "data_type": "FLOAT",
+      "dim": [1, 5, 2, 2],
+      "stride": [20, 1, 10, 5],
+      "is_virtual": false,
+      "pass_by_value": null,
+      "is_pass_by_value": false,
+      "reordering_type": "NONE",
+      "uid": 33,
+      "uid_assigned": true
+    }
+  },
+  "variant_pack_uids": [31, 32, 33],
+  "pass_by_values": {},
+  "workspace_modifications": {},
+  "variant_pack_replacements": [],
+  "fe_workspace_size": 0,
+  "behavior_notes": [],
+  "tensors_to_dump": []
+}

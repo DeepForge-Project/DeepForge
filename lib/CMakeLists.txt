@@ -1,0 +1,13 @@
+if(DEEPFORGE_BUILD_IMPORTER)
+    add_subdirectory(Import)
+endif()
+
+if(DEEPFORGE_ENABLE_MLIR)
+    if(NOT DEEPFORGE_BUILD_IMPORTER)
+        message(FATAL_ERROR "DEEPFORGE_ENABLE_MLIR requires DEEPFORGE_BUILD_IMPORTER=ON")
+    endif()
+    add_subdirectory(MLIR)
+    add_subdirectory(Transforms)
+    add_subdirectory(Compiler)
+    add_subdirectory(Runtime)
+endif()

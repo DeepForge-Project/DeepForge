@@ -1,0 +1,39 @@
+# CMake and Ninja build trees
+/build/
+/build-*/
+/cmake-build-*/
+/install/
+/install-*/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+
+# Generated binaries and compiler artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.dfo
+*.profraw
+*.profdata
+
+# Temporary and editor files
+*.log
+*.tmp
+core
+core.*
+.cache/
+.idea/
+.vscode/
+.DS_Store
+*~

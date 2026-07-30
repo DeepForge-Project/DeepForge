@@ -1,0 +1,342 @@
+# DeepForge
+
+[中文](README.zh-CN.md) | [English User Guide](docs/user-guide.en.md) | [中文用户指南](docs/user-guide.zh-CN.md)
+
+DeepForge is an MLIR-based CPU compiler. It reads the serialized Graph format
+defined by the open source `cudnn-frontend` project, lowers the supported graph
+subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
+Frontend-shaped UID variant-pack call interface.
+
+**Current status:** CPU MVP phases P0-P6 are implemented. The end-to-end path
+includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
+One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
+generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
+artifacts, CLI tools, benchmarks, and sanitizer coverage.
+
+**MVP scope:** one static, contiguous, f32 Conv2D forward operation targeting
+x86-64, with scalar, AVX2, and AVX-512 code variants. Dynamic shapes, grouped
+or depthwise convolution, fused operations, multithreading, Machine Dialect,
+AMX, and bf16 are outside the MVP.
+
+DeepForge does not build, link, or call the CUDA/cuDNN backend. The CPU runtime
+uses the open source Frontend repository only as the pinned serialization and
+call-interface reference.
+
+## Pinned Versions
+
+| Dependency | Pinned version/commit | Status |
+|---|---|---|
+| LLVM/MLIR | `llvmorg-22.1.8` (`ca7933e47d3a`) | Installed and verified |
+| cuDNN Frontend | `v1.24.0` (`c4a97621eca5`) | Downloaded as the serialization reference |
+| nlohmann/json | `3.11.3` | Vendored by the Frontend source tree |
+| C++ language mode | `C++20` | Enforced by CMake |
+
+LLVM `main`, rolling MLIR revisions, and LLVM 23 release candidates are not
+supported. See the [MVP compatibility and runtime contract](docs/design/contracts.md)
+for the normative compatibility boundary.
+
+## External Toolchain Versions
+
+The table below records the Linux x86-64 toolchain baseline used to build and
+test the current implementation. A **pinned** dependency is part of the project
+compatibility contract. A **verified** tool version is the tested workspace
+baseline and should be preferred in CI. The minimum CMake version is enforced
+by `cmake_minimum_required` in `CMakeLists.txt`.
+
+| Tool/dependency | Version or constraint | Status and purpose |
+|---|---|---|
+| OS/architecture | Linux x86-64; glibc `2.35` | Verified host baseline |
+| Git | `2.34.1` | Verified; fetches pinned tags and is not part of the runtime ABI |
+| CMake | `4.4.0`; minimum `3.27` | Verified; configures LLVM/MLIR and DeepForge |
+| Ninja | `1.10.1` | Verified build generator |
+| GNU C/C++ | `13.4.0`; C++ `20` | Verified host compiler |
+| GNU binutils/`ld` | `2.38` | Verified host linker |
+| Python | `3.10.12`; LLVM requires at least `3.8` | Verified LLVM/MLIR configuration tool |
+| zlib development package | `1.2.11` | Verified LLVM/MLIR compression dependency |
+| LLVM/MLIR | `22.1.8`; X86 target | Pinned; the only supported MLIR/LLVM toolchain |
+| cuDNN Frontend | `v1.24.0` (`c4a97621eca5`) | Pinned serialization schema and API reference |
+| nlohmann/json | `3.11.3` | Pinned Frontend-vendored header; no system package required |
+| CUDA Toolkit/cuDNN backend | Not an MVP dependency; not installed | Not needed by the CPU importer or runtime |
+
+A verified version does not imply that every newer version is compatible.
+Changes to CMake, the host compiler, binutils, LLVM/MLIR, or the parser require
+the configuration smoke tests and the full end-to-end test suite to be rerun.
+The LLVM/MLIR version check fails hard rather than silently accepting another
+version.
+
+The current shell resolves the verified tools as follows:
+
+```text
+cmake   -> /softhome/yanghesong/.local/bin/cmake  (4.4.0)
+ninja   -> /usr/bin/ninja                         (1.10.1)
+c++     -> /usr/bin/c++                           (GCC 13.4.0)
+ld      -> /usr/bin/ld                            (binutils 2.38)
+python3 -> /usr/bin/python3                       (3.10.12)
+git     -> /usr/bin/git                           (2.34.1)
+```
+
+Probe a new environment before configuring the project:
+
+```bash
+command -v cmake ninja c++ ld python3 git
+cmake --version | head -1
+ninja --version
+c++ --version | head -1
+ld --version | head -1
+python3 --version
+git --version
+```
+
+If CMake is older than `3.27`, update `PATH` or install a supported CMake
+before configuring DeepForge.
+
+## Dependency Boundary
+
+The current workspace uses these paths:
+
+| Content | Path |
+|---|---|
+| LLVM/MLIR source | `/local_data/yanghesong/llvm-project` |
+| LLVM/MLIR install prefix | `/local_data/yanghesong/opt/llvm-22.1.8` |
+| cuDNN Frontend source | `/local_data/yanghesong/cudnn-frontend` |
+| Frontend-vendored JSON header | `/local_data/yanghesong/cudnn-frontend/include/cudnn_frontend/thirdparty/nlohmann/json.hpp` |
+
+For the CPU MVP, downloading the cuDNN Frontend source is sufficient. DeepForge
+reads the serializer implementation and reuses its vendored JSON header; it
+does not run the Frontend CMake build or link the GPU backend. Frontend samples
+and aggregate headers may require the CUDA Toolkit and `cudnn.h`, but those are
+not needed to build or run DeepForge.
+
+The system currently has no usable `nvcc`, CUDA development headers, or cuDNN
+development package. `/usr/include/linux/cuda.h` is a Linux UAPI header and is
+not a CUDA Toolkit installation. Exact `cudnnHandle_t` and
+`cudnn_frontend::error_t` types, GPU execution, and binary interchangeability
+with a Frontend `Graph` object are intentionally outside this CPU-only build.
+
+## Supported Input
+
+The importer accepts the two carriers defined by cuDNN Frontend `v1.24.0`:
+
+- Graph JSON produced through `Graph::serialize(nlohmann::json&)`.
+- Canonical UBJSON produced through `Graph::serialize(std::vector<uint8_t>&)`.
+
+The accepted MVP subset is exactly one static f32 `CONV_FPROP` with packed NHWC
+X/Y tensors, a packed KRSC filter, unit spatial stride and dilation, and static
+non-negative padding. The schema must have `json_version == "1.0"` and
+`cudnn_frontend_version == 12400`. A serialized input is limited to 16 MiB.
+
+DeepForge does not define a private graph JSON format. Unsupported schema,
+nodes, layouts, execution metadata, or shapes are rejected with stable
+diagnostics rather than silently ignored or lowered through a fallback path.
+
+## Architecture
+
+```text
+cuDNN Frontend serialized Graph (JSON or UBJSON)
+        |
+        v
+DeepForge importer + support validation
+        |
+        v
+Tensor + Linalg Dialect
+        |  structured transforms, then one-shot-bufferize once
+        v
+MemRef + Affine/SCF + Vector Dialect
+        |  direct Conv2D schedule, C-reduction vectorization
+        v
+LLVM Dialect
+        |  translate to LLVM IR, LLVM target code generation
+        v
+scalar / AVX2 / AVX-512 object code
+        |
+        v
+DeepForge Executable::execute(handle, uid_to_host_ptr, workspace)
+```
+
+DeepForge-specific logic is limited to import validation, the Conv2D schedule,
+workspace planning, and runtime dispatch. The main IR pipeline uses upstream
+MLIR dialects, without an intermediate `cudnn.*` dialect or a custom Machine
+Dialect.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [English User Guide](docs/user-guide.en.md) | Build, CLI, runtime API, benchmark, and troubleshooting |
+| [中文用户指南](docs/user-guide.zh-CN.md) | Build, CLI, runtime API, benchmark, and troubleshooting in Chinese |
+| [MVP Contract](docs/design/contracts.md) | Versions, input schema, support matrix, Frontend-shaped API, and numeric rules |
+| [Architecture Overview](docs/design/overview.md) | Components, IR stages, and major design decisions |
+| [Tensor Layer](docs/design/tensor-layer.md) | Serialized Graph import, shape conversion, and padding |
+| [Linalg Layer](docs/design/linalg-layer.md) | `linalg.conv_2d_nhwc_fhwc` semantics and layouts |
+| [Loop and Schedule Layer](docs/design/loop-schedule-layer.md) | Direct Conv loops, reduction vectorization, and deferred tiling |
+| [Machine Dialect](docs/design/machine-dialect.md) | Deferral rationale and criteria for reconsideration |
+| [Vector and LLVM Layer](docs/design/vector-llvm-layer.md) | Complete LLVM lowering and CPU variants |
+| [Pass Pipeline](docs/design/pass-pipeline.md) | MVP pass order, preconditions, and verification |
+| [Conv2D Example](docs/design/example-conv2d.md) | End-to-end IR example |
+| [DFO Artifact Format](docs/artifact-format.md) | Binary layout, ORC loading, and trust boundary |
+| [Benchmark Baseline](docs/benchmark-baseline.md) | Small, medium, and large profiles and reproduction steps |
+| [Development Plan](docs/development-plan.md) | Phase order, exit criteria, and test gates |
+
+## Build
+
+The current workspace has `llvmorg-22.1.8` installed under
+`/local_data/yanghesong/opt/llvm-22.1.8`. Use a writable dependency root on
+other systems.
+
+```bash
+export DEEPFORGE_SOURCE="${DEEPFORGE_SOURCE:-/local_data/yanghesong/DeepForge}"
+export DEEPFORGE_DEPS_ROOT="${DEEPFORGE_DEPS_ROOT:-/local_data/yanghesong}"
+export DEEPFORGE_LLVM_PREFIX="${DEEPFORGE_LLVM_PREFIX:-$DEEPFORGE_DEPS_ROOT/opt/llvm-22.1.8}"
+export DEEPFORGE_CUDNN_FRONTEND_ROOT="${DEEPFORGE_CUDNN_FRONTEND_ROOT:-$DEEPFORGE_DEPS_ROOT/cudnn-frontend}"
+
+# Serialization reference source only; no CUDA installation or build step.
+git clone --branch v1.24.0 --depth 1 \
+  https://github.com/NVIDIA/cudnn-frontend.git \
+  "$DEEPFORGE_CUDNN_FRONTEND_ROOT"
+
+# Build and install LLVM/MLIR once.
+git clone --branch llvmorg-22.1.8 --depth 1 \
+  https://github.com/llvm/llvm-project.git \
+  "$DEEPFORGE_DEPS_ROOT/llvm-project"
+cmake -S "$DEEPFORGE_DEPS_ROOT/llvm-project/llvm" \
+  -B "$DEEPFORGE_DEPS_ROOT/llvm-project/build" -G Ninja \
+  -DLLVM_ENABLE_PROJECTS=mlir \
+  -DLLVM_TARGETS_TO_BUILD=X86 \
+  -DLLVM_BUILD_TESTS=OFF \
+  -DMLIR_INCLUDE_TESTS=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$DEEPFORGE_LLVM_PREFIX"
+cmake --build "$DEEPFORGE_DEPS_ROOT/llvm-project/build" \
+  --target install -j
+
+# Build DeepForge.
+cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR="$DEEPFORGE_LLVM_PREFIX/lib/cmake/mlir" \
+  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT" \
+  -DDEEPFORGE_BUILD_TESTS=ON \
+  -DDEEPFORGE_BUILD_TOOLS=ON
+cmake --build "$DEEPFORGE_SOURCE/build" -j
+ctest --test-dir "$DEEPFORGE_SOURCE/build" --output-on-failure
+```
+
+Build only the CPU importer without finding MLIR or any CUDA/cuDNN backend:
+
+```bash
+cmake -S "$DEEPFORGE_SOURCE" -B "$DEEPFORGE_SOURCE/build-p1" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DDEEPFORGE_ENABLE_MLIR=OFF \
+  -DDEEPFORGE_BUILD_TESTS=ON \
+  -DDEEPFORGE_BUILD_TOOLS=OFF \
+  -DDEEPFORGE_CUDNN_FRONTEND_ROOT="$DEEPFORGE_CUDNN_FRONTEND_ROOT"
+cmake --build "$DEEPFORGE_SOURCE/build-p1" -j
+ctest --test-dir "$DEEPFORGE_SOURCE/build-p1" --output-on-failure
+```
+
+Verify the pinned LLVM/MLIR tools:
+
+```bash
+"$DEEPFORGE_LLVM_PREFIX/bin/llvm-config" --version
+"$DEEPFORGE_LLVM_PREFIX/bin/mlir-opt" --version
+"$DEEPFORGE_LLVM_PREFIX/bin/mlir-translate" --version
+"$DEEPFORGE_LLVM_PREFIX/bin/llc" --version
+```
+
+CMake validates LLVM/MLIR `22.1.8`, cuDNN Frontend `1.24.0`, and the vendored
+nlohmann/json `3.11.3` header. A mismatch is a configuration error.
+
+Optional CLI installation:
+
+```bash
+cmake --install "$DEEPFORGE_SOURCE/build" \
+  --prefix "$DEEPFORGE_SOURCE/install"
+```
+
+The current install rules publish `deepforge-compile` and
+`deepforge-benchmark`. Library headers and a CMake package are not yet installed
+as a stable SDK.
+
+## Compile and Execute
+
+Generate a reloadable three-variant artifact and inspect its metadata:
+
+```bash
+build/tools/deepforge-compile test/fixtures/conv2d_f32_c17.json \
+  --input-format=auto \
+  --target=x86-64 \
+  --emit=object \
+  --dump-ir=imported:build/imported.mlir \
+  --dump-ir=bufferized:build/bufferized.mlir \
+  --dump-ir=llvm:build/llvm.mlir \
+  -o build/conv2d.dfo
+
+build/tools/deepforge-compile --inspect build/conv2d.dfo
+build/tools/deepforge-benchmark --profile=all --iterations=3
+```
+
+Use `--emit=llvm-ir --variant=scalar|avx2|avx512` to emit LLVM IR for one
+variant. `load_artifact_executable` restores an ORC executable from a `.dfo`
+file or an in-memory byte span. Artifacts contain native object code and are not
+a security sandbox; load only artifacts from trusted sources.
+
+The source-tree library API uses the following flow:
+
+```cpp
+deepforge::compiler::CompileOptions options;
+deepforge::compiler::CompilationResult compilation;
+auto status = deepforge::compiler::compile_file("graph.json", options,
+                                                compilation);
+if (status.is_bad()) {
+    // status.code() and status.message()
+}
+
+deepforge::runtime::VariantPack variant_pack = {
+    {x_uid, x_host_ptr},
+    {w_uid, w_host_ptr},
+    {y_uid, y_host_ptr},
+};
+
+auto workspace = allocate_aligned(
+    compilation.executable->get_workspace_size(), 64);
+deepforge::runtime::FrontendHandle handle = nullptr;
+status = compilation.executable->execute(handle, variant_pack,
+                                         workspace.get());
+
+std::unique_ptr<deepforge::runtime::Executable> loaded;
+status = deepforge::compiler::load_artifact_executable("conv2d.dfo", loaded);
+```
+
+The public call shape is pinned to the cuDNN Frontend `v1.24.0` UID overload:
+
+```cpp
+execute(handle, std::unordered_map<int64_t, void*>&, workspace);
+```
+
+The CPU runtime does not inspect the opaque handle. It accepts host pointers,
+not CUDA device pointers. DeepForge uses its own status type and executable
+class, so this is source-level call-shape compatibility rather than binary
+interchangeability with a Frontend `Graph`. Public headers expose neither MLIR
+memref descriptors nor raw generated-kernel signatures.
+
+## Roadmap
+
+| Phase | Status |
+|---|---|
+| P0-P2 | Complete: toolchain, strict importer, and Tensor/Linalg IR |
+| P3 | Complete: One-Shot Bufferize and static workspace planning |
+| P4 | Complete: scalar LLVM/object generation, JIT, and runtime |
+| P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
+| P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
+| Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
+| Later | Multithreading, more operations, and upstream X86 AMX/bf16 paths |
+| Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
+
+## References
+
+- [MLIR](https://mlir.llvm.org/)
+- [cuDNN Frontend](https://github.com/NVIDIA/cudnn-frontend)
+- [LLVM releases](https://github.com/llvm/llvm-project/releases)
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).

@@ -133,8 +133,30 @@ DeepForge 逻辑。IR 主干复用上游 MLIR 方言，不引入临时 `cudnn.*`
 
 ## 构建
 
-请自行选择依赖的源码、构建和安装目录。下面使用的变量不带项目默认值，必须由
-当前环境显式设置：
+固定版本依赖可被 CMake 发现后，在 DeepForge 仓库根目录执行：
+
+```bash
+./scripts/build.sh
+```
+
+只构建/测试 P1 importer，不查找 MLIR，也不需要 CUDA/cuDNN backend：
+
+```bash
+./scripts/build.sh --importer-only
+```
+
+脚本会根据自身位置确定源码目录，保留环境中已有的 `CMAKE_PREFIX_PATH`，并将
+已设置的 `LLVM_INSTALL_PREFIX` 和 `CUDNN_FRONTEND_SOURCE_DIR` 作为额外搜索
+前缀传给 CMake，不会假设依赖安装位置。常用选项如下：
+
+```bash
+./scripts/build.sh --build-type Debug --build-dir build-debug
+./scripts/build.sh --jobs 8 --no-tests
+./scripts/build.sh --help
+```
+
+首次准备依赖时，请自行选择源码、构建和安装目录。下面使用的变量不带项目默认
+值，必须由当前环境显式设置：
 
 ```bash
 : "${LLVM_SOURCE_DIR:?请设置 LLVM_SOURCE_DIR}"
@@ -159,23 +181,6 @@ cmake -S "$LLVM_SOURCE_DIR/llvm" -B "$LLVM_BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX"
 cmake --build "$LLVM_BUILD_DIR" --target install -j
-
-# 在 DeepForge 仓库根目录构建
-cmake -S . -B build -G Ninja \
-  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
-
-# 只构建/测试 P1 importer（不查找 MLIR，也不需要 CUDA/cuDNN backend）
-cmake -S . -B build-p1 -G Ninja \
-  -DCMAKE_PREFIX_PATH="$CUDNN_FRONTEND_SOURCE_DIR" \
-  -DDEEPFORGE_ENABLE_MLIR=OFF \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=OFF
-cmake --build build-p1
-ctest --test-dir build-p1 --output-on-failure
 
 # P0 smoke test
 export PATH="${LLVM_INSTALL_PREFIX}/bin:${PATH}"

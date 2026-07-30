@@ -67,22 +67,17 @@ headers.
 
 ## 3. Build and Install
 
-Build the complete compiler, tools, benchmark, and tests:
+Build the complete compiler, tools, benchmark, and tests from the repository
+root:
 
 ```bash
-cmake -S . -B build-full -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build build-full -j
-ctest --test-dir build-full --output-on-failure
+./scripts/build.sh
 ```
 
 Optional installation:
 
 ```bash
-cmake --install build-full --prefix install
+./scripts/build.sh --install install
 export PATH="$PWD/install/bin:$PATH"
 ```
 
@@ -130,7 +125,7 @@ CPU MVP.
 Run from the build tree:
 
 ```bash
-DEEPFORGE_COMPILE=build-full/tools/deepforge-compile
+DEEPFORGE_COMPILE=build/tools/deepforge-compile
 
 "$DEEPFORGE_COMPILE" /tmp/graph.json \
   --input-format=auto \
@@ -283,7 +278,7 @@ Runtime contract:
 ## 9. Benchmark
 
 ```bash
-DEEPFORGE_BENCHMARK=build-full/tools/deepforge-benchmark
+DEEPFORGE_BENCHMARK=build/tools/deepforge-benchmark
 "$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
 ```
 

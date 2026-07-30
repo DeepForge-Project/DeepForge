@@ -164,8 +164,33 @@ Dialect.
 
 ## Build
 
-Choose writable source, build, and install directories for the dependencies.
-The variables used below intentionally have no project-defined defaults.
+Once the pinned dependencies are available to CMake, build and test DeepForge
+from the repository root:
+
+```bash
+./scripts/build.sh
+```
+
+Build only the CPU importer without finding MLIR or any CUDA/cuDNN backend:
+
+```bash
+./scripts/build.sh --importer-only
+```
+
+The script derives the source directory from its own location, preserves the
+environment's `CMAKE_PREFIX_PATH`, and supplies `LLVM_INSTALL_PREFIX` and
+`CUDNN_FRONTEND_SOURCE_DIR` as additional search prefixes when they are set. It
+does not assume dependency locations. Common options:
+
+```bash
+./scripts/build.sh --build-type Debug --build-dir build-debug
+./scripts/build.sh --jobs 8 --no-tests
+./scripts/build.sh --help
+```
+
+For first-time dependency setup, choose writable source, build, and install
+directories. The variables below intentionally have no project-defined
+defaults:
 
 ```bash
 # Set these variables to locations selected for your environment.
@@ -191,28 +216,6 @@ cmake -S "$LLVM_SOURCE_DIR/llvm" -B "$LLVM_BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX"
 cmake --build "$LLVM_BUILD_DIR" --target install -j
-
-# Build DeepForge from the repository root.
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
-Build only the CPU importer without finding MLIR or any CUDA/cuDNN backend:
-
-```bash
-cmake -S . -B build-p1 -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$CUDNN_FRONTEND_SOURCE_DIR" \
-  -DDEEPFORGE_ENABLE_MLIR=OFF \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=OFF
-cmake --build build-p1 -j
-ctest --test-dir build-p1 --output-on-failure
 ```
 
 Verify the pinned LLVM/MLIR tools:
@@ -231,7 +234,7 @@ nlohmann/json `3.11.3` header. A mismatch is a configuration error.
 Optional CLI installation:
 
 ```bash
-cmake --install build --prefix install
+./scripts/build.sh --install install
 ```
 
 The current install rules publish `deepforge-compile` and

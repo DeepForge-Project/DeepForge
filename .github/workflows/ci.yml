@@ -27,17 +27,10 @@ jobs:
         run: |
           git clone --branch "v${FRONTEND_VERSION}" --depth 1 \
             https://github.com/NVIDIA/cudnn-frontend.git .deps/cudnn-frontend
-      - name: Configure importer-only build
-        run: |
-          cmake -S . -B build-importer -G Ninja \
-            -DDEEPFORGE_ENABLE_MLIR=OFF \
-            -DDEEPFORGE_BUILD_TOOLS=OFF \
-            -DDEEPFORGE_BUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/cudnn-frontend"
       - name: Build and test importer
-        run: |
-          cmake --build build-importer -j2
-          ctest --test-dir build-importer --output-on-failure
+        env:
+          CUDNN_FRONTEND_SOURCE_DIR: ${{ github.workspace }}/.deps/cudnn-frontend
+        run: ./scripts/build.sh --importer-only --build-dir build-importer --jobs 2
 
   full:
     runs-on: ubuntu-latest
@@ -72,17 +65,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION}"
           cmake --build .deps/llvm-build --target install -j2
-      - name: Configure DeepForge
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION};$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
-            -DDEEPFORGE_BUILD_TESTS=ON \
-            -DDEEPFORGE_BUILD_TOOLS=ON \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo
       - name: Build and test
-        run: |
-          cmake --build build -j2
-          ctest --test-dir build --output-on-failure
+        env:
+          LLVM_INSTALL_PREFIX: ${{ github.workspace }}/.deps/llvm-${{ env.LLVM_VERSION }}
+          CUDNN_FRONTEND_SOURCE_DIR: ${{ github.workspace }}/.deps/cudnn-frontend
+        run: ./scripts/build.sh --build-type RelWithDebInfo --jobs 2
       - name: Reproduce release artifact and benchmark smoke
         run: |
           build/tools/deepforge-compile test/fixtures/conv2d_f32_c17.json \

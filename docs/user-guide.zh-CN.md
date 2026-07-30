@@ -61,22 +61,16 @@ Frontend/JSON header。
 
 ## 3. 构建和安装
 
-构建完整编译器、CLI、benchmark 和测试：
+在仓库根目录构建完整编译器、CLI、benchmark 和测试：
 
 ```bash
-cmake -S . -B build-full -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="${LLVM_INSTALL_PREFIX};${CUDNN_FRONTEND_SOURCE_DIR}" \
-  -DDEEPFORGE_BUILD_TESTS=ON \
-  -DDEEPFORGE_BUILD_TOOLS=ON
-cmake --build build-full -j
-ctest --test-dir build-full --output-on-failure
+./scripts/build.sh
 ```
 
 可选安装：
 
 ```bash
-cmake --install build-full --prefix install
+./scripts/build.sh --install install
 export PATH="$PWD/install/bin:$PATH"
 ```
 
@@ -121,7 +115,7 @@ X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 在构建树中运行：
 
 ```bash
-DEEPFORGE_COMPILE=build-full/tools/deepforge-compile
+DEEPFORGE_COMPILE=build/tools/deepforge-compile
 
 "$DEEPFORGE_COMPILE" /tmp/graph.json \
   --input-format=auto \
@@ -268,7 +262,7 @@ auto status = deepforge::compiler::load_artifact_executable(
 ## 9. Benchmark
 
 ```bash
-DEEPFORGE_BENCHMARK=build-full/tools/deepforge-benchmark
+DEEPFORGE_BENCHMARK=build/tools/deepforge-benchmark
 "$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
 ```
 

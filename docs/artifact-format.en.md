@@ -7,7 +7,8 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current format version is `1`.
+generated kernel. The current writer emits format version `2`; the reader also
+accepts version `1` Conv2D artifacts and reconstructs their argument table.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -37,7 +38,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 1
+u32 format_version = 2
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -46,6 +47,24 @@ string cudnn_frontend_version
 string target_triple
 string public_function_name
 
+u32 tensor_argument_count
+repeated tensor_argument {
+  i64 uid
+  string name
+  u32 data_type
+  u32 access                  # 0 read, 1 write, 2 read-write
+  u64 alignment
+  u64 size_bytes
+  u32 rank
+  i64 dimensions[rank]
+  i64 strides[rank]
+}
+
+u32 adapter_kind
+u64 adapter_metadata_size
+u8 adapter_metadata[adapter_metadata_size]
+
+# adapter_kind 0: transitional ranked-memref Conv2D adapter payload
 i64 x_uid, w_uid, y_uid
 i64 x_shape[4], w_shape[4], y_shape[4], padded_x_shape[4]
 i64 pre_padding[2], post_padding[2], stride[2], dilation[2]
@@ -72,6 +91,12 @@ repeated variant {
 u64 fnv1a_64_checksum        # covers every preceding byte
 ```
 
+The argument table and the length-delimited adapter section are separate on
+purpose. The table is operation-independent. Adapter kind `0` preserves the
+current ranked-memref Conv2D invocation while later generic wrappers can add a
+new adapter kind without placing operation-specific fields in the top-level
+format. Readers reject unknown adapter kinds.
+
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
 `<base>_avx2`, and `<base>_avx512`. The C-interface wrapper in each object is
@@ -87,10 +112,11 @@ internal symbols in three variants from colliding. After resolving the
 C-interface wrapper, the loader passes entries, metadata, and workspace plan to
 the same runtime adapter used by the development-time MLIR ExecutionEngine.
 
-Execution still validates UIDs, null pointers, f32 alignment, range overlap,
-64-byte workspace alignment, and integer overflow. CPUID, FMA, OSXSAVE, and
-XGETBV determine safe AVX-512, AVX2, or scalar selection. Loading an object does
-not itself execute high-ISA code.
+Execution validates the ordered argument table, UIDs, null pointers, per-tensor
+alignment and byte ranges, 64-byte workspace alignment, and integer overflow.
+Read/read aliasing is legal; overlap involving a write argument or workspace is
+rejected. CPUID, FMA, OSXSAVE, and XGETBV determine safe AVX-512, AVX2, or
+scalar selection. Loading an object does not itself execute high-ISA code.
 
 ## 4. Trust Boundary
 
@@ -105,10 +131,11 @@ runs a loaded object with the current process's privileges. Therefore:
 
 ## 5. Compatibility Policy
 
-The MVP reader and loader reject an unknown format or producer version, wrong
+The reader and loader reject an unknown format or producer version, wrong
 endianness, mismatched target triple or numeric contract, duplicate UIDs,
 inconsistent shape or padding, invalid workspace alignment, ranges or
-lifetimes, invalid variant symbols or features, duplicate variants, empty
-objects, truncation, trailing payload, and checksum mismatch. Extensions must
-increment the format version. Version `1` field order and semantics cannot
-change.
+lifetimes, invalid argument tables or adapter payloads, invalid variant symbols
+or features, duplicate variants, empty objects, truncation, trailing payload,
+and checksum mismatch. Changes to the top-level encoding must increment the
+format version. Version `1` field order and semantics remain frozen; it is
+read-only. New compilations write version `2`.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepForge/Compiler/GraphMetadata.h"
 #include "DeepForge/Import/SerializedGraph.h"
 #include "DeepForge/Import/Status.h"
 
@@ -20,8 +21,7 @@ struct Conv2DImportOptions {
 
 // Metadata consumed by later bufferization, workspace planning and runtime
 // stages. It intentionally remains independent of MLIR ownership and types.
-struct Conv2DCompileMetadata {
-    std::string function_name;
+struct Conv2DCompileMetadata : GraphCompileMetadata {
     std::int64_t x_uid = 0;
     std::int64_t w_uid = 0;
     std::int64_t y_uid = 0;

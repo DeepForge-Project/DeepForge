@@ -1,5 +1,7 @@
 #include "DeepForge/Compiler/Conv2DImporter.h"
 
+#include "DeepForge/Import/Capability.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -102,7 +104,8 @@ Status checked_output_extent(std::int64_t input,
 
 Status expected_packed_stride(TensorDesc const& tensor,
                               bool filter,
-                              std::array<std::int64_t, 4>& expected) {
+                              std::vector<std::int64_t>& expected) {
+    expected.assign(4, 0);
     std::int64_t product = 0;
     if (filter) {
         if (!checked_mul_nonnegative(tensor.dim[3], tensor.dim[1], product) ||
@@ -128,7 +131,13 @@ Status expected_packed_stride(TensorDesc const& tensor,
 }
 
 Status validate_canonical_model(SerializedGraph const& graph) {
-    if (!is_f32(graph.conv.compute_data_type)) {
+    auto const* conv_ptr = graph.single_conv_fprop();
+    if (conv_ptr == nullptr) {
+        return fail(ErrorCode::kUnsupportedOperation, "nodes",
+                    "Tensor/Linalg Conv importer requires one CONV_FPROP node");
+    }
+    auto const& conv = *conv_ptr;
+    if (!is_f32(conv.compute_data_type)) {
         return fail(ErrorCode::kUnsupportedDataType, "nodes[0].compute_data_type",
                     "P2 requires f32 computation");
     }
@@ -140,16 +149,15 @@ Status validate_canonical_model(SerializedGraph const& graph) {
         return fail(ErrorCode::kInvalidValue, "tensors",
                     "P2 requires exactly X, W and Y tensors");
     }
-    if (graph.conv.x_uid == graph.conv.w_uid ||
-        graph.conv.x_uid == graph.conv.y_uid ||
-        graph.conv.w_uid == graph.conv.y_uid) {
+    if (conv.x_uid == conv.w_uid || conv.x_uid == conv.y_uid ||
+        conv.w_uid == conv.y_uid) {
         return fail(ErrorCode::kInvalidValue, "nodes[0]",
                     "X, W and Y UIDs must be distinct");
     }
 
-    auto const x_it = graph.tensors.find(graph.conv.x_uid);
-    auto const w_it = graph.tensors.find(graph.conv.w_uid);
-    auto const y_it = graph.tensors.find(graph.conv.y_uid);
+    auto const x_it = graph.tensors.find(conv.x_uid);
+    auto const w_it = graph.tensors.find(conv.w_uid);
+    auto const y_it = graph.tensors.find(conv.y_uid);
     if (x_it == graph.tensors.end() || w_it == graph.tensors.end() ||
         y_it == graph.tensors.end()) {
         return fail(ErrorCode::kMissingUid, "nodes[0]",
@@ -172,6 +180,10 @@ Status validate_canonical_model(SerializedGraph const& graph) {
             return fail(ErrorCode::kInvalidValue, "tensors",
                         "virtual and pass-by-value tensors are not supported");
         }
+        if (tensor.dim.size() != 4 || tensor.stride.size() != 4) {
+            return fail(ErrorCode::kInvalidShape, "tensors",
+                        "Conv2D lowering requires rank-4 tensors");
+        }
         for (auto dim : tensor.dim) {
             if (dim <= 0) {
                 return fail(ErrorCode::kInvalidShape, "tensors",
@@ -188,13 +200,12 @@ Status validate_canonical_model(SerializedGraph const& graph) {
         return fail(ErrorCode::kInvalidShape, "tensors",
                     "Y.N/Y.K do not match X.N/W.K");
     }
-    for (std::size_t i = 0; i < graph.conv.stride.size(); ++i) {
-        if (graph.conv.pre_padding[i] < 0 ||
-            graph.conv.post_padding[i] < 0) {
+    for (std::size_t i = 0; i < conv.stride.size(); ++i) {
+        if (conv.pre_padding[i] < 0 || conv.post_padding[i] < 0) {
             return fail(ErrorCode::kInvalidShape, "nodes[0]",
                         "padding must be non-negative");
         }
-        if (graph.conv.stride[i] != 1 || graph.conv.dilation[i] != 1) {
+        if (conv.stride[i] != 1 || conv.dilation[i] != 1) {
             return fail(ErrorCode::kInvalidValue, "nodes[0]",
                         "P2 requires unit stride and unit dilation");
         }
@@ -202,14 +213,14 @@ Status validate_canonical_model(SerializedGraph const& graph) {
 
     std::int64_t expected_p = 0;
     std::int64_t expected_q = 0;
-    auto status = checked_output_extent(x.dim[2], graph.conv.pre_padding[0],
-                                        graph.conv.post_padding[0], w.dim[2],
+    auto status = checked_output_extent(x.dim[2], conv.pre_padding[0],
+                                        conv.post_padding[0], w.dim[2],
                                         "nodes[0].pre_padding[0]", expected_p);
     if (status.is_bad()) {
         return status;
     }
-    status = checked_output_extent(x.dim[3], graph.conv.pre_padding[1],
-                                   graph.conv.post_padding[1], w.dim[3],
+    status = checked_output_extent(x.dim[3], conv.pre_padding[1],
+                                   conv.post_padding[1], w.dim[3],
                                    "nodes[0].pre_padding[1]", expected_q);
     if (status.is_bad()) {
         return status;
@@ -219,7 +230,7 @@ Status validate_canonical_model(SerializedGraph const& graph) {
                     "serialized Y shape does not match Conv2D inference");
     }
 
-    std::array<std::int64_t, 4> expected{};
+    std::vector<std::int64_t> expected;
     status = expected_packed_stride(x, false, expected);
     if (status.is_bad()) {
         return status;
@@ -286,28 +297,76 @@ bool dense_i64_equals(::mlir::DenseIntElementsAttr attr,
     return it == attr.end();
 }
 
-void populate_metadata(SerializedGraph const& graph,
-                       Conv2DImportOptions const& options,
-                       Conv2DCompileMetadata& metadata) {
-    auto const& x = graph.tensors.find(graph.conv.x_uid)->second;
-    auto const& w = graph.tensors.find(graph.conv.w_uid)->second;
-    auto const& y = graph.tensors.find(graph.conv.y_uid)->second;
+std::vector<std::int64_t> packed_strides(
+    std::array<std::int64_t, 4> const& shape) {
+    std::vector<std::int64_t> strides(shape.size(), 1);
+    for (std::size_t index = shape.size() - 1; index > 0; --index) {
+        strides[index - 1] = strides[index] * shape[index];
+    }
+    return strides;
+}
+
+Status append_argument(Conv2DCompileMetadata& metadata,
+                       std::int64_t uid,
+                       std::string name,
+                       std::array<std::int64_t, 4> const& shape,
+                       TensorAccess access) {
+    TensorArgumentMetadata argument;
+    argument.uid = uid;
+    argument.name = std::move(name);
+    argument.data_type = DataType::kFloat32;
+    argument.dimensions.assign(shape.begin(), shape.end());
+    argument.strides = packed_strides(shape);
+    argument.alignment = alignof(float);
+    argument.access = access;
+    if (!deepforge::import::tensor_storage_bytes(
+            argument.data_type, argument.dimensions, argument.strides,
+            argument.size_bytes)) {
+        return fail(ErrorCode::kDimensionOverflow, "metadata.arguments",
+                    "tensor byte range overflows uint64");
+    }
+    metadata.arguments.push_back(std::move(argument));
+    return Status::ok();
+}
+
+Status populate_metadata(SerializedGraph const& graph,
+                         Conv2DImportOptions const& options,
+                         Conv2DCompileMetadata& metadata) {
+    auto const& conv = *graph.single_conv_fprop();
+    auto const& x = graph.tensors.find(conv.x_uid)->second;
+    auto const& w = graph.tensors.find(conv.w_uid)->second;
+    auto const& y = graph.tensors.find(conv.y_uid)->second;
     metadata.function_name = options.function_name;
     metadata.x_uid = x.uid;
     metadata.w_uid = w.uid;
     metadata.y_uid = y.uid;
-    metadata.x_shape = {x.dim[0], x.dim[2], x.dim[3], x.dim[1]};
-    metadata.w_shape = {w.dim[0], w.dim[2], w.dim[3], w.dim[1]};
-    metadata.y_shape = {y.dim[0], y.dim[2], y.dim[3], y.dim[1]};
+    metadata.x_shape =
+        std::array<std::int64_t, 4>{x.dim[0], x.dim[2], x.dim[3], x.dim[1]};
+    metadata.w_shape =
+        std::array<std::int64_t, 4>{w.dim[0], w.dim[2], w.dim[3], w.dim[1]};
+    metadata.y_shape =
+        std::array<std::int64_t, 4>{y.dim[0], y.dim[2], y.dim[3], y.dim[1]};
     metadata.padded_x_shape = metadata.x_shape;
-    metadata.padded_x_shape[1] += graph.conv.pre_padding[0] +
-                                  graph.conv.post_padding[0];
-    metadata.padded_x_shape[2] += graph.conv.pre_padding[1] +
-                                  graph.conv.post_padding[1];
-    metadata.pre_padding = graph.conv.pre_padding;
-    metadata.post_padding = graph.conv.post_padding;
-    metadata.stride = graph.conv.stride;
-    metadata.dilation = graph.conv.dilation;
+    metadata.padded_x_shape[1] +=
+        conv.pre_padding[0] + conv.post_padding[0];
+    metadata.padded_x_shape[2] +=
+        conv.pre_padding[1] + conv.post_padding[1];
+    metadata.pre_padding = conv.pre_padding;
+    metadata.post_padding = conv.post_padding;
+    metadata.stride = conv.stride;
+    metadata.dilation = conv.dilation;
+    auto status = append_argument(metadata, metadata.x_uid, "X",
+                                  metadata.x_shape, TensorAccess::kRead);
+    if (status.is_bad()) {
+        return status;
+    }
+    status = append_argument(metadata, metadata.w_uid, "W", metadata.w_shape,
+                             TensorAccess::kRead);
+    if (status.is_bad()) {
+        return status;
+    }
+    return append_argument(metadata, metadata.y_uid, "Y", metadata.y_shape,
+                           TensorAccess::kWrite);
 }
 
 Status verify_pad_region(::mlir::tensor::PadOp pad, ::mlir::Value zero) {
@@ -329,6 +388,7 @@ Status verify_pad_region(::mlir::tensor::PadOp pad, ::mlir::Value zero) {
 Status verify_conv_structure(::mlir::ModuleOp module,
                              SerializedGraph const& graph,
                              std::string_view expected_function_name) {
+    auto const& conv_desc = *graph.single_conv_fprop();
     if (module.getBody()->getOperations().size() != 1) {
         return invalid_ir("module must contain only the generated func.func");
     }
@@ -345,9 +405,9 @@ Status verify_conv_structure(::mlir::ModuleOp module,
         return invalid_ir("Conv2D function must have one entry block");
     }
 
-    auto const x_it = graph.tensors.find(graph.conv.x_uid);
-    auto const w_it = graph.tensors.find(graph.conv.w_uid);
-    auto const y_it = graph.tensors.find(graph.conv.y_uid);
+    auto const x_it = graph.tensors.find(conv_desc.x_uid);
+    auto const w_it = graph.tensors.find(conv_desc.w_uid);
+    auto const y_it = graph.tensors.find(conv_desc.y_uid);
     if (x_it == graph.tensors.end() || w_it == graph.tensors.end() ||
         y_it == graph.tensors.end()) {
         return fail(ErrorCode::kMissingUid, "mlir", "canonical model has missing Conv UID");
@@ -356,8 +416,10 @@ Status verify_conv_structure(::mlir::ModuleOp module,
     auto const w_shape = physical_shape(w_it->second, true);
     auto const y_shape = physical_shape(y_it->second, false);
     llvm::SmallVector<std::int64_t, 4> padded_shape = x_shape;
-    padded_shape[1] += graph.conv.pre_padding[0] + graph.conv.post_padding[0];
-    padded_shape[2] += graph.conv.pre_padding[1] + graph.conv.post_padding[1];
+    padded_shape[1] +=
+        conv_desc.pre_padding[0] + conv_desc.post_padding[0];
+    padded_shape[2] +=
+        conv_desc.pre_padding[1] + conv_desc.post_padding[1];
 
     auto func_type = func.getFunctionType();
     if (func_type.getNumInputs() != 3 || func_type.getNumResults() != 1 ||
@@ -369,9 +431,9 @@ Status verify_conv_structure(::mlir::ModuleOp module,
                     "function boundary does not match physical Conv2D tensors");
     }
 
-    bool needs_padding = graph.conv.pre_padding !=
+    bool needs_padding = conv_desc.pre_padding !=
                              std::array<std::int64_t, 2>{0, 0} ||
-                         graph.conv.post_padding !=
+                         conv_desc.post_padding !=
                              std::array<std::int64_t, 2>{0, 0};
     auto& entry = func.getBody().front();
     auto expected_operations = needs_padding ? 5U : 4U;
@@ -407,12 +469,12 @@ Status verify_conv_structure(::mlir::ModuleOp module,
             !is_static_f32_tensor(pad.getResult().getType(), padded_shape) ||
             !llvm::equal(
                 pad.getStaticLow(),
-                llvm::ArrayRef<std::int64_t>{0, graph.conv.pre_padding[0],
-                                             graph.conv.pre_padding[1], 0}) ||
+                llvm::ArrayRef<std::int64_t>{0, conv_desc.pre_padding[0],
+                                             conv_desc.pre_padding[1], 0}) ||
             !llvm::equal(
                 pad.getStaticHigh(),
-                llvm::ArrayRef<std::int64_t>{0, graph.conv.post_padding[0],
-                                             graph.conv.post_padding[1], 0})) {
+                llvm::ArrayRef<std::int64_t>{0, conv_desc.post_padding[0],
+                                             conv_desc.post_padding[1], 0})) {
             return fail(ErrorCode::kInvalidLayout, "mlir.tensor.pad",
                         "padding or physical NHWC order is incorrect");
         }
@@ -470,17 +532,23 @@ Status import_conv2d(::mlir::MLIRContext& context,
     }
 
     Conv2DCompileMetadata metadata_candidate;
-    populate_metadata(graph, options, metadata_candidate);
+    status = populate_metadata(graph, options, metadata_candidate);
+    if (status.is_bad()) {
+        return status;
+    }
 
-    auto const x = graph.tensors.find(graph.conv.x_uid)->second;
-    auto const w = graph.tensors.find(graph.conv.w_uid)->second;
-    auto const y = graph.tensors.find(graph.conv.y_uid)->second;
+    auto const& conv_desc = *graph.single_conv_fprop();
+    auto const x = graph.tensors.find(conv_desc.x_uid)->second;
+    auto const w = graph.tensors.find(conv_desc.w_uid)->second;
+    auto const y = graph.tensors.find(conv_desc.y_uid)->second;
     auto const x_shape = physical_shape(x, false);
     auto const w_shape = physical_shape(w, true);
     auto const y_shape = physical_shape(y, false);
     llvm::SmallVector<std::int64_t, 4> padded_shape = x_shape;
-    padded_shape[1] += graph.conv.pre_padding[0] + graph.conv.post_padding[0];
-    padded_shape[2] += graph.conv.pre_padding[1] + graph.conv.post_padding[1];
+    padded_shape[1] +=
+        conv_desc.pre_padding[0] + conv_desc.post_padding[0];
+    padded_shape[2] +=
+        conv_desc.pre_padding[1] + conv_desc.post_padding[1];
 
     auto f32 = ::mlir::Float32Type::get(&context);
     auto x_type = ::mlir::RankedTensorType::get(x_shape, f32);
@@ -505,16 +573,16 @@ Status import_conv2d(::mlir::MLIRContext& context,
     llvm::SmallVector<::mlir::OpFoldResult, 4> low;
     llvm::SmallVector<::mlir::OpFoldResult, 4> high;
     low.push_back(builder.getIndexAttr(0));
-    low.push_back(builder.getIndexAttr(graph.conv.pre_padding[0]));
-    low.push_back(builder.getIndexAttr(graph.conv.pre_padding[1]));
+    low.push_back(builder.getIndexAttr(conv_desc.pre_padding[0]));
+    low.push_back(builder.getIndexAttr(conv_desc.pre_padding[1]));
     low.push_back(builder.getIndexAttr(0));
     high.push_back(builder.getIndexAttr(0));
-    high.push_back(builder.getIndexAttr(graph.conv.post_padding[0]));
-    high.push_back(builder.getIndexAttr(graph.conv.post_padding[1]));
+    high.push_back(builder.getIndexAttr(conv_desc.post_padding[0]));
+    high.push_back(builder.getIndexAttr(conv_desc.post_padding[1]));
     high.push_back(builder.getIndexAttr(0));
-    bool needs_padding = graph.conv.pre_padding !=
+    bool needs_padding = conv_desc.pre_padding !=
                              std::array<std::int64_t, 2>{0, 0} ||
-                         graph.conv.post_padding !=
+                         conv_desc.post_padding !=
                              std::array<std::int64_t, 2>{0, 0};
     ::mlir::Value conv_input = entry->getArgument(0);
     if (needs_padding) {

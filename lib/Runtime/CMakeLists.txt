@@ -1,5 +1,6 @@
 add_library(deepforge_runtime STATIC
     Executable.cpp
+    GraphMetadata.cpp
 )
 add_library(DeepForge::Runtime ALIAS deepforge_runtime)
 
@@ -16,6 +17,7 @@ target_include_directories(deepforge_runtime SYSTEM PUBLIC
 )
 target_link_libraries(deepforge_runtime
     PUBLIC
+        DeepForge::Import
         MLIRExecutionEngine
         MLIRLLVMToLLVMIRTranslation
         LLVMJITLink

@@ -182,8 +182,8 @@ int main(int argc, char** argv) {
     }
 
     auto symmetric = graph;
-    symmetric.conv.pre_padding = {1, 1};
-    symmetric.conv.post_padding = {1, 1};
+    symmetric.single_conv_fprop()->pre_padding = {1, 1};
+    symmetric.single_conv_fprop()->post_padding = {1, 1};
     status = import_conv2d(context, symmetric, module);
     tests.expect_good(status, "symmetric padding import");
     if (module) {
@@ -192,14 +192,15 @@ int main(int argc, char** argv) {
     }
 
     auto minimal = graph;
-    minimal.tensors.at(minimal.conv.x_uid).dim = {1, 1, 1, 1};
-    minimal.tensors.at(minimal.conv.w_uid).dim = {1, 1, 1, 1};
-    minimal.tensors.at(minimal.conv.y_uid).dim = {1, 1, 1, 1};
-    minimal.tensors.at(minimal.conv.x_uid).stride = {1, 1, 1, 1};
-    minimal.tensors.at(minimal.conv.w_uid).stride = {1, 1, 1, 1};
-    minimal.tensors.at(minimal.conv.y_uid).stride = {1, 1, 1, 1};
-    minimal.conv.pre_padding = {0, 0};
-    minimal.conv.post_padding = {0, 0};
+    auto const minimal_conv = *minimal.single_conv_fprop();
+    minimal.tensors.at(minimal_conv.x_uid).dim = {1, 1, 1, 1};
+    minimal.tensors.at(minimal_conv.w_uid).dim = {1, 1, 1, 1};
+    minimal.tensors.at(minimal_conv.y_uid).dim = {1, 1, 1, 1};
+    minimal.tensors.at(minimal_conv.x_uid).stride = {1, 1, 1, 1};
+    minimal.tensors.at(minimal_conv.w_uid).stride = {1, 1, 1, 1};
+    minimal.tensors.at(minimal_conv.y_uid).stride = {1, 1, 1, 1};
+    minimal.single_conv_fprop()->pre_padding = {0, 0};
+    minimal.single_conv_fprop()->post_padding = {0, 0};
     status = import_conv2d(context, minimal, module);
     tests.expect_good(status, "minimal 1x1 Conv2D import");
     if (module) {
@@ -218,7 +219,7 @@ int main(int argc, char** argv) {
     }
 
     auto wrong_layout = graph;
-    wrong_layout.tensors.at(graph.conv.w_uid).stride[0] = 1;
+    wrong_layout.tensors.at(graph.single_conv_fprop()->w_uid).stride[0] = 1;
     auto const preserved_metadata = metadata;
     status = import_conv2d(context, wrong_layout, module, {}, &metadata);
     tests.expect_code(status, ErrorCode::kInvalidLayout,
@@ -230,7 +231,7 @@ int main(int argc, char** argv) {
                 "failed import leaves previous metadata unchanged");
 
     auto wrong_shape = graph;
-    wrong_shape.tensors.at(graph.conv.y_uid).dim[2] = 4;
+    wrong_shape.tensors.at(graph.single_conv_fprop()->y_uid).dim[2] = 4;
     mlir::OwningOpRef<mlir::ModuleOp> rejected;
     status = import_conv2d(context, wrong_shape, rejected);
     tests.expect_code(status, ErrorCode::kInvalidShape,

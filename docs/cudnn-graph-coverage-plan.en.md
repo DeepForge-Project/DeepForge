@@ -140,6 +140,8 @@ Scalar correctness remains available when no optimized candidate is eligible.
 
 ### C0. Generic foundation
 
+**Status:** completed and validated on 2026-07-31.
+
 **Work:** introduce generic tensors, nodes, multi-node DAG validation,
 capability registry, generic compile metadata, runtime argument tables, and
 `.dfo` v2. Migrate the existing Conv path onto these contracts without changing

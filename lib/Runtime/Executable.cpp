@@ -1,5 +1,6 @@
 #include "DeepForge/Runtime/Executable.h"
 
+#include "DeepForge/Import/Capability.h"
 #include "RuntimeInternal.h"
 
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
@@ -12,6 +13,7 @@
 #include <cpuid.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -48,32 +50,56 @@ bool checked_add(std::uintptr_t lhs, std::size_t rhs,
     return true;
 }
 
-bool checked_product(std::array<std::int64_t, 4> const& shape,
-                     std::size_t& bytes) {
-    std::uint64_t elements = 1;
-    for (auto dimension : shape) {
-        if (dimension <= 0 ||
-            static_cast<std::uint64_t>(dimension) >
-                std::numeric_limits<std::uint64_t>::max() / elements) {
-            return false;
-        }
-        elements *= static_cast<std::uint64_t>(dimension);
-    }
-    if (elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
-        return false;
-    }
-    bytes = static_cast<std::size_t>(elements * sizeof(float));
-    return true;
-}
-
 struct Interval {
     std::uintptr_t begin = 0;
     std::uintptr_t end = 0;
     std::string name;
+    compiler::TensorAccess access = compiler::TensorAccess::kRead;
 };
 
 bool overlaps(Interval const& lhs, Interval const& rhs) {
     return lhs.begin < rhs.end && rhs.begin < lhs.end;
+}
+
+bool writes(compiler::TensorAccess access) {
+    return access != compiler::TensorAccess::kRead;
+}
+
+Status validate_argument_table(
+    compiler::Conv2DCompileMetadata const& metadata) {
+    auto status = compiler::validate_graph_compile_metadata(metadata);
+    if (status.is_bad()) {
+        return status;
+    }
+    if (metadata.arguments.size() != 3) {
+        return fail(ErrorCode::kInvalidValue, "metadata.arguments",
+                    "Conv adapter requires a function name and three arguments");
+    }
+    for (auto const& argument : metadata.arguments) {
+        if (argument.data_type != import::DataType::kFloat32 ||
+            argument.dimensions.size() != 4) {
+            return fail(ErrorCode::kInvalidValue, "metadata.arguments",
+                        "Conv adapter requires rank-4 FLOAT arguments");
+        }
+    }
+    auto const& x = metadata.arguments[0];
+    auto const& w = metadata.arguments[1];
+    auto const& y = metadata.arguments[2];
+    if (x.uid != metadata.x_uid || w.uid != metadata.w_uid ||
+        y.uid != metadata.y_uid || x.name != "X" || w.name != "W" ||
+        y.name != "Y" || x.access != compiler::TensorAccess::kRead ||
+        w.access != compiler::TensorAccess::kRead ||
+        y.access != compiler::TensorAccess::kWrite ||
+        !std::equal(x.dimensions.begin(), x.dimensions.end(),
+                    metadata.x_shape.begin()) ||
+        !std::equal(w.dimensions.begin(), w.dimensions.end(),
+                    metadata.w_shape.begin()) ||
+        !std::equal(y.dimensions.begin(), y.dimensions.end(),
+                    metadata.y_shape.begin())) {
+        return fail(ErrorCode::kInvalidValue, "metadata.arguments",
+                    "argument table does not match the Conv adapter");
+    }
+    return Status::ok();
 }
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -263,65 +289,44 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
                         std::string(cpu_variant_name(variant)));
     }
 
-    auto find_pointer = [&](std::int64_t uid,
-                            std::string const& name) -> std::pair<void*, Status> {
-        auto it = uid_to_host_ptr.find(uid);
+    std::vector<void*> argument_pointers;
+    argument_pointers.reserve(impl_->metadata.arguments.size());
+    std::vector<Interval> intervals;
+    intervals.reserve(impl_->metadata.arguments.size());
+    for (auto const& argument : impl_->metadata.arguments) {
+        auto it = uid_to_host_ptr.find(argument.uid);
         if (it == uid_to_host_ptr.end()) {
-            return {nullptr, fail(ErrorCode::kInvalidVariantPack, name,
-                                  "UID is absent from variant pack")};
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "UID is absent from variant pack");
         }
         if (it->second == nullptr) {
-            return {nullptr, fail(ErrorCode::kInvalidVariantPack, name,
-                                  "variant-pack pointer is null")};
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "variant-pack pointer is null");
         }
-        if (reinterpret_cast<std::uintptr_t>(it->second) % alignof(float) != 0) {
-            return {nullptr, fail(ErrorCode::kInvalidVariantPack, name,
-                                  "tensor pointer is not float-aligned")};
+        auto begin = reinterpret_cast<std::uintptr_t>(it->second);
+        if (begin % argument.alignment != 0) {
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "tensor pointer does not meet required alignment");
         }
-        return {it->second, Status::ok()};
-    };
-
-    auto x_result = find_pointer(impl_->metadata.x_uid, "X");
-    if (x_result.second.is_bad()) {
-        return x_result.second;
-    }
-    auto w_result = find_pointer(impl_->metadata.w_uid, "W");
-    if (w_result.second.is_bad()) {
-        return w_result.second;
-    }
-    auto y_result = find_pointer(impl_->metadata.y_uid, "Y");
-    if (y_result.second.is_bad()) {
-        return y_result.second;
-    }
-
-    std::size_t x_bytes = 0;
-    std::size_t w_bytes = 0;
-    std::size_t y_bytes = 0;
-    if (!checked_product(impl_->metadata.x_shape, x_bytes) ||
-        !checked_product(impl_->metadata.w_shape, w_bytes) ||
-        !checked_product(impl_->metadata.y_shape, y_bytes)) {
-        return fail(ErrorCode::kDimensionOverflow, "runtime.tensor",
-                    "tensor byte range overflows size_t");
-    }
-
-    std::vector<Interval> intervals;
-    intervals.reserve(4);
-    for (auto const& item : std::array<std::pair<char const*,
-                                                 std::pair<void*, std::size_t>>,
-                                         3>{{{"X", {x_result.first, x_bytes}},
-                                             {"W", {w_result.first, w_bytes}},
-                                             {"Y", {y_result.first, y_bytes}}}}) {
-        auto begin = reinterpret_cast<std::uintptr_t>(item.second.first);
+        if (argument.size_bytes > std::numeric_limits<std::size_t>::max()) {
+            return fail(ErrorCode::kDimensionOverflow, argument.name,
+                        "tensor byte range overflows size_t");
+        }
         std::uintptr_t end = 0;
-        if (!checked_add(begin, item.second.second, end)) {
-            return fail(ErrorCode::kDimensionOverflow, item.first,
+        if (!checked_add(begin, static_cast<std::size_t>(argument.size_bytes),
+                         end)) {
+            return fail(ErrorCode::kDimensionOverflow, argument.name,
                         "tensor pointer range overflows uintptr_t");
         }
-        intervals.push_back({begin, end, item.first});
+        argument_pointers.push_back(it->second);
+        intervals.push_back(
+            {begin, end, argument.name, argument.access});
     }
     for (std::size_t lhs = 0; lhs < intervals.size(); ++lhs) {
         for (std::size_t rhs = lhs + 1; rhs < intervals.size(); ++rhs) {
-            if (overlaps(intervals[lhs], intervals[rhs])) {
+            if (overlaps(intervals[lhs], intervals[rhs]) &&
+                (writes(intervals[lhs].access) ||
+                 writes(intervals[rhs].access))) {
                 return fail(ErrorCode::kInvalidVariantPack, "runtime.alias",
                             intervals[lhs].name + " overlaps " +
                                 intervals[rhs].name);
@@ -356,7 +361,8 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
                         "workspace pointer range overflows uintptr_t");
         }
         Interval workspace_interval{workspace_address, workspace_end,
-                                    "workspace"};
+                                    "workspace",
+                                    compiler::TensorAccess::kReadWrite};
         for (auto const& interval : intervals) {
             if (overlaps(interval, workspace_interval)) {
                 return fail(ErrorCode::kInvalidVariantPack, "runtime.alias",
@@ -365,11 +371,11 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
         }
     }
 
-    auto x = make_descriptor<4>(static_cast<float*>(x_result.first),
+    auto x = make_descriptor<4>(static_cast<float*>(argument_pointers[0]),
                                 impl_->metadata.x_shape);
-    auto w = make_descriptor<4>(static_cast<float*>(w_result.first),
+    auto w = make_descriptor<4>(static_cast<float*>(argument_pointers[1]),
                                 impl_->metadata.w_shape);
-    auto y = make_descriptor<4>(static_cast<float*>(y_result.first),
+    auto y = make_descriptor<4>(static_cast<float*>(argument_pointers[2]),
                                 impl_->metadata.y_shape);
     auto workspace_descriptor = make_workspace_descriptor(
         workspace, static_cast<std::int64_t>(impl_->workspace.size_bytes));
@@ -411,6 +417,10 @@ Status ExecutableFactory::create(
     std::vector<std::unique_ptr<::mlir::ExecutionEngine>> engines,
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
+    auto metadata_status = validate_argument_table(metadata);
+    if (metadata_status.is_bad()) {
+        return metadata_status;
+    }
     if (engines.size() != 3) {
         return fail(ErrorCode::kInvalidArgument, "engines",
                     "expected scalar, AVX2 and AVX-512 slots");
@@ -441,6 +451,10 @@ Status ExecutableFactory::create_object(
     std::array<void*, 3> entry_points,
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
+    auto metadata_status = validate_argument_table(metadata);
+    if (metadata_status.is_bad()) {
+        return metadata_status;
+    }
     for (std::size_t index = 0; index < entry_points.size(); ++index) {
         if (!object_jits[index] || entry_points[index] == nullptr ||
             symbols[index].empty()) {

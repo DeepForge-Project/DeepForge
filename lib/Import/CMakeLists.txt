@@ -61,6 +61,7 @@ message(STATUS "Using cuDNN Frontend headers: ${DEEPFORGE_CUDNN_FRONTEND_INCLUDE
 message(STATUS "Using vendored nlohmann/json: 3.11.3")
 
 add_library(deepforge_import STATIC
+    Capability.cpp
     SerializedGraphImporter.cpp
 )
 add_library(DeepForge::Import ALIAS deepforge_import)

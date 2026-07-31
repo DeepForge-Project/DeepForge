@@ -28,6 +28,7 @@ enum class ErrorCode : std::uint8_t {
     kInvalidVariantPack = 17,
     kUnsupportedCpuFeature = 18,
     kGraphExecutionFailed = 19,
+    kUnsupportedOperation = 20,
 };
 
 std::string_view error_code_name(ErrorCode code) noexcept;

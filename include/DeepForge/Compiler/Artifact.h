@@ -10,11 +10,19 @@
 
 namespace deepforge::compiler {
 
-inline constexpr std::uint32_t kArtifactFormatVersion = 1;
+inline constexpr std::uint32_t kLegacyArtifactFormatVersion = 1;
+inline constexpr std::uint32_t kArtifactFormatVersion = 2;
 inline constexpr double kDefaultAbsoluteTolerance = 1.0e-4;
 inline constexpr double kDefaultRelativeTolerance = 1.0e-3;
 
+enum class ArtifactAdapterKind : std::uint32_t {
+    kConv2DRankedMemref = 0,
+};
+
 struct ArtifactInfo {
+    std::uint32_t format_version = 0;
+    ArtifactAdapterKind adapter_kind =
+        ArtifactAdapterKind::kConv2DRankedMemref;
     std::string deepforge_version;
     std::string llvm_version;
     std::string frontend_version;

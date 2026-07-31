@@ -1,4 +1,5 @@
 #include "DeepForge/Compiler/Artifact.h"
+#include "DeepForge/Import/Capability.h"
 #include "../Runtime/RuntimeInternal.h"
 
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
@@ -99,6 +100,13 @@ void append_i64_array(std::vector<std::uint8_t>& output,
     }
 }
 
+void append_i64_vector(std::vector<std::uint8_t>& output,
+                       std::vector<std::int64_t> const& values) {
+    for (auto value : values) {
+        append_i64(output, value);
+    }
+}
+
 class Reader {
 public:
     explicit Reader(std::span<std::uint8_t const> input) : input_(input) {}
@@ -184,6 +192,37 @@ private:
     std::size_t offset_ = 0;
 };
 
+void append_conv_adapter_metadata(
+    std::vector<std::uint8_t>& output,
+    Conv2DCompileMetadata const& metadata) {
+    append_i64(output, metadata.x_uid);
+    append_i64(output, metadata.w_uid);
+    append_i64(output, metadata.y_uid);
+    append_i64_array(output, metadata.x_shape);
+    append_i64_array(output, metadata.w_shape);
+    append_i64_array(output, metadata.y_shape);
+    append_i64_array(output, metadata.padded_x_shape);
+    append_i64_array(output, metadata.pre_padding);
+    append_i64_array(output, metadata.post_padding);
+    append_i64_array(output, metadata.stride);
+    append_i64_array(output, metadata.dilation);
+}
+
+bool read_conv_adapter_metadata(Reader& reader,
+                                Conv2DCompileMetadata& metadata) {
+    return reader.read_i64(metadata.x_uid) &&
+           reader.read_i64(metadata.w_uid) &&
+           reader.read_i64(metadata.y_uid) &&
+           reader.read_i64_array(metadata.x_shape) &&
+           reader.read_i64_array(metadata.w_shape) &&
+           reader.read_i64_array(metadata.y_shape) &&
+           reader.read_i64_array(metadata.padded_x_shape) &&
+           reader.read_i64_array(metadata.pre_padding) &&
+           reader.read_i64_array(metadata.post_padding) &&
+           reader.read_i64_array(metadata.stride) &&
+           reader.read_i64_array(metadata.dilation);
+}
+
 bool valid_shape(std::array<std::int64_t, 4> const& shape) {
     std::uint64_t element_count = 1;
     constexpr auto kMaximumElements =
@@ -201,6 +240,87 @@ bool valid_shape(std::array<std::int64_t, 4> const& shape) {
     return element_count <=
            static_cast<std::uintmax_t>(
                std::numeric_limits<std::size_t>::max() / sizeof(float));
+}
+
+std::vector<std::int64_t> contiguous_strides(
+    std::array<std::int64_t, 4> const& shape) {
+    std::vector<std::int64_t> strides(shape.size(), 1);
+    for (std::size_t index = shape.size() - 1; index > 0; --index) {
+        if (shape[index] <= 0 ||
+            strides[index] > std::numeric_limits<std::int64_t>::max() /
+                                 shape[index]) {
+            return {};
+        }
+        strides[index - 1] = strides[index] * shape[index];
+    }
+    return strides;
+}
+
+bool append_legacy_argument(Conv2DCompileMetadata& metadata,
+                            std::int64_t uid,
+                            std::string name,
+                            std::array<std::int64_t, 4> const& shape,
+                            TensorAccess access) {
+    TensorArgumentMetadata argument;
+    argument.uid = uid;
+    argument.name = std::move(name);
+    argument.data_type = import::DataType::kFloat32;
+    argument.dimensions.assign(shape.begin(), shape.end());
+    argument.strides = contiguous_strides(shape);
+    argument.alignment = alignof(float);
+    argument.access = access;
+    if (argument.strides.empty() ||
+        !import::tensor_storage_bytes(argument.data_type, argument.dimensions,
+                                      argument.strides,
+                                      argument.size_bytes)) {
+        return false;
+    }
+    metadata.arguments.push_back(std::move(argument));
+    return true;
+}
+
+bool synthesize_legacy_arguments(Conv2DCompileMetadata& metadata) {
+    metadata.arguments.clear();
+    return append_legacy_argument(metadata, metadata.x_uid, "X",
+                                  metadata.x_shape, TensorAccess::kRead) &&
+           append_legacy_argument(metadata, metadata.w_uid, "W",
+                                  metadata.w_shape, TensorAccess::kRead) &&
+           append_legacy_argument(metadata, metadata.y_uid, "Y",
+                                  metadata.y_shape, TensorAccess::kWrite);
+}
+
+bool validate_conv_arguments(Conv2DCompileMetadata const& metadata,
+                             std::string& detail) {
+    auto status = validate_graph_compile_metadata(metadata);
+    if (status.is_bad()) {
+        detail = status.message();
+        return false;
+    }
+    if (metadata.arguments.size() != 3) {
+        detail = "Conv adapter requires exactly three tensor arguments";
+        return false;
+    }
+    auto const& x = metadata.arguments[0];
+    auto const& w = metadata.arguments[1];
+    auto const& y = metadata.arguments[2];
+    auto shape_matches = [](TensorArgumentMetadata const& argument,
+                            std::array<std::int64_t, 4> const& shape) {
+        return argument.data_type == import::DataType::kFloat32 &&
+               argument.dimensions.size() == shape.size() &&
+               std::equal(argument.dimensions.begin(),
+                          argument.dimensions.end(), shape.begin());
+    };
+    if (x.uid != metadata.x_uid || w.uid != metadata.w_uid ||
+        y.uid != metadata.y_uid || x.name != "X" || w.name != "W" ||
+        y.name != "Y" || x.access != TensorAccess::kRead ||
+        w.access != TensorAccess::kRead || y.access != TensorAccess::kWrite ||
+        !shape_matches(x, metadata.x_shape) ||
+        !shape_matches(w, metadata.w_shape) ||
+        !shape_matches(y, metadata.y_shape)) {
+        detail = "generic argument table does not match Conv metadata";
+        return false;
+    }
+    return true;
 }
 
 std::filesystem::path unique_temporary_path(
@@ -241,6 +361,9 @@ bool is_power_of_two(std::uint64_t value) {
 bool validate_contract(
     Conv2DCompileMetadata const& metadata, WorkspacePlan const& workspace,
     std::array<VariantCode, 3> const& variants, std::string& detail) {
+    if (!validate_conv_arguments(metadata, detail)) {
+        return false;
+    }
     if (metadata.function_name.empty() ||
         metadata.function_name.find('\0') != std::string::npos) {
         detail = "function name is empty or contains NUL";
@@ -479,17 +602,36 @@ Status serialize_artifact(CompilationResult const& compilation,
                     "string is too large");
     }
 
-    append_i64(bytes, compilation.metadata.x_uid);
-    append_i64(bytes, compilation.metadata.w_uid);
-    append_i64(bytes, compilation.metadata.y_uid);
-    append_i64_array(bytes, compilation.metadata.x_shape);
-    append_i64_array(bytes, compilation.metadata.w_shape);
-    append_i64_array(bytes, compilation.metadata.y_shape);
-    append_i64_array(bytes, compilation.metadata.padded_x_shape);
-    append_i64_array(bytes, compilation.metadata.pre_padding);
-    append_i64_array(bytes, compilation.metadata.post_padding);
-    append_i64_array(bytes, compilation.metadata.stride);
-    append_i64_array(bytes, compilation.metadata.dilation);
+    if (compilation.metadata.arguments.size() >
+        std::numeric_limits<std::uint32_t>::max()) {
+        return fail(ErrorCode::kDimensionOverflow, "artifact.arguments",
+                    "too many tensor arguments");
+    }
+    append_u32(
+        bytes,
+        static_cast<std::uint32_t>(compilation.metadata.arguments.size()));
+    for (auto const& argument : compilation.metadata.arguments) {
+        append_i64(bytes, argument.uid);
+        if (!append_string(bytes, argument.name)) {
+            return fail(ErrorCode::kDimensionOverflow, "artifact.arguments",
+                        "argument name is too large");
+        }
+        append_u32(bytes, static_cast<std::uint32_t>(argument.data_type));
+        append_u32(bytes, static_cast<std::uint32_t>(argument.access));
+        append_u64(bytes, argument.alignment);
+        append_u64(bytes, argument.size_bytes);
+        append_u32(bytes,
+                   static_cast<std::uint32_t>(argument.dimensions.size()));
+        append_i64_vector(bytes, argument.dimensions);
+        append_i64_vector(bytes, argument.strides);
+    }
+
+    append_u32(
+        bytes,
+        static_cast<std::uint32_t>(ArtifactAdapterKind::kConv2DRankedMemref));
+    std::vector<std::uint8_t> adapter_metadata;
+    append_conv_adapter_metadata(adapter_metadata, compilation.metadata);
+    append_blob(bytes, adapter_metadata);
 
     append_u64(bytes, compilation.workspace.size_bytes);
     append_u64(bytes, compilation.workspace.alignment);
@@ -551,7 +693,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     if (!reader.read_u32(version) || !reader.read_u32(endian)) {
         return parse_failure("header is truncated");
     }
-    if (version != kArtifactFormatVersion) {
+    if (version != kLegacyArtifactFormatVersion &&
+        version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
     if (endian != kEndianMarker) {
@@ -559,22 +702,12 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     }
 
     ArtifactInfo result;
+    result.format_version = version;
     if (!reader.read_string(result.deepforge_version) ||
         !reader.read_string(result.llvm_version) ||
         !reader.read_string(result.frontend_version) ||
         !reader.read_string(result.target_triple) ||
-        !reader.read_string(result.metadata.function_name) ||
-        !reader.read_i64(result.metadata.x_uid) ||
-        !reader.read_i64(result.metadata.w_uid) ||
-        !reader.read_i64(result.metadata.y_uid) ||
-        !reader.read_i64_array(result.metadata.x_shape) ||
-        !reader.read_i64_array(result.metadata.w_shape) ||
-        !reader.read_i64_array(result.metadata.y_shape) ||
-        !reader.read_i64_array(result.metadata.padded_x_shape) ||
-        !reader.read_i64_array(result.metadata.pre_padding) ||
-        !reader.read_i64_array(result.metadata.post_padding) ||
-        !reader.read_i64_array(result.metadata.stride) ||
-        !reader.read_i64_array(result.metadata.dilation)) {
+        !reader.read_string(result.metadata.function_name)) {
         return parse_failure("metadata is truncated or malformed");
     }
     if (result.deepforge_version != kDeepForgeVersion ||
@@ -586,6 +719,74 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         result.target_triple.find('\0') != std::string::npos) {
         return parse_failure("target triple is invalid");
     }
+    if (version == kArtifactFormatVersion) {
+        std::uint32_t argument_count = 0;
+        if (!reader.read_u32(argument_count) || argument_count == 0 ||
+            argument_count > 4096) {
+            return parse_failure("argument table count is invalid");
+        }
+        result.metadata.arguments.reserve(argument_count);
+        for (std::uint32_t index = 0; index < argument_count; ++index) {
+            TensorArgumentMetadata argument;
+            std::uint32_t data_type = 0;
+            std::uint32_t access = 0;
+            std::uint32_t rank = 0;
+            if (!reader.read_i64(argument.uid) ||
+                !reader.read_string(argument.name) ||
+                !reader.read_u32(data_type) || !reader.read_u32(access) ||
+                !reader.read_u64(argument.alignment) ||
+                !reader.read_u64(argument.size_bytes) ||
+                !reader.read_u32(rank) || rank == 0 || rank > 64 ||
+                data_type > static_cast<std::uint32_t>(
+                                import::DataType::kComplexFloat64) ||
+                access >
+                    static_cast<std::uint32_t>(TensorAccess::kReadWrite)) {
+                return parse_failure("argument table entry is malformed");
+            }
+            argument.data_type = static_cast<import::DataType>(data_type);
+            argument.access = static_cast<TensorAccess>(access);
+            argument.dimensions.resize(rank);
+            argument.strides.resize(rank);
+            for (auto& dimension : argument.dimensions) {
+                if (!reader.read_i64(dimension)) {
+                    return parse_failure("argument dimensions are truncated");
+                }
+            }
+            for (auto& stride : argument.strides) {
+                if (!reader.read_i64(stride)) {
+                    return parse_failure("argument strides are truncated");
+                }
+            }
+            result.metadata.arguments.push_back(std::move(argument));
+        }
+
+        std::uint32_t adapter_kind = 0;
+        std::vector<std::uint8_t> adapter_metadata;
+        if (!reader.read_u32(adapter_kind) ||
+            !reader.read_blob(adapter_metadata)) {
+            return parse_failure("adapter metadata is truncated or malformed");
+        }
+        if (adapter_kind != static_cast<std::uint32_t>(
+                                ArtifactAdapterKind::kConv2DRankedMemref)) {
+            return parse_failure("adapter kind is unsupported");
+        }
+        result.adapter_kind = static_cast<ArtifactAdapterKind>(adapter_kind);
+        Reader adapter_reader(adapter_metadata);
+        if (!read_conv_adapter_metadata(adapter_reader, result.metadata) ||
+            adapter_reader.remaining() != 0) {
+            return parse_failure("Conv adapter metadata is malformed");
+        }
+    } else {
+        result.adapter_kind = ArtifactAdapterKind::kConv2DRankedMemref;
+        if (!read_conv_adapter_metadata(reader, result.metadata)) {
+            return parse_failure("legacy Conv metadata is truncated");
+        }
+        if (!synthesize_legacy_arguments(result.metadata)) {
+            return parse_failure(
+                "legacy argument metadata cannot be reconstructed");
+        }
+    }
+
     if (!valid_shape(result.metadata.x_shape) ||
         !valid_shape(result.metadata.w_shape) ||
         !valid_shape(result.metadata.y_shape) ||

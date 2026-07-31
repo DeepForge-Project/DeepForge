@@ -130,6 +130,8 @@ model 在语义 lowering 之后、最终 Vector/LLVM codegen 之前选择 candid
 
 ### C0. 通用基础架构
 
+**状态**：已于 2026-07-31 完成并通过验证。
+
 **工作内容**：引入通用 tensor、node、多节点 DAG 验证、capability registry、
 通用 compile metadata、runtime argument table 和 `.dfo` v2。把现有 Conv 路径迁移
 到这些契约上，但不改变对外行为。

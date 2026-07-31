@@ -6,7 +6,8 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前格式版本为 `1`。
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `2`；reader
+同时接受版本 `1` 的 Conv2D artifact，并为其重建 argument table。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -31,7 +32,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 1
+u32 format_version = 2
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -40,6 +41,24 @@ string cudnn_frontend_version
 string target_triple
 string public_function_name
 
+u32 tensor_argument_count
+repeated tensor_argument {
+  i64 uid
+  string name
+  u32 data_type
+  u32 access                  # 0 read, 1 write, 2 read-write
+  u64 alignment
+  u64 size_bytes
+  u32 rank
+  i64 dimensions[rank]
+  i64 strides[rank]
+}
+
+u32 adapter_kind
+u64 adapter_metadata_size
+u8 adapter_metadata[adapter_metadata_size]
+
+# adapter_kind 0：过渡期 ranked-memref Conv2D adapter payload
 i64 x_uid, w_uid, y_uid
 i64 x_shape[4], w_shape[4], y_shape[4], padded_x_shape[4]
 i64 pre_padding[2], post_padding[2], stride[2], dilation[2]
@@ -66,6 +85,10 @@ repeated variant {
 u64 fnv1a_64_checksum        # covers every preceding byte
 ```
 
+argument table 与带长度的 adapter section 有意分离：前者与 operation 无关；
+adapter kind `0` 保留当前 ranked-memref Conv2D 调用。后续通用 wrapper 可以增加新的
+adapter kind，而不把算子专属字段写入顶层格式。reader 会拒绝未知 adapter kind。
+
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
 为 `_mlir_ciface_<symbol>`。原始函数和 wrapper 都是 ELF `GLOBAL HIDDEN`，不会成为
@@ -78,9 +101,10 @@ loader 要求 artifact 的 DeepForge、LLVM、Frontend 和格式版本受当前 
 避免三个变体的同类内部符号相互冲突。loader 解析 C-interface wrapper 后，将入口、
 metadata 和 workspace plan 交给与开发期 MLIR ExecutionEngine 相同的 runtime adapter。
 
-执行前仍会进行 UID、空指针、f32 对齐、区间重叠、workspace 64-byte 对齐和整数溢出
-检查。CPUID、FMA、OSXSAVE 和 XGETBV 决定 AVX-512、AVX2 或 scalar 的安全选择；
-装载 object 本身不执行高 ISA 代码。
+执行前会验证有序 argument table、UID、空指针、每个 tensor 的 alignment 和 byte
+range、workspace 64-byte 对齐及整数溢出。read/read alias 合法；任何涉及 write
+argument 或 workspace 的重叠都会被拒绝。CPUID、FMA、OSXSAVE 和 XGETBV 决定
+AVX-512、AVX2 或 scalar 的安全选择；装载 object 本身不执行高 ISA 代码。
 
 ## 4. 信任边界
 
@@ -93,7 +117,9 @@ object section；ORC 装载后该 object 以当前进程权限执行。因此：
 
 ## 5. 兼容策略
 
-MVP reader/loader 拒绝未知 format version、producer 版本、端序、不匹配的 target triple、数值契约、
-重复 UID、不一致 shape/padding、非法 workspace alignment/range/lifetime、错误的
-variant symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum
-错误。格式扩展必须增加新版本，不得在版本 `1` 下改变字段顺序或既有字段语义。
+reader/loader 拒绝未知 format version、producer 版本、端序、不匹配的 target triple、
+数值契约、重复 UID、不一致 shape/padding、非法 workspace
+alignment/range/lifetime、错误的 argument table 或 adapter payload、variant
+symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum 错误。
+顶层编码发生变化时必须增加格式版本。版本 `1` 的字段顺序和语义保持冻结，仅用于
+读取；新编译结果写版本 `2`。

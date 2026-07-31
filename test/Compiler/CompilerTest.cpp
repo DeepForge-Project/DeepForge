@@ -147,6 +147,20 @@ int main(int argc, char** argv) {
                 "AVX2 object is emitted");
     tests.check(!compilation.variants[2].object.empty(),
                 "AVX-512 object is emitted");
+    tests.check(compilation.metadata.arguments.size() == 3 &&
+                    compilation.metadata.arguments[0].uid ==
+                        compilation.metadata.x_uid &&
+                    compilation.metadata.arguments[1].uid ==
+                        compilation.metadata.w_uid &&
+                    compilation.metadata.arguments[2].uid ==
+                        compilation.metadata.y_uid &&
+                    compilation.metadata.arguments[0].access ==
+                        deepforge::compiler::TensorAccess::kRead &&
+                    compilation.metadata.arguments[1].access ==
+                        deepforge::compiler::TensorAccess::kRead &&
+                    compilation.metadata.arguments[2].access ==
+                        deepforge::compiler::TensorAccess::kWrite,
+                "compile metadata exposes an ordered generic argument table");
     tests.check(compilation.variants[0].symbol != compilation.variants[1].symbol &&
                     compilation.variants[1].symbol !=
                         compilation.variants[2].symbol,
@@ -274,6 +288,18 @@ int main(int argc, char** argv) {
     tests.check(status.code() ==
                     deepforge::import::ErrorCode::kInvalidVariantPack,
                 "overlapping tensor ranges are rejected at runtime");
+
+    auto shared_size = std::max(x.size(), w.size());
+    std::vector<float> shared_read_storage(shared_size, 0.25F);
+    std::vector<float> shared_read_y(y.size(), -1.0F);
+    deepforge::runtime::VariantPack shared_read_pack{
+        {compilation.metadata.x_uid, shared_read_storage.data()},
+        {compilation.metadata.w_uid, shared_read_storage.data()},
+        {compilation.metadata.y_uid, shared_read_y.data()}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, shared_read_pack,
+        workspace.pointer);
+    tests.good(status, "overlapping read-only tensor ranges are accepted");
 
     if (workspace.size != 0) {
         auto workspace_alias = pack;

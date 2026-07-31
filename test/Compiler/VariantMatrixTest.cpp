@@ -107,14 +107,16 @@ deepforge::import::SerializedGraph make_graph(ShapeCase shape) {
     graph.tensors.emplace(w.uid, w);
     graph.tensors.emplace(y.uid, y);
 
-    graph.conv.name = "conv_fprop";
-    graph.conv.x_uid = x.uid;
-    graph.conv.w_uid = w.uid;
-    graph.conv.y_uid = y.uid;
-    graph.conv.pre_padding = {0, 0};
-    graph.conv.post_padding = {0, 0};
-    graph.conv.stride = {1, 1};
-    graph.conv.dilation = {1, 1};
+    auto& conv = graph.emplace_conv_fprop();
+    conv.name = "conv_fprop";
+    conv.x_uid = x.uid;
+    conv.w_uid = w.uid;
+    conv.y_uid = y.uid;
+    conv.pre_padding = {0, 0};
+    conv.post_padding = {0, 0};
+    conv.stride = {1, 1};
+    conv.dilation = {1, 1};
+    graph.nodes.back().name = conv.name;
     return graph;
 }
 

@@ -1,4 +1,5 @@
 #include "DeepForge/Import/SerializedGraphImporter.h"
+#include "DeepForge/Import/Capability.h"
 
 #include <cudnn_frontend/thirdparty/nlohmann/json.hpp>
 
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -110,18 +112,59 @@ int main(int argc, char** argv) {
         tests.check(from_json.json_version == "1.0", "canonical schema version");
         tests.check(from_json.cudnn_frontend_version == 12400, "canonical Frontend version");
         tests.check(from_json.tensors.size() == 3, "canonical tensor count");
-        tests.check(from_json.conv.x_uid == 1 && from_json.conv.w_uid == 2 &&
-                        from_json.conv.y_uid == 3,
+        tests.check(from_json.nodes.size() == 1 &&
+                        from_json.nodes.front().tag ==
+                            deepforge::import::OperationTag::kConvFprop,
+                    "canonical node container");
+        auto const* conv = from_json.single_conv_fprop();
+        tests.check(conv != nullptr, "canonical Conv attributes");
+        if (conv == nullptr) {
+            return tests.finish();
+        }
+        tests.check(conv->x_uid == 1 && conv->w_uid == 2 && conv->y_uid == 3,
                     "canonical Conv ports");
-        tests.check(from_json.conv.pre_padding == std::array<std::int64_t, 2>{1, 0} &&
-                        from_json.conv.post_padding == std::array<std::int64_t, 2>{1, 2},
+        tests.check(conv->pre_padding == std::array<std::int64_t, 2>{1, 0} &&
+                        conv->post_padding == std::array<std::int64_t, 2>{1, 2},
                     "asymmetric padding is preserved");
         tests.check(from_json.context.sm_count && *from_json.context.sm_count == -1,
                     "Frontend default sm_count is accepted");
-        tests.check(from_json.tensors.at(1).dim == std::array<std::int64_t, 4>{1, 3, 5, 5} &&
-                        from_json.tensors.at(2).dim == std::array<std::int64_t, 4>{5, 3, 3, 3} &&
-                        from_json.tensors.at(3).dim == std::array<std::int64_t, 4>{1, 5, 5, 5},
+        tests.check(from_json.tensors.at(1).dim ==
+                            std::vector<std::int64_t>({1, 3, 5, 5}) &&
+                        from_json.tensors.at(2).dim ==
+                            std::vector<std::int64_t>({5, 3, 3, 3}) &&
+                        from_json.tensors.at(3).dim ==
+                            std::vector<std::int64_t>({1, 5, 5, 5}),
                     "non-vector-multiple C/K dimensions are preserved");
+
+        auto capabilities = deepforge::import::operation_capabilities();
+        tests.check(capabilities.size() == 39,
+                    "capability registry covers every v1.24.0 serializer tag");
+        std::set<std::string_view> capability_names;
+        std::size_t validated_count = 0;
+        for (auto const& capability : capabilities) {
+            capability_names.insert(capability.serialized_tag);
+            validated_count +=
+                capability.level ==
+                deepforge::import::CapabilityLevel::kValidated;
+            tests.check(deepforge::import::operation_tag_name(capability.tag) ==
+                            capability.serialized_tag,
+                        "operation tag name round-trips");
+        }
+        tests.check(capability_names.size() == capabilities.size() &&
+                        validated_count == 1,
+                    "capability tags are unique and only Conv is validated");
+        for (auto const name : {"FLOAT", "DOUBLE", "HALF", "INT8",
+                                "INT32", "INT8x4", "UINT8", "UINT8x4",
+                                "INT8x32", "BFLOAT16", "INT64", "BOOLEAN",
+                                "FP8_E4M3", "FP8_E5M2",
+                                "FAST_FLOAT_FOR_FP8", "FP8_E8M0",
+                                "FP4_E2M1", "INT4", "COMPLEX_FP32",
+                                "COMPLEX_FP64"}) {
+            auto type = deepforge::import::data_type_from_name(name);
+            tests.check(type && deepforge::import::data_type_name(*type) == name &&
+                            deepforge::import::data_type_storage_bits(*type) != 0,
+                        "data type catalog entry round-trips");
+        }
 
         SerializedGraph from_file;
         status = importer.parse_file(fixture_path, InputFormat::kJson, from_file);
@@ -174,9 +217,20 @@ int main(int argc, char** argv) {
         expect_invalid("Frontend version mismatch", ErrorCode::kFrontendVersionMismatch, [](Json& value) {
             value["cudnn_frontend_version"] = 12300;
         });
-        expect_invalid("unknown node", ErrorCode::kUnsupportedNode, [](Json& value) {
+        expect_invalid("known but unparsed node",
+                       ErrorCode::kUnsupportedOperation, [](Json& value) {
             value["nodes"][0]["tag"] = "POINTWISE";
             value.erase("tensors");
+        });
+        expect_invalid("unknown node", ErrorCode::kUnsupportedNode, [](Json& value) {
+            value["nodes"][0]["tag"] = "NOT_A_CUDNN_FRONTEND_TAG";
+            value.erase("tensors");
+        });
+        expect_invalid("second known node is diagnosed precisely",
+                       ErrorCode::kUnsupportedOperation, [](Json& value) {
+            auto second = value["nodes"][0];
+            second["tag"] = "POINTWISE";
+            value["nodes"].push_back(std::move(second));
         });
         expect_invalid("missing explicit UID", ErrorCode::kMissingUid, [](Json& value) {
             value["tensors"]["1"].erase("uid_assigned");

@@ -92,6 +92,27 @@ std::uint32_t read_u32(std::span<std::uint8_t const> bytes,
     return value;
 }
 
+std::uint64_t read_u64(std::span<std::uint8_t const> bytes,
+                       std::size_t& offset) {
+    if (offset + 8 > bytes.size()) {
+        throw std::runtime_error("artifact test offset is out of range");
+    }
+    std::uint64_t value = 0;
+    for (unsigned index = 0; index < 8; ++index) {
+        value |= static_cast<std::uint64_t>(bytes[offset++]) << (index * 8);
+    }
+    return value;
+}
+
+std::size_t skip_string(std::span<std::uint8_t const> bytes,
+                        std::size_t offset) {
+    auto size = read_u32(bytes, offset);
+    if (size > bytes.size() - offset) {
+        throw std::runtime_error("artifact test string is truncated");
+    }
+    return offset + size;
+}
+
 void write_u64(std::vector<std::uint8_t>& bytes, std::size_t offset,
                std::uint64_t value) {
     if (offset + 8 > bytes.size()) {
@@ -144,11 +165,83 @@ std::size_t metadata_numbers_offset(
     return offset;
 }
 
+std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
+    return metadata_numbers_offset(bytes);
+}
+
+std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
+    auto offset = argument_table_offset(bytes);
+    auto count = read_u32(bytes, offset);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        offset += 8;
+        offset = skip_string(bytes, offset);
+        offset += 4 + 4 + 8 + 8;
+        auto rank = read_u32(bytes, offset);
+        if (rank == 0 || rank > 64 ||
+            static_cast<std::uint64_t>(rank) * 16 > bytes.size() - offset) {
+            throw std::runtime_error("artifact test argument rank is invalid");
+        }
+        offset += static_cast<std::size_t>(rank) * 16;
+    }
+    return offset;
+}
+
+std::size_t adapter_payload_offset(std::span<std::uint8_t const> bytes) {
+    auto offset = adapter_kind_offset(bytes) + 4;
+    auto size = read_u64(bytes, offset);
+    if (size > bytes.size() - offset) {
+        throw std::runtime_error("artifact test adapter payload is truncated");
+    }
+    return offset;
+}
+
+std::size_t workspace_size_offset(std::span<std::uint8_t const> bytes) {
+    auto payload = adapter_payload_offset(bytes);
+    auto size_offset = adapter_kind_offset(bytes) + 4;
+    auto size = read_u64(bytes, size_offset);
+    return payload + static_cast<std::size_t>(size);
+}
+
 std::size_t workspace_alignment_offset(
     std::span<std::uint8_t const> bytes) {
-    auto offset = metadata_numbers_offset(bytes);
-    offset += (3 + 4 * 4 + 4 * 2) * 8;
-    return offset + 8;
+    return workspace_size_offset(bytes) + 8;
+}
+
+std::size_t first_argument_alignment_offset(
+    std::span<std::uint8_t const> bytes) {
+    auto offset = argument_table_offset(bytes);
+    auto count = read_u32(bytes, offset);
+    if (count == 0) {
+        throw std::runtime_error("artifact test argument table is empty");
+    }
+    offset += 8;
+    offset = skip_string(bytes, offset);
+    return offset + 4 + 4;
+}
+
+std::vector<std::uint8_t> make_legacy_v1(
+    std::span<std::uint8_t const> version_two) {
+    auto common_metadata_end = argument_table_offset(version_two);
+    auto adapter_begin = adapter_payload_offset(version_two);
+    auto workspace_begin = workspace_size_offset(version_two);
+    std::vector<std::uint8_t> legacy(
+        version_two.begin(),
+        version_two.begin() +
+            static_cast<std::ptrdiff_t>(common_metadata_end));
+    legacy.insert(legacy.end(),
+                  version_two.begin() +
+                      static_cast<std::ptrdiff_t>(adapter_begin),
+                  version_two.begin() +
+                      static_cast<std::ptrdiff_t>(workspace_begin));
+    legacy.insert(legacy.end(),
+                  version_two.begin() +
+                      static_cast<std::ptrdiff_t>(workspace_begin),
+                  version_two.end() - 8);
+    legacy.resize(legacy.size() + 8);
+    write_u32(legacy, 8,
+              deepforge::compiler::kLegacyArtifactFormatVersion);
+    refresh_checksum(legacy);
+    return legacy;
 }
 
 struct AlignedBytes {
@@ -243,6 +336,13 @@ int main(int argc, char** argv) {
         deepforge::compiler::ArtifactInfo parsed;
         tests.good(deepforge::compiler::parse_artifact(first, parsed),
                    "parse serialized artifact");
+        tests.check(parsed.format_version ==
+                        deepforge::compiler::kArtifactFormatVersion,
+                    "writer emits artifact format v2");
+        tests.check(parsed.adapter_kind ==
+                        deepforge::compiler::ArtifactAdapterKind::
+                            kConv2DRankedMemref,
+                    "artifact records the transitional Conv adapter kind");
         tests.check(parsed.metadata == compilation.metadata,
                     "artifact metadata round-trips");
         tests.check(parsed.workspace == compilation.workspace,
@@ -263,6 +363,24 @@ int main(int argc, char** argv) {
                                 compilation.variants[index].object,
                         "artifact variant section round-trips");
         }
+
+        auto legacy_v1 = make_legacy_v1(first);
+        deepforge::compiler::ArtifactInfo legacy_info;
+        tests.good(deepforge::compiler::parse_artifact(legacy_v1, legacy_info),
+                   "parse legacy format-v1 artifact");
+        tests.check(legacy_info.format_version ==
+                            deepforge::compiler::kLegacyArtifactFormatVersion &&
+                        legacy_info.adapter_kind ==
+                            deepforge::compiler::ArtifactAdapterKind::
+                                kConv2DRankedMemref &&
+                        legacy_info.metadata == compilation.metadata,
+                    "legacy reader reconstructs the generic argument table");
+        std::unique_ptr<deepforge::runtime::Executable> legacy_executable;
+        tests.good(deepforge::compiler::load_artifact_executable(
+                       legacy_v1, legacy_executable),
+                   "load legacy format-v1 artifact");
+        tests.check(legacy_executable != nullptr,
+                    "legacy artifact produces an executable");
         tests.check(write_bytes(scratch / "scalar.o",
                                 compilation.variants[0].object),
                     "write scalar object for ISA inspection");
@@ -412,8 +530,26 @@ int main(int argc, char** argv) {
         status = deepforge::compiler::parse_artifact(invalid_alignment, parsed);
         tests.parse_error(status,
                           "checksummed zero workspace alignment is rejected");
+        auto invalid_argument_alignment = first;
+        write_u64(invalid_argument_alignment,
+                  first_argument_alignment_offset(invalid_argument_alignment),
+                  0);
+        refresh_checksum(invalid_argument_alignment);
+        status = deepforge::compiler::parse_artifact(
+            invalid_argument_alignment, parsed);
+        tests.parse_error(status,
+                          "checksummed zero argument alignment is rejected");
+        auto invalid_adapter_kind = first;
+        write_u32(invalid_adapter_kind,
+                  adapter_kind_offset(invalid_adapter_kind),
+                  std::numeric_limits<std::uint32_t>::max());
+        refresh_checksum(invalid_adapter_kind);
+        status = deepforge::compiler::parse_artifact(invalid_adapter_kind,
+                                                      parsed);
+        tests.parse_error(status,
+                          "checksummed unknown adapter kind is rejected");
         auto invalid_shape = first;
-        auto const metadata_offset = metadata_numbers_offset(invalid_shape);
+        auto const metadata_offset = adapter_payload_offset(invalid_shape);
         auto const maximum_dimension = static_cast<std::uint64_t>(
             std::numeric_limits<std::int64_t>::max());
         write_u64(invalid_shape, metadata_offset + 3 * 8,
@@ -462,6 +598,17 @@ int main(int argc, char** argv) {
                         deepforge::import::ErrorCode::kInvalidValue,
                     "writer rejects invalid workspace contract");
         compilation.workspace.alignment = saved_alignment;
+        auto saved_arguments = compilation.metadata.arguments;
+        compilation.metadata.arguments.clear();
+        invalid_output = {0x56, 0x78};
+        status = deepforge::compiler::serialize_artifact(compilation,
+                                                         invalid_output);
+        tests.check(status.code() ==
+                        deepforge::import::ErrorCode::kInvalidValue,
+                    "writer rejects an empty generic argument table");
+        tests.check(invalid_output == std::vector<std::uint8_t>({0x56, 0x78}),
+                    "failed argument serialization leaves output unchanged");
+        compilation.metadata.arguments = std::move(saved_arguments);
         auto const saved_metadata = compilation.metadata;
         compilation.metadata.x_shape[0] =
             std::numeric_limits<std::int64_t>::max();

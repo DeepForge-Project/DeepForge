@@ -5,11 +5,75 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace deepforge::import {
 
 enum class DataType : std::uint8_t {
     kFloat32,
+    kFloat64,
+    kFloat16,
+    kInt8,
+    kInt32,
+    kInt8x4,
+    kUInt8,
+    kUInt8x4,
+    kInt8x32,
+    kBFloat16,
+    kInt64,
+    kBoolean,
+    kFp8E4M3,
+    kFp8E5M2,
+    kFastFloatForFp8,
+    kFp8E8M0,
+    kFp4E2M1,
+    kInt4,
+    kComplexFloat32,
+    kComplexFloat64,
+};
+
+enum class OperationTag : std::uint8_t {
+    kAdaLayerNorm,
+    kAdaLayerNormBprop,
+    kBatchNorm,
+    kBatchNormInference,
+    kBlockScaleDequantize,
+    kBlockScaleQuantize,
+    kBnFinalize,
+    kConcatenate,
+    kConvDgrad,
+    kConvFprop,
+    kConvWgrad,
+    kDbn,
+    kDbnWeight,
+    kGenStats,
+    kInstanceNorm,
+    kInstanceNormBprop,
+    kLayerNorm,
+    kLayerNormBprop,
+    kMatmul,
+    kMatmulFp8,
+    kMoeGroupedMatmul,
+    kMoeGroupedMatmulBwd,
+    kPointwise,
+    kReduction,
+    kResample,
+    kReshape,
+    kRmsNorm,
+    kRmsNormBprop,
+    kRng,
+    kRope,
+    kRopeBwd,
+    kSdpa,
+    kSdpaBwd,
+    kSdpaFp8Bwd,
+    kSdpaFp8Fwd,
+    kSdpaMxfp8Bwd,
+    kSdpaMxfp8Fwd,
+    kSlice,
+    kTranspose,
 };
 
 struct GraphContext {
@@ -27,10 +91,13 @@ struct GraphContext {
 struct TensorDesc {
     std::string name;
     DataType data_type = DataType::kFloat32;
-    std::array<std::int64_t, 4> dim{};
-    std::array<std::int64_t, 4> stride{};
+    std::vector<std::int64_t> dim;
+    std::vector<std::int64_t> stride;
     bool is_virtual = false;
     bool is_pass_by_value = false;
+    std::string reordering_type = "NONE";
+    std::optional<std::int64_t> ragged_offset_uid;
+    std::optional<std::string> ragged_offset_name;
     std::int64_t uid = 0;
 
     bool operator==(TensorDesc const&) const = default;
@@ -50,13 +117,43 @@ struct ConvFpropDesc {
     bool operator==(ConvFpropDesc const&) const = default;
 };
 
+using OperationAttributes = std::variant<std::monostate, ConvFpropDesc>;
+
+struct NodeDesc {
+    OperationTag tag = OperationTag::kConvFprop;
+    std::string name;
+    OperationAttributes attributes;
+
+    bool operator==(NodeDesc const&) const = default;
+};
+
 struct SerializedGraph {
     std::string json_version;
     std::int64_t cudnn_frontend_version = 0;
     std::uint64_t graph_uid = 0;
     GraphContext context;
     std::map<std::int64_t, TensorDesc> tensors;
-    ConvFpropDesc conv;
+    std::vector<NodeDesc> nodes;
+
+    [[nodiscard]] ConvFpropDesc const* single_conv_fprop() const noexcept {
+        if (nodes.size() != 1 || nodes.front().tag != OperationTag::kConvFprop) {
+            return nullptr;
+        }
+        return std::get_if<ConvFpropDesc>(&nodes.front().attributes);
+    }
+
+    [[nodiscard]] ConvFpropDesc* single_conv_fprop() noexcept {
+        if (nodes.size() != 1 || nodes.front().tag != OperationTag::kConvFprop) {
+            return nullptr;
+        }
+        return std::get_if<ConvFpropDesc>(&nodes.front().attributes);
+    }
+
+    ConvFpropDesc& emplace_conv_fprop() {
+        nodes.push_back(NodeDesc{OperationTag::kConvFprop, {},
+                                 ConvFpropDesc{}});
+        return std::get<ConvFpropDesc>(nodes.back().attributes);
+    }
 
     bool operator==(SerializedGraph const&) const = default;
 };

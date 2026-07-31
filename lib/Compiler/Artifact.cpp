@@ -2,10 +2,6 @@
 #include "DeepForge/Import/Capability.h"
 #include "../Runtime/RuntimeInternal.h"
 
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
-#include "llvm/Support/Error.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Host.h"
 
 #include <algorithm>
@@ -537,8 +533,6 @@ Status parse_failure(std::string detail) {
 
 Status create_loaded_executable(ArtifactInfo const& artifact,
                                 std::unique_ptr<runtime::Executable>& output) {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
     auto host_triple = llvm::sys::getDefaultTargetTriple();
     if (artifact.target_triple != host_triple) {
         return fail(ErrorCode::kInvalidValue, "artifact.target",
@@ -546,39 +540,16 @@ Status create_loaded_executable(ArtifactInfo const& artifact,
                         " does not match host " + host_triple);
     }
 
-    std::array<std::unique_ptr<llvm::orc::LLJIT>, 3> object_jits;
-    std::array<void*, 3> entry_points{};
+    std::array<std::span<std::uint8_t const>, 3> objects;
     std::array<std::string, 3> symbols;
     for (std::size_t index = 0; index < artifact.variants.size(); ++index) {
-        auto jit_or_error = llvm::orc::LLJITBuilder().create();
-        if (!jit_or_error) {
-            return fail(ErrorCode::kGraphExecutionFailed, "artifact.jit",
-                        llvm::toString(jit_or_error.takeError()));
-        }
-        auto jit = std::move(*jit_or_error);
         auto const& variant = artifact.variants[index];
-        auto object = llvm::MemoryBuffer::getMemBufferCopy(
-            llvm::StringRef(
-                reinterpret_cast<char const*>(variant.object.data()),
-                variant.object.size()),
-            variant.symbol + ".o");
-        if (auto error = jit->addObjectFile(std::move(object))) {
-            return fail(ErrorCode::kParseError, "artifact.object",
-                        llvm::toString(std::move(error)));
-        }
-        auto entry_name = "_mlir_ciface_" + variant.symbol;
-        auto address_or_error = jit->lookup(entry_name);
-        if (!address_or_error) {
-            return fail(ErrorCode::kParseError, "artifact.symbol",
-                        llvm::toString(address_or_error.takeError()));
-        }
-        entry_points[index] = address_or_error->toPtr<void*>();
+        objects[index] = variant.object;
         symbols[index] = variant.symbol;
-        object_jits[index] = std::move(jit);
     }
-    return runtime::create_object_executable(
-        artifact.metadata, artifact.workspace, std::move(object_jits),
-        entry_points, std::move(symbols), output);
+    return runtime::load_object_executable(
+        artifact.metadata, artifact.workspace, objects, std::move(symbols),
+        output);
 }
 
 }  // namespace

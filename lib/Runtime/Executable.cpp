@@ -8,6 +8,8 @@
 
 #include "llvm/Support/Error.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/TargetSelect.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -490,6 +492,50 @@ Status create_object_executable(
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
     return ExecutableFactory::create_object(
+        metadata, workspace, std::move(object_jits), entry_points,
+        std::move(symbols), output);
+}
+
+Status load_object_executable(
+    compiler::Conv2DCompileMetadata const& metadata,
+    compiler::WorkspacePlan const& workspace,
+    std::array<std::span<std::uint8_t const>, 3> objects,
+    std::array<std::string, 3> symbols,
+    std::unique_ptr<Executable>& output) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    std::array<std::unique_ptr<llvm::orc::LLJIT>, 3> object_jits;
+    std::array<void*, 3> entry_points{};
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        if (objects[index].empty() || symbols[index].empty()) {
+            return fail(ErrorCode::kInvalidValue, "runtime.object",
+                        "every CPU variant requires object bytes and a symbol");
+        }
+        auto jit_or_error = llvm::orc::LLJITBuilder().create();
+        if (!jit_or_error) {
+            return fail(ErrorCode::kGraphExecutionFailed, "runtime.jit",
+                        llvm::toString(jit_or_error.takeError()));
+        }
+        auto jit = std::move(*jit_or_error);
+        auto object = llvm::MemoryBuffer::getMemBufferCopy(
+            llvm::StringRef(
+                reinterpret_cast<char const*>(objects[index].data()),
+                objects[index].size()),
+            symbols[index] + ".o");
+        if (auto error = jit->addObjectFile(std::move(object))) {
+            return fail(ErrorCode::kParseError, "runtime.object",
+                        llvm::toString(std::move(error)));
+        }
+        auto address_or_error =
+            jit->lookup("_mlir_ciface_" + symbols[index]);
+        if (!address_or_error) {
+            return fail(ErrorCode::kParseError, "runtime.symbol",
+                        llvm::toString(address_or_error.takeError()));
+        }
+        entry_points[index] = address_or_error->toPtr<void*>();
+        object_jits[index] = std::move(jit);
+    }
+    return create_object_executable(
         metadata, workspace, std::move(object_jits), entry_points,
         std::move(symbols), output);
 }

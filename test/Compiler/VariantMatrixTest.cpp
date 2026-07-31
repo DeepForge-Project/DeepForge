@@ -300,6 +300,13 @@ int main() {
         if (status.is_bad()) {
             continue;
         }
+        tests.check(std::all_of(
+                        compilation.variants.begin(),
+                        compilation.variants.end(),
+                        [](deepforge::compiler::VariantCode const& code) {
+                            return code.object.empty() && code.llvm_ir.empty();
+                        }),
+                    "disabled code outputs remain absent after JIT loading");
         auto workspace_size = compilation.executable->get_workspace_size();
         tests.check(workspace_size >= 0 && workspace_size % 64 == 0,
                     "tail case workspace is valid and aligned");

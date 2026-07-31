@@ -36,6 +36,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -181,25 +182,6 @@ Status translate_to_llvm(mlir::ModuleOp module,
     return Status::ok();
 }
 
-Status create_engine(mlir::ModuleOp module, runtime::CpuVariant variant,
-                     std::unique_ptr<mlir::ExecutionEngine>& output) {
-    auto target_machine_or_error = make_target_machine(variant);
-    if (!target_machine_or_error) {
-        return compiler_error("runtime.jit",
-                              llvm::toString(target_machine_or_error.takeError()));
-    }
-    mlir::ExecutionEngineOptions engine_options;
-    engine_options.enableObjectDump = true;
-    auto engine_or_error = mlir::ExecutionEngine::create(
-        module, engine_options, std::move(*target_machine_or_error));
-    if (!engine_or_error) {
-        return compiler_error("runtime.jit",
-                              llvm::toString(engine_or_error.takeError()));
-    }
-    output = std::move(*engine_or_error);
-    return Status::ok();
-}
-
 }  // namespace
 
 Status compile_graph(import::SerializedGraph const& graph,
@@ -230,7 +212,6 @@ Status compile_graph(import::SerializedGraph const& graph,
         result.bufferized_mlir = print_module(*bufferized.module);
     }
 
-    std::vector<std::unique_ptr<mlir::ExecutionEngine>> engines(3);
     std::array<std::string, 3> symbols;
     std::array<runtime::CpuVariant, 3> variants{
         runtime::CpuVariant::kScalar, runtime::CpuVariant::kAvx2,
@@ -272,30 +253,30 @@ Status compile_graph(import::SerializedGraph const& graph,
         if (options.capture_mlir) {
             code.mlir = print_module(*variant_module);
         }
-        if (options.emit_llvm_ir || options.emit_object) {
-            status = translate_to_llvm(*variant_module, variant, code.llvm_ir,
-                                       code.object);
-            if (status.is_bad()) {
-                return status;
-            }
-            if (!options.emit_llvm_ir) {
-                code.llvm_ir.clear();
-            }
-            if (!options.emit_object) {
-                code.object.clear();
-            }
-        }
-        status = create_engine(*variant_module, variant, engines[index]);
+        status = translate_to_llvm(*variant_module, variant, code.llvm_ir,
+                                   code.object);
         if (status.is_bad()) {
             return status;
         }
     }
 
-    status = runtime::create_executable(metadata, bufferized.workspace,
-                                        std::move(engines), std::move(symbols),
-                                        result.executable);
+    std::array<std::span<std::uint8_t const>, 3> runtime_objects;
+    for (std::size_t index = 0; index < result.variants.size(); ++index) {
+        runtime_objects[index] = result.variants[index].object;
+    }
+    status = runtime::load_object_executable(
+        metadata, bufferized.workspace, runtime_objects, std::move(symbols),
+        result.executable);
     if (status.is_bad()) {
         return status;
+    }
+    for (auto& code : result.variants) {
+        if (!options.emit_llvm_ir) {
+            code.llvm_ir.clear();
+        }
+        if (!options.emit_object) {
+            code.object.clear();
+        }
     }
     result.metadata = metadata;
     result.workspace = bufferized.workspace;

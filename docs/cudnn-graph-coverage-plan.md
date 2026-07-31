@@ -142,6 +142,8 @@ model 在语义 lowering 之后、最终 Vector/LLVM codegen 之前选择 candid
 
 ### C1. 完整协议识别
 
+**状态**：已于 2026-07-31 完成并通过验证。
+
 **工作内容**：解析并结构化验证全部 39 个 tag、全部 50 个非 sentinel pointwise
 mode、全部 9 个 reduction mode、每个 node port 和 v1.24.0 中每个序列化
 attribute。增加自动生成或人工复核的 schema inventory 和公开 capability matrix。

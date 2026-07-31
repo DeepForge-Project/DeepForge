@@ -145,7 +145,7 @@ Status validate_canonical_model(SerializedGraph const& graph) {
         return fail(ErrorCode::kInvalidShape, "context.is_dynamic_shape_enabled",
                     "dynamic shapes are not supported by the Tensor/Linalg importer");
     }
-    if (graph.tensors.size() != 3) {
+    if (graph.tensor_count() != 3) {
         return fail(ErrorCode::kInvalidValue, "tensors",
                     "P2 requires exactly X, W and Y tensors");
     }

@@ -153,6 +153,8 @@ node; runtime UID, byte-range, alignment, and overlap checks are table-driven.
 
 ### C1. Complete protocol recognition
 
+**Status:** completed and validated on 2026-07-31.
+
 **Work:** parse and structurally validate all 39 tags, all 50 non-sentinel
 pointwise modes, all 9 reduction modes, every node port, and every serialized
 attribute in v1.24.0. Add a generated or reviewed schema inventory and the

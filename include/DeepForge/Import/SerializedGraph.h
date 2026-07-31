@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -88,6 +89,20 @@ struct GraphContext {
     bool operator==(GraphContext const&) const = default;
 };
 
+struct SerializedValue {
+    using Array = std::vector<SerializedValue>;
+    using Object = std::map<std::string, SerializedValue>;
+    using Storage =
+        std::variant<std::nullptr_t, bool, std::int64_t, std::uint64_t, double,
+                     std::string, Array, Object>;
+
+    Storage value = nullptr;
+
+    bool operator==(SerializedValue const&) const = default;
+};
+
+using TensorReference = std::variant<std::int64_t, std::string>;
+
 struct TensorDesc {
     std::string name;
     DataType data_type = DataType::kFloat32;
@@ -95,10 +110,12 @@ struct TensorDesc {
     std::vector<std::int64_t> stride;
     bool is_virtual = false;
     bool is_pass_by_value = false;
+    std::optional<SerializedValue> pass_by_value;
     std::string reordering_type = "NONE";
     std::optional<std::int64_t> ragged_offset_uid;
     std::optional<std::string> ragged_offset_name;
     std::int64_t uid = 0;
+    bool uid_assigned = false;
 
     bool operator==(TensorDesc const&) const = default;
 };
@@ -117,7 +134,17 @@ struct ConvFpropDesc {
     bool operator==(ConvFpropDesc const&) const = default;
 };
 
-using OperationAttributes = std::variant<std::monostate, ConvFpropDesc>;
+struct GenericOperationDesc {
+    std::map<std::string, TensorReference> inputs;
+    std::map<std::string, std::vector<TensorReference>> input_lists;
+    std::map<std::string, TensorReference> outputs;
+    SerializedValue::Object attributes;
+
+    bool operator==(GenericOperationDesc const&) const = default;
+};
+
+using OperationAttributes =
+    std::variant<std::monostate, ConvFpropDesc, GenericOperationDesc>;
 
 struct NodeDesc {
     OperationTag tag = OperationTag::kConvFprop;
@@ -129,11 +156,28 @@ struct NodeDesc {
 
 struct SerializedGraph {
     std::string json_version;
+    std::string cudnn_backend_version;
     std::int64_t cudnn_frontend_version = 0;
     std::uint64_t graph_uid = 0;
     GraphContext context;
     std::map<std::int64_t, TensorDesc> tensors;
+    std::map<std::string, TensorDesc> named_tensors;
     std::vector<NodeDesc> nodes;
+
+    [[nodiscard]] std::size_t tensor_count() const noexcept {
+        return tensors.size() + named_tensors.size();
+    }
+
+    [[nodiscard]] TensorDesc const* find_tensor(
+        TensorReference const& reference) const noexcept {
+        if (auto const* uid = std::get_if<std::int64_t>(&reference)) {
+            auto const it = tensors.find(*uid);
+            return it == tensors.end() ? nullptr : &it->second;
+        }
+        auto const& name = std::get<std::string>(reference);
+        auto const it = named_tensors.find(name);
+        return it == named_tensors.end() ? nullptr : &it->second;
+    }
 
     [[nodiscard]] ConvFpropDesc const* single_conv_fprop() const noexcept {
         if (nodes.size() != 1 || nodes.front().tag != OperationTag::kConvFprop) {

@@ -162,6 +162,7 @@ Dialect.
 | [Benchmark Baseline](docs/benchmark-baseline.en.md) | Small, medium, and large profiles and reproduction steps |
 | [Development Plan](docs/development-plan.en.md) | Phase order, exit criteria, and test gates |
 | [cuDNN Graph Operation Coverage Plan](docs/cudnn-graph-coverage-plan.en.md) | Approved post-MVP architecture, operation phases, and acceptance gates |
+| [cuDNN Graph Schema Inventory](docs/cudnn-graph-schema-inventory.en.md) | v1.24.0 root fields, tensors, 39 operation tags, ports, attributes, and modes |
 
 ## Build
 

@@ -243,6 +243,16 @@ int main(int argc, char** argv) {
     tests.expect_code(status, ErrorCode::kInvalidShape,
                       "dynamic shape model is rejected");
 
+    auto recognized_unlowered = graph;
+    recognized_unlowered.nodes.clear();
+    recognized_unlowered.nodes.push_back(
+        {deepforge::import::OperationTag::kPointwise,
+         "recognized_pointwise",
+         deepforge::import::GenericOperationDesc{}});
+    status = import_conv2d(context, recognized_unlowered, rejected);
+    tests.expect_code(status, ErrorCode::kUnsupportedOperation,
+                      "recognized unlowered operation is diagnosed precisely");
+
     auto parsed_bad = mlir::parseSourceString<mlir::ModuleOp>(
         "module {\n"
         "  func.func @deepforge_conv2d(%x: tensor<?x3x5x5xf32>, "

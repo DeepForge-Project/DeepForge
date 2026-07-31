@@ -7,7 +7,9 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -46,6 +48,13 @@ struct ExecutableFactory {
     compiler::WorkspacePlan const& workspace,
     std::array<std::unique_ptr<llvm::orc::LLJIT>, 3> object_jits,
     std::array<void*, 3> entry_points,
+    std::array<std::string, 3> symbols,
+    std::unique_ptr<Executable>& output);
+
+[[nodiscard]] import::Status load_object_executable(
+    compiler::Conv2DCompileMetadata const& metadata,
+    compiler::WorkspacePlan const& workspace,
+    std::array<std::span<std::uint8_t const>, 3> objects,
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output);
 

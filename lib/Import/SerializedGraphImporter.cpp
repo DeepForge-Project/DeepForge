@@ -1,12 +1,14 @@
 #include "DeepForge/Import/SerializedGraphImporter.h"
 
 #include "DeepForge/Import/Capability.h"
+#include "DeepForge/Import/Schema.h"
 
 #include <cudnn_frontend/thirdparty/nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -163,6 +165,99 @@ Status read_uint64(Json const& value, std::string const& path, std::uint64_t& ou
         return Status::ok();
     }
     return fail(ErrorCode::kInvalidFieldType, path, "expected integer");
+}
+
+Status parse_serialized_value(Json const& value,
+                              std::string const& path,
+                              SerializedValue& output,
+                              std::size_t depth = 0) {
+    if (depth > 64) {
+        return fail(ErrorCode::kInvalidValue, path,
+                    "serialized attribute nesting exceeds 64 levels");
+    }
+    if (value.is_null()) {
+        output.value = nullptr;
+        return Status::ok();
+    }
+    if (value.is_boolean()) {
+        output.value = value.get<bool>();
+        return Status::ok();
+    }
+    if (value.is_number_unsigned()) {
+        auto number = value.get<std::uint64_t>();
+        if (number <= static_cast<std::uint64_t>(
+                          std::numeric_limits<std::int64_t>::max())) {
+            output.value = static_cast<std::int64_t>(number);
+        } else {
+            output.value = number;
+        }
+        return Status::ok();
+    }
+    if (value.is_number_integer()) {
+        output.value = value.get<std::int64_t>();
+        return Status::ok();
+    }
+    if (value.is_number_float()) {
+        auto number = value.get<double>();
+        if (!std::isfinite(number)) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "floating attribute must be finite");
+        }
+        output.value = number;
+        return Status::ok();
+    }
+    if (value.is_string()) {
+        auto text = value.get<std::string>();
+        if (text.find('\0') != std::string::npos) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "serialized string contains NUL");
+        }
+        output.value = std::move(text);
+        return Status::ok();
+    }
+    if (value.is_array()) {
+        if (value.size() > 1U << 20) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "serialized array is too large");
+        }
+        SerializedValue::Array array;
+        array.reserve(value.size());
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            SerializedValue element;
+            auto status = parse_serialized_value(
+                value[index], index_path(path, index), element, depth + 1);
+            if (status.is_bad()) {
+                return status;
+            }
+            array.push_back(std::move(element));
+        }
+        output.value = std::move(array);
+        return Status::ok();
+    }
+    if (value.is_object()) {
+        if (value.size() > 1U << 20) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "serialized object is too large");
+        }
+        SerializedValue::Object object;
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            if (it.key().find('\0') != std::string::npos) {
+                return fail(ErrorCode::kInvalidValue, path,
+                            "serialized object key contains NUL");
+            }
+            SerializedValue element;
+            auto status = parse_serialized_value(
+                it.value(), child_path(path, it.key()), element, depth + 1);
+            if (status.is_bad()) {
+                return status;
+            }
+            object.emplace(it.key(), std::move(element));
+        }
+        output.value = std::move(object);
+        return Status::ok();
+    }
+    return fail(ErrorCode::kInvalidFieldType, path,
+                "unsupported serialized JSON value");
 }
 
 template <std::size_t N>
@@ -342,6 +437,20 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
     if (!value.is_object()) {
         return fail(ErrorCode::kInvalidFieldType, path, "expected tensor object");
     }
+    constexpr std::array<std::string_view, 12> kTensorFields{{
+        "name",          "data_type",       "dim",
+        "stride",        "is_virtual",      "pass_by_value",
+        "is_pass_by_value", "reordering_type", "uid",
+        "uid_assigned",  "ragged_offset_uid", "ragged_offset_name",
+    }};
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if (std::find(kTensorFields.begin(), kTensorFields.end(), it.key()) ==
+            kTensorFields.end()) {
+            return fail(ErrorCode::kInvalidValue,
+                        child_path(path, it.key()),
+                        "field is not emitted by the pinned tensor serializer");
+        }
+    }
 
     Json const* field = nullptr;
     auto status = require_field(value, path, "name", field);
@@ -351,6 +460,11 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
     status = read_string(*field, child_path(path, "name"), output.name);
     if (status.is_bad()) {
         return status;
+    }
+    if (output.name.empty() ||
+        output.name.find('\0') != std::string::npos) {
+        return fail(ErrorCode::kInvalidValue, child_path(path, "name"),
+                    "tensor name is empty or contains NUL");
     }
 
     status = require_field(value, path, "data_type", field);
@@ -411,6 +525,14 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
     if (status.is_bad()) {
         return status;
     }
+    if (output.reordering_type != "NONE" &&
+        output.reordering_type != "INT8x32" &&
+        output.reordering_type != "F16x16" &&
+        output.reordering_type != "F8_128x4") {
+        return fail(ErrorCode::kInvalidValue,
+                    child_path(path, "reordering_type"),
+                    "unknown TensorReordering_t value");
+    }
 
     status = require_field(value, path, "uid_assigned", field);
     if (status.is_bad()) {
@@ -421,9 +543,7 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
     if (status.is_bad()) {
         return status;
     }
-    if (!uid_assigned) {
-        return fail(ErrorCode::kMissingUid, path, "uid_assigned must be true");
-    }
+    output.uid_assigned = uid_assigned;
 
     status = require_field(value, path, "uid", field);
     if (status.is_bad()) {
@@ -434,11 +554,30 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
         return status;
     }
 
-    auto const pass_by_value = value.find("pass_by_value");
-    if (pass_by_value != value.end() && !pass_by_value->is_null()) {
-        return fail(ErrorCode::kUnsupportedExecutionMetadata,
-                    child_path(path, "pass_by_value"),
-                    "pass-by-value payload is not supported");
+    status = require_field(value, path, "pass_by_value", field);
+    if (status.is_bad()) {
+        return status;
+    }
+    if (!field->is_null()) {
+        SerializedValue payload;
+        status = parse_serialized_value(
+            *field, child_path(path, "pass_by_value"), payload);
+        if (status.is_bad()) {
+            return status;
+        }
+        if (!std::holds_alternative<std::int64_t>(payload.value) &&
+            !std::holds_alternative<std::uint64_t>(payload.value) &&
+            !std::holds_alternative<double>(payload.value)) {
+            return fail(ErrorCode::kInvalidFieldType,
+                        child_path(path, "pass_by_value"),
+                        "Frontend scalar payload must be numeric");
+        }
+        output.pass_by_value = std::move(payload);
+    }
+    if (output.pass_by_value && !output.is_pass_by_value) {
+        return fail(ErrorCode::kInvalidValue,
+                    child_path(path, "is_pass_by_value"),
+                    "scalar payload requires is_pass_by_value=true");
     }
     auto const ragged_uid = value.find("ragged_offset_uid");
     if (ragged_uid != value.end() && !ragged_uid->is_null()) {
@@ -459,6 +598,11 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
             return status;
         }
         output.ragged_offset_name = std::move(name);
+    }
+    if (output.ragged_offset_uid.has_value() !=
+        output.ragged_offset_name.has_value()) {
+        return fail(ErrorCode::kInvalidValue, path,
+                    "ragged offset UID and name must appear together");
     }
 
     for (std::size_t index = 0; index < output.dim.size(); ++index) {
@@ -484,10 +628,32 @@ Status parse_context(Json const& root, GraphContext& output) {
     if (!it->is_object()) {
         return fail(ErrorCode::kInvalidFieldType, "context", "expected object");
     }
+    constexpr std::array<std::string_view, 7> kContextFields{{
+        "name", "compute_data_type", "intermediate_data_type", "io_data_type",
+        "sm_count", "is_dynamic_shape_enabled", "is_override_shape_enabled",
+    }};
+    for (auto name : kContextFields) {
+        if (!it->contains(std::string(name))) {
+            return fail(ErrorCode::kMissingField, child_path("context", name),
+                        "serialized context field is missing");
+        }
+    }
+    for (auto field = it->begin(); field != it->end(); ++field) {
+        if (std::find(kContextFields.begin(), kContextFields.end(),
+                      field.key()) == kContextFields.end()) {
+            return fail(ErrorCode::kInvalidValue,
+                        child_path("context", field.key()),
+                        "field is not emitted by the pinned context serializer");
+        }
+    }
 
     auto status = read_optional_string(it.value(), "context", "name", output.name);
     if (status.is_bad()) {
         return status;
+    }
+    if (output.name && output.name->find('\0') != std::string::npos) {
+        return fail(ErrorCode::kInvalidValue, "context.name",
+                    "context name contains NUL");
     }
     status = read_optional_data_type(it.value(), "context", "compute_data_type", output.compute_data_type);
     if (status.is_bad()) {
@@ -517,9 +683,6 @@ Status parse_context(Json const& root, GraphContext& output) {
     if (status.is_bad()) {
         return status;
     }
-    if (output.is_dynamic_shape_enabled && *output.is_dynamic_shape_enabled) {
-        return fail(ErrorCode::kInvalidShape, "context.is_dynamic_shape_enabled", "dynamic shapes are not supported");
-    }
     status = read_optional_bool(it.value(),
                                 "context",
                                 "is_override_shape_enabled",
@@ -527,27 +690,21 @@ Status parse_context(Json const& root, GraphContext& output) {
     if (status.is_bad()) {
         return status;
     }
-    if (output.is_override_shape_enabled && *output.is_override_shape_enabled) {
-        return fail(ErrorCode::kInvalidShape,
-                    "context.is_override_shape_enabled",
-                    "shape override is not supported by the static MVP");
-    }
     return Status::ok();
 }
 
-Status parse_uid_key(std::string const& key, std::string const& path, std::int64_t& output) {
+bool parse_uid_key(std::string const& key, std::int64_t& output) {
     if (key.empty()) {
-        return fail(ErrorCode::kInvalidValue, path, "tensor map key must be a decimal UID");
+        return false;
     }
     auto const result = std::from_chars(key.data(), key.data() + key.size(), output);
-    if (result.ec != std::errc{} || result.ptr != key.data() + key.size() ||
-        std::to_string(output) != key) {
-        return fail(ErrorCode::kInvalidValue, path, "tensor map key must be a decimal int64 UID");
-    }
-    return Status::ok();
+    return result.ec == std::errc{} && result.ptr == key.data() + key.size() &&
+           std::to_string(output) == key;
 }
 
-Status parse_tensors(Json const& root, std::map<std::int64_t, TensorDesc>& output) {
+Status parse_tensors(Json const& root,
+                     std::map<std::int64_t, TensorDesc>& uid_tensors,
+                     std::map<std::string, TensorDesc>& named_tensors) {
     Json const* tensors = nullptr;
     auto status = require_field(root, "", "tensors", tensors);
     if (status.is_bad()) {
@@ -557,29 +714,39 @@ Status parse_tensors(Json const& root, std::map<std::int64_t, TensorDesc>& outpu
         return fail(ErrorCode::kInvalidFieldType, "tensors", "expected object");
     }
 
-    std::set<std::int64_t> seen_uids;
     for (auto it = tensors->begin(); it != tensors->end(); ++it) {
         auto const tensor_path = child_path("tensors", it.key());
         std::int64_t key_uid = 0;
-        status = parse_uid_key(it.key(), tensor_path, key_uid);
-        if (status.is_bad()) {
-            return status;
-        }
+        auto const key_is_uid = parse_uid_key(it.key(), key_uid);
 
         TensorDesc tensor;
         status = parse_tensor(it.value(), tensor_path, tensor);
         if (status.is_bad()) {
             return status;
         }
-        if (!seen_uids.insert(tensor.uid).second) {
-            return fail(ErrorCode::kDuplicateUid, tensor_path, "tensor UID is used more than once");
+        if (tensor.uid_assigned) {
+            if (!key_is_uid || tensor.uid != key_uid) {
+                return fail(
+                    ErrorCode::kInvalidValue, tensor_path,
+                    "UID-assigned tensor requires a matching decimal map key");
+            }
+            if (!uid_tensors.emplace(key_uid, std::move(tensor)).second) {
+                return fail(ErrorCode::kDuplicateUid, tensor_path,
+                            "tensor UID is used more than once");
+            }
+        } else {
+            if (it.key().empty() ||
+                it.key().find('\0') != std::string::npos ||
+                it.key() != tensor.name) {
+                return fail(
+                    ErrorCode::kInvalidValue, tensor_path,
+                    "name-keyed tensor requires a map key matching tensor.name");
+            }
+            if (!named_tensors.emplace(it.key(), std::move(tensor)).second) {
+                return fail(ErrorCode::kInvalidValue, tensor_path,
+                            "tensor name is used more than once");
+            }
         }
-        if (tensor.uid != key_uid) {
-            return fail(ErrorCode::kInvalidValue,
-                        tensor_path,
-                        "tensor map key and tensor.uid must identify the same UID");
-        }
-        output.emplace(key_uid, std::move(tensor));
     }
 
     return Status::ok();
@@ -592,8 +759,445 @@ Status read_uid_reference(Json const& value, std::string const& path, std::int64
     return read_int64(value, path, output);
 }
 
-Status parse_node(Json const& node, std::size_t index, NodeDesc& output) {
-    auto const path = index_path("nodes", index);
+bool contains_name(std::vector<std::string_view> const& names,
+                   std::string_view name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+bool is_indexed_port(std::string_view port) {
+    if (port.empty()) {
+        return false;
+    }
+    std::uint64_t index = 0;
+    auto const result =
+        std::from_chars(port.data(), port.data() + port.size(), index);
+    return result.ec == std::errc{} && result.ptr == port.data() + port.size() &&
+           std::to_string(index) == port;
+}
+
+Status validate_node_fields(Json const& node,
+                            std::string const& path,
+                            OperationSchema const& schema) {
+    for (auto const* common : {"tag", "name", "inputs", "outputs"}) {
+        if (!node.contains(common)) {
+            return fail(ErrorCode::kMissingField, child_path(path, common),
+                        "required field is missing");
+        }
+    }
+    for (auto name : schema.required_attributes) {
+        if (!node.contains(std::string(name))) {
+            return fail(ErrorCode::kMissingField,
+                        child_path(path, name),
+                        "serialized attribute is missing");
+        }
+    }
+    for (auto it = node.begin(); it != node.end(); ++it) {
+        auto const& name = it.key();
+        if (name == "tag" || name == "name" || name == "inputs" ||
+            name == "outputs" ||
+            contains_name(schema.required_attributes, name) ||
+            contains_name(schema.optional_attributes, name)) {
+            continue;
+        }
+        return fail(ErrorCode::kInvalidValue, child_path(path, name),
+                    "field is not emitted by the pinned serializer for " +
+                        std::string(schema.serialized_tag));
+    }
+    return Status::ok();
+}
+
+Status read_tensor_reference(Json const& value,
+                             std::string const& path,
+                             TensorReference& output) {
+    if (value.is_string()) {
+        std::string name;
+        auto status = read_string(value, path, name);
+        if (status.is_bad()) {
+            return status;
+        }
+        if (name.empty() || name.find('\0') != std::string::npos) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "tensor name reference is empty or contains NUL");
+        }
+        output = std::move(name);
+        return Status::ok();
+    }
+    std::int64_t uid = 0;
+    auto status = read_int64(value, path, uid);
+    if (status.is_bad()) {
+        return status;
+    }
+    output = uid;
+    return Status::ok();
+}
+
+Status parse_ports(Json const& value,
+                   std::string const& path,
+                   std::vector<std::string_view> const& allowed,
+                   bool allows_indexed,
+                   std::map<std::string, TensorReference>& output) {
+    if (!value.is_object()) {
+        return fail(ErrorCode::kInvalidFieldType, path,
+                    "expected tensor-reference object");
+    }
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if ((!allows_indexed && !contains_name(allowed, it.key())) ||
+            (allows_indexed && !is_indexed_port(it.key()))) {
+            return fail(ErrorCode::kInvalidValue,
+                        child_path(path, it.key()),
+                        "port is not part of the pinned operation schema");
+        }
+        TensorReference reference;
+        auto status = read_tensor_reference(
+            it.value(), child_path(path, it.key()), reference);
+        if (status.is_bad()) {
+            return status;
+        }
+        output.emplace(it.key(), std::move(reference));
+    }
+    return Status::ok();
+}
+
+bool enum_value(Json const& value,
+                std::initializer_list<std::string_view> allowed,
+                bool nullable = true) {
+    if (value.is_null()) {
+        return nullable;
+    }
+    if (!value.is_string()) {
+        return false;
+    }
+    auto const text = value.get_ref<std::string const&>();
+    return std::find(allowed.begin(), allowed.end(), text) != allowed.end();
+}
+
+bool is_integer(Json const& value) {
+    return value.is_number_integer() || value.is_number_unsigned();
+}
+
+bool integer_array(Json const& value) {
+    return value.is_array() &&
+           std::all_of(value.begin(), value.end(), [](Json const& item) {
+               return is_integer(item);
+           });
+}
+
+bool slice_array(Json const& value) {
+    return value.is_array() &&
+           std::all_of(value.begin(), value.end(), [](Json const& slice) {
+               return slice.is_array() && slice.size() == 2 &&
+                      std::all_of(slice.begin(), slice.end(),
+                                  [](Json const& item) {
+                                      return is_integer(item);
+                                  });
+           });
+}
+
+bool integer_fits_int32(Json const& value) {
+    if (value.is_number_unsigned()) {
+        return value.get<std::uint64_t>() <=
+               static_cast<std::uint64_t>(
+                   std::numeric_limits<std::int32_t>::max());
+    }
+    if (!value.is_number_integer()) {
+        return false;
+    }
+    auto const integer = value.get<std::int64_t>();
+    return integer >= std::numeric_limits<std::int32_t>::min() &&
+           integer <= std::numeric_limits<std::int32_t>::max();
+}
+
+bool int32_array(Json const& value) {
+    return value.is_array() &&
+           std::all_of(value.begin(), value.end(), [](Json const& item) {
+               return integer_fits_int32(item);
+    });
+}
+
+bool nullable_integer(Json const& value) {
+    return value.is_null() || value.is_number_integer() ||
+           value.is_number_unsigned();
+}
+
+bool nullable_number(Json const& value) {
+    return value.is_null() || value.is_number();
+}
+
+Status validate_attribute(Json const& value,
+                          std::string const& path,
+                          OperationTag tag,
+                          std::string_view name) {
+    bool valid = false;
+    if (name == "compute_data_type" || name == "mma_core_mode") {
+        if (value.is_null()) {
+            valid = true;
+        } else if (value.is_string()) {
+            valid = data_type_from_name(value.get_ref<std::string const&>())
+                        .has_value();
+        }
+    } else if (name == "mode") {
+        if (tag == OperationTag::kPointwise) {
+            valid = value.is_string() &&
+                    is_pointwise_mode(value.get_ref<std::string const&>());
+        } else if (tag == OperationTag::kReduction) {
+            valid = value.is_string() &&
+                    is_reduction_mode(value.get_ref<std::string const&>());
+        } else {
+            valid = enum_value(value, {"NONE", "GATHER", "SCATTER"},
+                               false);
+        }
+    } else if (name == "math_mode") {
+        valid = enum_value(value, {"CONVOLUTION", "CROSS_CORRELATION"},
+                           false);
+    } else if (name == "forward_phase") {
+        valid = enum_value(value, {"INFERENCE", "TRAINING"});
+    } else if (name == "distribution") {
+        valid = enum_value(value, {"BERNOULLI", "UNIFORM", "NORMAL"});
+    } else if (name == "resample_mode") {
+        valid = enum_value(value,
+                           {"AVGPOOL_EXCLUDE_PADDING",
+                            "AVGPOOL_INCLUDE_PADDING", "BILINEAR", "NEAREST",
+                            "MAXPOOL"});
+    } else if (name == "padding_mode") {
+        valid = enum_value(value,
+                           {"EDGE_VAL_PAD", "NEG_INF_PAD", "ZERO_PAD"});
+    } else if (name == "reshape_mode") {
+        valid = enum_value(value, {"VIEW_ONLY", "LOGICAL"});
+    } else if (name == "diagonal_alignment") {
+        valid = enum_value(value, {"TOP_LEFT", "BOTTOM_RIGHT"}, false);
+    } else if (name == "implementation") {
+        valid = enum_value(value, {"AUTO", "COMPOSITE", "UNIFIED"}, false);
+    } else if (name == "slices") {
+        valid = slice_array(value);
+    } else if (name == "pre_padding" || name == "post_padding" ||
+               name == "stride" || name == "dilation" || name == "dim" ||
+               name == "window" || name == "permutation" ||
+               name == "slice_strides") {
+        valid = integer_array(value);
+    } else if (name == "block_size") {
+        valid = tag == OperationTag::kBlockScaleDequantize
+                    ? int32_array(value)
+                    : value.is_null() || integer_fits_int32(value);
+    } else if (name == "peer_stats") {
+        valid = value.is_array();
+    } else if (name == "is_negative_scale" ||
+               name == "is_deterministic" || name == "alibi_mask" ||
+               name == "padding_mask" ||
+               name == "is_deterministic_algorithm" || name == "is_mxfp8" ||
+               name == "unfuse_fma") {
+        valid = value.is_boolean();
+    } else if (name == "generate_index" || name == "generate_stats") {
+        valid = value.is_null() || value.is_boolean();
+    } else if (name == "top_k") {
+        valid = integer_fits_int32(value);
+    } else if (name == "rope_dim") {
+        valid = is_integer(value);
+    } else if (name == "max_seq_len_kv") {
+        valid = value.is_null() || integer_fits_int32(value);
+    } else if (name == "axis" || name == "in_place_index" ||
+               name == "seed" ||
+               name == "left_bound" ||
+               name == "right_bound" || name == "max_total_seq_len_q" ||
+               name == "max_total_seq_len_kv") {
+        valid = nullable_integer(value);
+    } else if (name == "padding_value" || name == "relu_lower_clip" ||
+               name == "relu_upper_clip" ||
+               name == "relu_lower_clip_slope" || name == "swish_beta" ||
+               name == "elu_alpha" || name == "softplus_beta" ||
+               name == "bernoulli_probability" ||
+               name == "dropout_probability" ||
+               name == "attn_scale_value" ||
+               name == "rescale_threshold") {
+        valid = nullable_number(value);
+    } else if (name == "output_scale") {
+        valid = value.is_number();
+    }
+
+    if (!valid) {
+        return fail(ErrorCode::kInvalidFieldType, path,
+                    "attribute has a value outside the pinned schema");
+    }
+    return Status::ok();
+}
+
+Status merge_embedded_tensor(
+    TensorDesc tensor,
+    std::string const& path,
+    std::map<std::int64_t, TensorDesc>& uid_tensors,
+    std::map<std::string, TensorDesc>& named_tensors,
+    TensorReference& reference) {
+    if (tensor.uid_assigned) {
+        reference = tensor.uid;
+        auto const existing = uid_tensors.find(tensor.uid);
+        if (existing == uid_tensors.end()) {
+            uid_tensors.emplace(tensor.uid, std::move(tensor));
+            return Status::ok();
+        }
+        if (existing->second != tensor) {
+            return fail(ErrorCode::kDuplicateUid, path,
+                        "embedded tensor conflicts with the existing UID");
+        }
+        return Status::ok();
+    }
+
+    reference = tensor.name;
+    auto const existing = named_tensors.find(tensor.name);
+    if (existing == named_tensors.end()) {
+        named_tensors.emplace(tensor.name, std::move(tensor));
+        return Status::ok();
+    }
+    if (existing->second != tensor) {
+        return fail(ErrorCode::kInvalidValue, path,
+                    "embedded tensor conflicts with the existing name");
+    }
+    return Status::ok();
+}
+
+Status parse_embedded_tensor_list(
+    Json const& value,
+    std::string const& path,
+    std::map<std::int64_t, TensorDesc>& uid_tensors,
+    std::map<std::string, TensorDesc>& named_tensors,
+    std::vector<TensorReference>& references) {
+    references.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        auto const tensor_path = index_path(path, index);
+        TensorDesc tensor;
+        auto status = parse_tensor(value[index], tensor_path, tensor);
+        if (status.is_bad()) {
+            return status;
+        }
+        TensorReference reference;
+        status = merge_embedded_tensor(std::move(tensor), tensor_path,
+                                       uid_tensors, named_tensors, reference);
+        if (status.is_bad()) {
+            return status;
+        }
+        references.push_back(std::move(reference));
+    }
+    return Status::ok();
+}
+
+Status parse_generic_node(Json const& node,
+                          std::string const& path,
+                          OperationSchema const& schema,
+                          std::map<std::int64_t, TensorDesc>& uid_tensors,
+                          std::map<std::string, TensorDesc>& named_tensors,
+                          NodeDesc& output) {
+    GenericOperationDesc operation;
+    auto status = parse_ports(node.at("inputs"), child_path(path, "inputs"),
+                              schema.input_ports, schema.allows_indexed_inputs,
+                              operation.inputs);
+    if (status.is_bad()) {
+        return status;
+    }
+    status = parse_ports(node.at("outputs"), child_path(path, "outputs"),
+                         schema.output_ports, false, operation.outputs);
+    if (status.is_bad()) {
+        return status;
+    }
+    for (auto name : schema.required_attributes) {
+        auto const& value = node.at(std::string(name));
+        status = validate_attribute(value, child_path(path, name), schema.tag,
+                                    name);
+        if (status.is_bad()) {
+            return status;
+        }
+        SerializedValue canonical;
+        status = parse_serialized_value(value, child_path(path, name),
+                                        canonical);
+        if (status.is_bad()) {
+            return status;
+        }
+        operation.attributes.emplace(std::string(name),
+                                     std::move(canonical));
+        if (name == "peer_stats") {
+            status = parse_embedded_tensor_list(
+                value, child_path(path, name), uid_tensors, named_tensors,
+                operation.input_lists[std::string(name)]);
+            if (status.is_bad()) {
+                return status;
+            }
+        }
+    }
+    for (auto name : schema.optional_attributes) {
+        auto const it = node.find(std::string(name));
+        if (it == node.end()) {
+            continue;
+        }
+        status = validate_attribute(it.value(), child_path(path, name),
+                                    schema.tag, name);
+        if (status.is_bad()) {
+            return status;
+        }
+        SerializedValue canonical;
+        status = parse_serialized_value(it.value(), child_path(path, name),
+                                        canonical);
+        if (status.is_bad()) {
+            return status;
+        }
+        operation.attributes.emplace(std::string(name),
+                                     std::move(canonical));
+        if (name == "peer_stats") {
+            status = parse_embedded_tensor_list(
+                it.value(), child_path(path, name), uid_tensors,
+                named_tensors, operation.input_lists[std::string(name)]);
+            if (status.is_bad()) {
+                return status;
+            }
+        }
+    }
+    if (operation.outputs.empty()) {
+        return fail(ErrorCode::kInvalidValue, child_path(path, "outputs"),
+                    "operation must expose at least one serialized output");
+    }
+    if (schema.tag == OperationTag::kPointwise) {
+        auto const& mode = node.at("mode").get_ref<std::string const&>();
+        auto const expected_inputs = pointwise_input_count(mode);
+        if (!expected_inputs || operation.inputs.size() != *expected_inputs ||
+            operation.outputs.size() != 1 ||
+            operation.outputs.find("OUT_0") == operation.outputs.end()) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "pointwise ports do not match mode arity");
+        }
+        for (std::size_t index = 0; index < *expected_inputs; ++index) {
+            if (operation.inputs.find("IN_" + std::to_string(index)) ==
+                operation.inputs.end()) {
+                return fail(ErrorCode::kInvalidValue,
+                            child_path(path, "inputs"),
+                            "pointwise inputs must be contiguous from IN_0");
+            }
+        }
+    } else if (schema.tag == OperationTag::kReduction) {
+        if (operation.inputs.size() != 1 ||
+            operation.inputs.find("X") == operation.inputs.end() ||
+            operation.outputs.size() != 1 ||
+            operation.outputs.find("Y") == operation.outputs.end()) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "reduction ports must be exactly X and Y");
+        }
+    } else if (schema.allows_indexed_inputs) {
+        if (operation.inputs.empty()) {
+            return fail(ErrorCode::kInvalidValue,
+                        child_path(path, "inputs"),
+                        "concatenate requires at least one indexed input");
+        }
+        for (std::size_t index = 0; index < operation.inputs.size(); ++index) {
+            if (operation.inputs.find(std::to_string(index)) ==
+                operation.inputs.end()) {
+                return fail(ErrorCode::kInvalidValue,
+                            child_path(path, "inputs"),
+                            "indexed inputs must be contiguous from zero");
+            }
+        }
+    }
+    output.attributes = std::move(operation);
+    return Status::ok();
+}
+
+Status resolve_node_schema(Json const& node,
+                           std::string const& path,
+                           OperationSchema const*& schema) {
     if (!node.is_object()) {
         return fail(ErrorCode::kInvalidFieldType, path, "expected object");
     }
@@ -612,23 +1216,81 @@ Status parse_node(Json const& node, std::size_t index, NodeDesc& output) {
         return fail(ErrorCode::kUnsupportedNode, child_path(path, "tag"),
                     "tag is not part of the pinned v1.24.0 schema: " + tag);
     }
-    if (capability->tag != OperationTag::kConvFprop) {
-        return fail(ErrorCode::kUnsupportedOperation, child_path(path, "tag"),
-                    "operation is schema-known but not yet parsed: " + tag);
+    schema = find_operation_schema(capability->tag);
+    if (schema == nullptr || schema->serialized_tag != tag) {
+        return fail(ErrorCode::kUnsupportedNode, child_path(path, "tag"),
+                    "internal schema inventory is incomplete for: " + tag);
     }
-    output.tag = capability->tag;
+    return Status::ok();
+}
 
-    ConvFpropDesc conv;
+Status parse_node(Json const& node,
+                  std::size_t index,
+                  std::map<std::int64_t, TensorDesc>& uid_tensors,
+                  std::map<std::string, TensorDesc>& named_tensors,
+                  NodeDesc& output) {
+    auto const path = index_path("nodes", index);
+    OperationSchema const* schema = nullptr;
+    auto status = resolve_node_schema(node, path, schema);
+    if (status.is_bad()) {
+        return status;
+    }
+    status = validate_node_fields(node, path, *schema);
+    if (status.is_bad()) {
+        return status;
+    }
+    output.tag = schema->tag;
 
+    Json const* field = nullptr;
     status = require_field(node, path, "name", field);
     if (status.is_bad()) {
         return status;
     }
-    status = read_string(*field, child_path(path, "name"), conv.name);
+    status = read_string(*field, child_path(path, "name"), output.name);
     if (status.is_bad()) {
         return status;
     }
-    output.name = conv.name;
+    if (output.name.empty() || output.name.find('\0') != std::string::npos) {
+        return fail(ErrorCode::kInvalidValue, child_path(path, "name"),
+                    "node name is empty or contains NUL");
+    }
+    if (schema->tag != OperationTag::kConvFprop) {
+        return parse_generic_node(node, path, *schema, uid_tensors,
+                                  named_tensors, output);
+    }
+
+    status = parse_generic_node(node, path, *schema, uid_tensors,
+                                named_tensors, output);
+    if (status.is_bad()) {
+        return status;
+    }
+
+    auto const& compute_type = node.at("compute_data_type");
+    auto const& inputs = node.at("inputs");
+    auto const& outputs = node.at("outputs");
+    auto const is_pair = [](Json const& value) {
+        return value.is_array() && value.size() == 2 &&
+               std::all_of(value.begin(), value.end(), [](Json const& item) {
+                   return item.is_number_integer() ||
+                          item.is_number_unsigned();
+               });
+    };
+    if (!compute_type.is_string() ||
+        compute_type.get_ref<std::string const&>() != "FLOAT" ||
+        !inputs.is_object() || inputs.size() != 2 ||
+        !inputs.contains("X") || !inputs.contains("W") ||
+        !outputs.is_object() || outputs.size() != 1 ||
+        !outputs.contains("Y") || inputs.at("X").is_string() ||
+        inputs.at("W").is_string() || outputs.at("Y").is_string() ||
+        !is_pair(node.at("pre_padding")) ||
+        !is_pair(node.at("post_padding")) ||
+        !is_pair(node.at("stride")) || !is_pair(node.at("dilation")) ||
+        node.at("math_mode") != "CROSS_CORRELATION") {
+        return Status::ok();
+    }
+
+    ConvFpropDesc conv;
+    conv.name = output.name;
 
     status = require_field(node, path, "compute_data_type", field);
     if (status.is_bad()) {
@@ -733,19 +1395,15 @@ Status parse_node(Json const& node, std::size_t index, NodeDesc& output) {
 
     for (std::size_t axis = 0; axis < conv.pre_padding.size(); ++axis) {
         if (conv.pre_padding[axis] < 0 || conv.post_padding[axis] < 0) {
-            return fail(ErrorCode::kInvalidShape, path,
-                        "padding must be non-negative");
+            return Status::ok();
         }
         if (conv.stride[axis] != 1 || conv.dilation[axis] != 1) {
-            return fail(ErrorCode::kInvalidValue,
-                        path,
-                        "MVP requires unit stride and unit dilation");
+            return Status::ok();
         }
     }
     if (conv.x_uid == conv.w_uid || conv.x_uid == conv.y_uid ||
         conv.w_uid == conv.y_uid) {
-        return fail(ErrorCode::kInvalidValue, path,
-                    "X, W and Y must have distinct UIDs");
+        return Status::ok();
     }
     output.attributes = std::move(conv);
     return Status::ok();
@@ -803,7 +1461,7 @@ Status expected_packed_stride(TensorDesc const& tensor,
 
 Status validate_shapes(SerializedGraph const& graph,
                        ConvFpropDesc const& conv) {
-    if (graph.tensors.size() != 3) {
+    if (graph.tensor_count() != 3) {
         return fail(ErrorCode::kInvalidValue, "tensors",
                     "validated CONV_FPROP requires exactly X, W and Y tensors");
     }
@@ -906,6 +1564,122 @@ Status validate_shapes(SerializedGraph const& graph,
     }
     if (y.stride != expected) {
         return fail(ErrorCode::kInvalidLayout, "tensors." + std::to_string(y.uid) + ".stride", "Y is not packed NHWC");
+    }
+    return Status::ok();
+}
+
+Status validate_graph_references(SerializedGraph const& graph) {
+    std::map<TensorReference, std::size_t> producers;
+    for (std::size_t node_index = 0; node_index < graph.nodes.size();
+         ++node_index) {
+        auto const& node = graph.nodes[node_index];
+        auto const node_path = index_path("nodes", node_index);
+        auto check_reference = [&](TensorReference const& reference,
+                                   std::string const& path) -> Status {
+            if (graph.find_tensor(reference) == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is absent from tensors");
+            }
+            return Status::ok();
+        };
+        auto add_producer = [&](TensorReference const& reference,
+                                std::string const& path) -> Status {
+            auto status = check_reference(reference, path);
+            if (status.is_bad()) {
+                return status;
+            }
+            if (!producers.emplace(reference, node_index).second) {
+                return fail(ErrorCode::kInvalidValue, path,
+                            "tensor has more than one producing node");
+            }
+            return Status::ok();
+        };
+        auto check_input = [&](TensorReference const& reference,
+                               std::string const& path) -> Status {
+            auto status = check_reference(reference, path);
+            if (status.is_bad()) {
+                return status;
+            }
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor->is_virtual &&
+                producers.find(reference) == producers.end()) {
+                return fail(ErrorCode::kInvalidValue, path,
+                            "virtual tensor must be produced by an earlier node");
+            }
+            return Status::ok();
+        };
+
+        if (auto const* conv = std::get_if<ConvFpropDesc>(&node.attributes)) {
+            std::array<std::pair<std::string_view, std::int64_t>, 2>
+                input_references{{{"X", conv->x_uid}, {"W", conv->w_uid}}};
+            for (auto const& [port, uid] : input_references) {
+                auto status = check_input(
+                    TensorReference{uid},
+                    child_path(child_path(node_path, "inputs"), port));
+                if (status.is_bad()) {
+                    return status;
+                }
+            }
+            auto status = add_producer(
+                TensorReference{conv->y_uid},
+                child_path(child_path(node_path, "outputs"), "Y"));
+            if (status.is_bad()) {
+                return status;
+            }
+            continue;
+        }
+
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&node.attributes);
+        if (operation == nullptr) {
+            return fail(ErrorCode::kInvalidValue, node_path,
+                        "node has no canonical attributes");
+        }
+        for (auto const& [port, reference] : operation->inputs) {
+            auto status = check_input(
+                reference, child_path(child_path(node_path, "inputs"), port));
+            if (status.is_bad()) {
+                return status;
+            }
+        }
+        for (auto const& [name, references] : operation->input_lists) {
+            for (std::size_t index = 0; index < references.size(); ++index) {
+                auto status = check_input(
+                    references[index], index_path(child_path(node_path, name),
+                                                  index));
+                if (status.is_bad()) {
+                    return status;
+                }
+            }
+        }
+        for (auto const& [port, reference] : operation->outputs) {
+            auto status = add_producer(
+                reference, child_path(child_path(node_path, "outputs"), port));
+            if (status.is_bad()) {
+                return status;
+            }
+        }
+    }
+
+    auto validate_virtual = [&](TensorReference const& reference,
+                                TensorDesc const& tensor) -> Status {
+        if (tensor.is_virtual && producers.find(reference) == producers.end()) {
+            return fail(ErrorCode::kInvalidValue, "tensors." + tensor.name,
+                        "virtual tensor has no producing node");
+        }
+        return Status::ok();
+    };
+    for (auto const& [uid, tensor] : graph.tensors) {
+        auto status = validate_virtual(TensorReference{uid}, tensor);
+        if (status.is_bad()) {
+            return status;
+        }
+    }
+    for (auto const& [name, tensor] : graph.named_tensors) {
+        auto status = validate_virtual(TensorReference{name}, tensor);
+        if (status.is_bad()) {
+            return status;
+        }
     }
     return Status::ok();
 }
@@ -1019,6 +1793,20 @@ Status read_document(Json const& root, SerializedGraph& output) {
         return fail(ErrorCode::kSchemaVersionMismatch, "json_version", "MVP requires version 1.0");
     }
 
+    status = require_field(root, "", "cudnn_backend_version", field);
+    if (status.is_bad()) {
+        return status;
+    }
+    status = read_string(*field, "cudnn_backend_version",
+                         graph.cudnn_backend_version);
+    if (status.is_bad()) {
+        return status;
+    }
+    if (graph.cudnn_backend_version.find('\0') != std::string::npos) {
+        return fail(ErrorCode::kInvalidValue, "cudnn_backend_version",
+                    "backend version contains NUL");
+    }
+
     status = require_field(root, "", "cudnn_frontend_version", field);
     if (status.is_bad()) {
         return status;
@@ -1058,50 +1846,60 @@ Status read_document(Json const& root, SerializedGraph& output) {
         return fail(ErrorCode::kInvalidValue, "nodes",
                     "serialized Graph must contain at least one node");
     }
+    for (std::size_t index = 0; index < field->size(); ++index) {
+        OperationSchema const* schema = nullptr;
+        status = resolve_node_schema((*field)[index], index_path("nodes", index),
+                                     schema);
+        if (status.is_bad()) {
+            return status;
+        }
+    }
+
+    status = parse_tensors(root, graph.tensors, graph.named_tensors);
+    if (status.is_bad()) {
+        return status;
+    }
+
     graph.nodes.reserve(field->size());
     for (std::size_t index = 0; index < field->size(); ++index) {
         NodeDesc node;
-        status = parse_node((*field)[index], index, node);
+        status = parse_node((*field)[index], index, graph.tensors,
+                            graph.named_tensors, node);
         if (status.is_bad()) {
             return status;
         }
         graph.nodes.push_back(std::move(node));
     }
-    if (graph.nodes.size() != 1) {
-        return fail(ErrorCode::kUnsupportedOperation, "nodes",
-                    "multi-node execution is not implemented yet");
-    }
-
-    status = parse_tensors(root, graph.tensors);
+    status = validate_graph_references(graph);
     if (status.is_bad()) {
         return status;
     }
 
     auto const* conv = graph.single_conv_fprop();
-    if (conv == nullptr) {
-        return fail(ErrorCode::kUnsupportedOperation, "nodes[0]",
-                    "graph is not the validated CONV_FPROP subset");
-    }
-    if (graph.tensors.find(conv->x_uid) == graph.tensors.end() ||
-        graph.tensors.find(conv->w_uid) == graph.tensors.end() ||
-        graph.tensors.find(conv->y_uid) == graph.tensors.end()) {
-        return fail(ErrorCode::kMissingUid, "nodes[0]", "node references an unknown tensor UID");
-    }
-    for (auto const* type : {&graph.context.compute_data_type,
-                             &graph.context.intermediate_data_type,
-                             &graph.context.io_data_type}) {
-        if (*type && **type != DataType::kFloat32) {
-            return fail(ErrorCode::kUnsupportedDataType, "context",
-                        "validated CONV_FPROP requires FLOAT context types");
+    if (conv != nullptr) {
+        if ((graph.context.is_dynamic_shape_enabled &&
+             *graph.context.is_dynamic_shape_enabled) ||
+            (graph.context.is_override_shape_enabled &&
+             *graph.context.is_override_shape_enabled)) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata, "context",
+                        "validated CONV_FPROP requires static shapes");
         }
-    }
-    status = validate_shapes(graph, *conv);
-    if (status.is_bad()) {
-        return status;
-    }
-    status = validate_metadata(root, *conv);
-    if (status.is_bad()) {
-        return status;
+        for (auto const* type : {&graph.context.compute_data_type,
+                                 &graph.context.intermediate_data_type,
+                                 &graph.context.io_data_type}) {
+            if (*type && **type != DataType::kFloat32) {
+                return fail(ErrorCode::kUnsupportedDataType, "context",
+                            "validated CONV_FPROP requires FLOAT context types");
+            }
+        }
+        status = validate_shapes(graph, *conv);
+        if (status.is_bad()) {
+            return status;
+        }
+        status = validate_metadata(root, *conv);
+        if (status.is_bad()) {
+            return status;
+        }
     }
 
     output = std::move(graph);

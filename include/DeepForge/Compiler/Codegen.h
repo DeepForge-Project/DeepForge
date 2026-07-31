@@ -15,6 +15,7 @@ namespace deepforge::compiler {
 
 struct CompileOptions {
     Conv2DImportOptions importer;
+    std::string foundational_function_name = "deepforge_graph";
     import::InputFormat input_format = import::InputFormat::kAuto;
     bool build_avx_variants = true;
     bool emit_object = true;
@@ -33,6 +34,8 @@ struct VariantCode {
 
 struct CompilationResult {
     std::unique_ptr<runtime::Executable> executable;
+    InvocationAdapterKind adapter_kind =
+        InvocationAdapterKind::kConv2DRankedMemref;
     Conv2DCompileMetadata metadata;
     WorkspacePlan workspace;
     std::string target_triple;

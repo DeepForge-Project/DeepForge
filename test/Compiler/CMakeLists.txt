@@ -103,6 +103,22 @@ else()
 endif()
 add_test(NAME deepforge-variant-matrix COMMAND deepforge_variant_matrix_test)
 
+add_executable(deepforge_foundational_ops_test
+    FoundationalOpsTest.cpp
+)
+target_link_libraries(deepforge_foundational_ops_test PRIVATE DeepForge::Compiler)
+target_include_directories(deepforge_foundational_ops_test SYSTEM
+    PRIVATE
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
+)
+if(MSVC)
+    target_compile_options(deepforge_foundational_ops_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_foundational_ops_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-foundational-ops COMMAND deepforge_foundational_ops_test)
+
 if(TARGET deepforge-compile)
     set(DEEPFORGE_CLI_SCRATCH "${CMAKE_CURRENT_BINARY_DIR}/cli-scratch")
     file(MAKE_DIRECTORY "${DEEPFORGE_CLI_SCRATCH}")

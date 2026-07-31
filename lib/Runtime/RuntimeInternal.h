@@ -28,6 +28,7 @@ struct ExecutableFactory {
         std::unique_ptr<Executable>& output);
 
     [[nodiscard]] static import::Status create_object(
+        compiler::InvocationAdapterKind adapter_kind,
         compiler::Conv2DCompileMetadata const& metadata,
         compiler::WorkspacePlan const& workspace,
         std::array<std::unique_ptr<llvm::orc::LLJIT>, 3> object_jits,
@@ -44,6 +45,7 @@ struct ExecutableFactory {
     std::unique_ptr<Executable>& output);
 
 [[nodiscard]] import::Status create_object_executable(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata,
     compiler::WorkspacePlan const& workspace,
     std::array<std::unique_ptr<llvm::orc::LLJIT>, 3> object_jits,
@@ -52,6 +54,7 @@ struct ExecutableFactory {
     std::unique_ptr<Executable>& output);
 
 [[nodiscard]] import::Status load_object_executable(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata,
     compiler::WorkspacePlan const& workspace,
     std::array<std::span<std::uint8_t const>, 3> objects,

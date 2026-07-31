@@ -19,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -68,10 +69,20 @@ bool writes(compiler::TensorAccess access) {
 }
 
 Status validate_argument_table(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata) {
     auto status = compiler::validate_graph_compile_metadata(metadata);
     if (status.is_bad()) {
         return status;
+    }
+    if (adapter_kind ==
+        compiler::InvocationAdapterKind::kGenericRankedMemrefPointerTable) {
+        return Status::ok();
+    }
+    if (adapter_kind !=
+        compiler::InvocationAdapterKind::kConv2DRankedMemref) {
+        return fail(ErrorCode::kInvalidValue, "metadata.adapter",
+                    "invocation adapter kind is unknown");
     }
     if (metadata.arguments.size() != 3) {
         return fail(ErrorCode::kInvalidValue, "metadata.arguments",
@@ -142,9 +153,35 @@ template <int Rank>
     return descriptor;
 }
 
+class DynamicRankedMemRefDescriptor {
+public:
+    DynamicRankedMemRefDescriptor(
+        void* pointer,
+        std::span<std::int64_t const> dimensions,
+        std::span<std::int64_t const> strides)
+        : words_(3 + 2 * dimensions.size()) {
+        static_assert(sizeof(void*) <= sizeof(std::uint64_t));
+        std::memcpy(&words_[0], &pointer, sizeof(pointer));
+        std::memcpy(&words_[1], &pointer, sizeof(pointer));
+        words_[2] = 0;
+        for (std::size_t index = 0; index < dimensions.size(); ++index) {
+            words_[3 + index] = static_cast<std::uint64_t>(dimensions[index]);
+            words_[3 + dimensions.size() + index] =
+                static_cast<std::uint64_t>(strides[index]);
+        }
+    }
+
+    [[nodiscard]] void* data() noexcept { return words_.data(); }
+
+private:
+    std::vector<std::uint64_t> words_;
+};
+
 }  // namespace
 
 struct Executable::Impl {
+    compiler::InvocationAdapterKind adapter_kind =
+        compiler::InvocationAdapterKind::kConv2DRankedMemref;
     compiler::Conv2DCompileMetadata metadata;
     compiler::WorkspacePlan workspace;
     std::array<std::unique_ptr<::mlir::ExecutionEngine>, 3> engines;
@@ -373,6 +410,38 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
         }
     }
 
+    std::lock_guard lock(impl_->invoke_mutex);
+    if (impl_->adapter_kind ==
+        compiler::InvocationAdapterKind::kGenericRankedMemrefPointerTable) {
+        if (impl_->entry_points[variant_index] == nullptr) {
+            return fail(ErrorCode::kGraphExecutionFailed, "runtime.execute",
+                        "generic adapter requires an object entry point");
+        }
+        std::vector<DynamicRankedMemRefDescriptor> descriptors;
+        descriptors.reserve(impl_->metadata.arguments.size() + 1);
+        for (std::size_t index = 0; index < impl_->metadata.arguments.size();
+             ++index) {
+            auto const& argument = impl_->metadata.arguments[index];
+            descriptors.emplace_back(argument_pointers[index],
+                                     argument.dimensions, argument.strides);
+        }
+        std::array<std::int64_t, 1> workspace_dimensions{
+            static_cast<std::int64_t>(impl_->workspace.size_bytes)};
+        constexpr std::array<std::int64_t, 1> workspace_strides{1};
+        descriptors.emplace_back(workspace, workspace_dimensions,
+                                 workspace_strides);
+        std::vector<void*> descriptor_table;
+        descriptor_table.reserve(descriptors.size());
+        for (auto& descriptor : descriptors) {
+            descriptor_table.push_back(descriptor.data());
+        }
+        using EntryPoint = void (*)(void**);
+        auto entry = reinterpret_cast<EntryPoint>(
+            impl_->entry_points[variant_index]);
+        entry(descriptor_table.data());
+        return Status::ok();
+    }
+
     auto x = make_descriptor<4>(static_cast<float*>(argument_pointers[0]),
                                 impl_->metadata.x_shape);
     auto w = make_descriptor<4>(static_cast<float*>(argument_pointers[1]),
@@ -382,7 +451,6 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
     auto workspace_descriptor = make_workspace_descriptor(
         workspace, static_cast<std::int64_t>(impl_->workspace.size_bytes));
 
-    std::lock_guard lock(impl_->invoke_mutex);
     if (impl_->entry_points[variant_index] != nullptr) {
         if (impl_->workspace.size_bytes == 0) {
             using EntryPoint = void (*)(void*, void*, void*);
@@ -419,7 +487,8 @@ Status ExecutableFactory::create(
     std::vector<std::unique_ptr<::mlir::ExecutionEngine>> engines,
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
-    auto metadata_status = validate_argument_table(metadata);
+    auto metadata_status = validate_argument_table(
+        compiler::InvocationAdapterKind::kConv2DRankedMemref, metadata);
     if (metadata_status.is_bad()) {
         return metadata_status;
     }
@@ -428,6 +497,8 @@ Status ExecutableFactory::create(
                     "expected scalar, AVX2 and AVX-512 slots");
     }
     auto impl = std::make_unique<Executable::Impl>();
+    impl->adapter_kind =
+        compiler::InvocationAdapterKind::kConv2DRankedMemref;
     impl->metadata = metadata;
     impl->workspace = workspace;
     impl->symbols = std::move(symbols);
@@ -447,13 +518,14 @@ Status ExecutableFactory::create(
 }
 
 Status ExecutableFactory::create_object(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata,
     compiler::WorkspacePlan const& workspace,
     std::array<std::unique_ptr<::llvm::orc::LLJIT>, 3> object_jits,
     std::array<void*, 3> entry_points,
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
-    auto metadata_status = validate_argument_table(metadata);
+    auto metadata_status = validate_argument_table(adapter_kind, metadata);
     if (metadata_status.is_bad()) {
         return metadata_status;
     }
@@ -465,6 +537,7 @@ Status ExecutableFactory::create_object(
         }
     }
     auto impl = std::make_unique<Executable::Impl>();
+    impl->adapter_kind = adapter_kind;
     impl->metadata = metadata;
     impl->workspace = workspace;
     impl->object_jits = std::move(object_jits);
@@ -485,6 +558,7 @@ Status create_executable(
 }
 
 Status create_object_executable(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata,
     compiler::WorkspacePlan const& workspace,
     std::array<std::unique_ptr<::llvm::orc::LLJIT>, 3> object_jits,
@@ -492,11 +566,12 @@ Status create_object_executable(
     std::array<std::string, 3> symbols,
     std::unique_ptr<Executable>& output) {
     return ExecutableFactory::create_object(
-        metadata, workspace, std::move(object_jits), entry_points,
+        adapter_kind, metadata, workspace, std::move(object_jits), entry_points,
         std::move(symbols), output);
 }
 
 Status load_object_executable(
+    compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata,
     compiler::WorkspacePlan const& workspace,
     std::array<std::span<std::uint8_t const>, 3> objects,
@@ -536,7 +611,7 @@ Status load_object_executable(
         object_jits[index] = std::move(jit);
     }
     return create_object_executable(
-        metadata, workspace, std::move(object_jits), entry_points,
+        adapter_kind, metadata, workspace, std::move(object_jits), entry_points,
         std::move(symbols), output);
 }
 

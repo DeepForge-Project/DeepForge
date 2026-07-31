@@ -355,9 +355,22 @@ bool is_power_of_two(std::uint64_t value) {
 }
 
 bool validate_contract(
+    ArtifactAdapterKind adapter_kind,
     Conv2DCompileMetadata const& metadata, WorkspacePlan const& workspace,
     std::array<VariantCode, 3> const& variants, std::string& detail) {
-    if (!validate_conv_arguments(metadata, detail)) {
+    if (adapter_kind == ArtifactAdapterKind::kConv2DRankedMemref) {
+        if (!validate_conv_arguments(metadata, detail)) {
+            return false;
+        }
+    } else if (adapter_kind ==
+               ArtifactAdapterKind::kGenericRankedMemrefPointerTable) {
+        auto status = validate_graph_compile_metadata(metadata);
+        if (status.is_bad()) {
+            detail = status.message();
+            return false;
+        }
+    } else {
+        detail = "invocation adapter kind is unknown";
         return false;
     }
     if (metadata.function_name.empty() ||
@@ -365,51 +378,55 @@ bool validate_contract(
         detail = "function name is empty or contains NUL";
         return false;
     }
-    if (metadata.x_uid == metadata.w_uid ||
-        metadata.x_uid == metadata.y_uid ||
-        metadata.w_uid == metadata.y_uid) {
-        detail = "X, W and Y UIDs must be distinct";
-        return false;
-    }
-    if (!valid_shape(metadata.x_shape) || !valid_shape(metadata.w_shape) ||
-        !valid_shape(metadata.y_shape) ||
-        !valid_shape(metadata.padded_x_shape)) {
-        detail = "all shapes must be static, positive and fit the address range";
-        return false;
-    }
-    if (metadata.stride != std::array<std::int64_t, 2>{1, 1} ||
-        metadata.dilation != std::array<std::int64_t, 2>{1, 1}) {
-        detail = "stride and dilation must match the unit-stride MVP";
-        return false;
-    }
-    for (std::size_t axis = 0; axis < 2; ++axis) {
-        if (metadata.pre_padding[axis] < 0 ||
-            metadata.post_padding[axis] < 0) {
-            detail = "padding must be non-negative";
+    if (adapter_kind == ArtifactAdapterKind::kConv2DRankedMemref) {
+        if (metadata.x_uid == metadata.w_uid ||
+            metadata.x_uid == metadata.y_uid ||
+            metadata.w_uid == metadata.y_uid) {
+            detail = "X, W and Y UIDs must be distinct";
             return false;
         }
-        std::int64_t padded = 0;
-        auto input_extent = metadata.x_shape[axis + 1];
-        if (!checked_add_i64(input_extent, metadata.pre_padding[axis], padded) ||
-            !checked_add_i64(padded, metadata.post_padding[axis], padded) ||
-            metadata.padded_x_shape[axis + 1] != padded) {
-            detail = "padded input shape does not match padding metadata";
+        if (!valid_shape(metadata.x_shape) || !valid_shape(metadata.w_shape) ||
+            !valid_shape(metadata.y_shape) ||
+            !valid_shape(metadata.padded_x_shape)) {
+            detail =
+                "all shapes must be static, positive and fit the address range";
             return false;
         }
-        auto filter_extent = metadata.w_shape[axis + 1];
-        if (padded < filter_extent ||
-            metadata.y_shape[axis + 1] != padded - filter_extent + 1) {
-            detail = "output shape does not match Conv2D metadata";
+        if (metadata.stride != std::array<std::int64_t, 2>{1, 1} ||
+            metadata.dilation != std::array<std::int64_t, 2>{1, 1}) {
+            detail = "stride and dilation must match the unit-stride MVP";
             return false;
         }
-    }
-    if (metadata.padded_x_shape[0] != metadata.x_shape[0] ||
-        metadata.padded_x_shape[3] != metadata.x_shape[3] ||
-        metadata.w_shape[3] != metadata.x_shape[3] ||
-        metadata.y_shape[0] != metadata.x_shape[0] ||
-        metadata.y_shape[3] != metadata.w_shape[0]) {
-        detail = "N/C/K dimensions are inconsistent";
-        return false;
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            if (metadata.pre_padding[axis] < 0 ||
+                metadata.post_padding[axis] < 0) {
+                detail = "padding must be non-negative";
+                return false;
+            }
+            std::int64_t padded = 0;
+            auto input_extent = metadata.x_shape[axis + 1];
+            if (!checked_add_i64(input_extent, metadata.pre_padding[axis],
+                                 padded) ||
+                !checked_add_i64(padded, metadata.post_padding[axis], padded) ||
+                metadata.padded_x_shape[axis + 1] != padded) {
+                detail = "padded input shape does not match padding metadata";
+                return false;
+            }
+            auto filter_extent = metadata.w_shape[axis + 1];
+            if (padded < filter_extent ||
+                metadata.y_shape[axis + 1] != padded - filter_extent + 1) {
+                detail = "output shape does not match Conv2D metadata";
+                return false;
+            }
+        }
+        if (metadata.padded_x_shape[0] != metadata.x_shape[0] ||
+            metadata.padded_x_shape[3] != metadata.x_shape[3] ||
+            metadata.w_shape[3] != metadata.x_shape[3] ||
+            metadata.y_shape[0] != metadata.x_shape[0] ||
+            metadata.y_shape[3] != metadata.w_shape[0]) {
+            detail = "N/C/K dimensions are inconsistent";
+            return false;
+        }
     }
 
     if (workspace.alignment != kWorkspaceAlignment ||
@@ -502,10 +519,12 @@ Status validate_compilation(CompilationResult const& compilation) {
         return fail(ErrorCode::kInvalidArgument, "artifact",
                     "target triple and function name are required");
     }
-    if (!valid_shape(compilation.metadata.x_shape) ||
-        !valid_shape(compilation.metadata.w_shape) ||
-        !valid_shape(compilation.metadata.y_shape) ||
-        !valid_shape(compilation.metadata.padded_x_shape)) {
+    if (compilation.adapter_kind ==
+            ArtifactAdapterKind::kConv2DRankedMemref &&
+        (!valid_shape(compilation.metadata.x_shape) ||
+         !valid_shape(compilation.metadata.w_shape) ||
+         !valid_shape(compilation.metadata.y_shape) ||
+         !valid_shape(compilation.metadata.padded_x_shape))) {
         return fail(ErrorCode::kInvalidShape, "artifact",
                     "serialized shapes must be static, positive and fit the address range");
     }
@@ -519,8 +538,9 @@ Status validate_compilation(CompilationResult const& compilation) {
         }
     }
     std::string detail;
-    if (!validate_contract(compilation.metadata, compilation.workspace,
-                           compilation.variants, detail)) {
+    if (!validate_contract(compilation.adapter_kind, compilation.metadata,
+                           compilation.workspace, compilation.variants,
+                           detail)) {
         return fail(ErrorCode::kInvalidValue, "artifact.contract",
                     std::move(detail));
     }
@@ -548,8 +568,8 @@ Status create_loaded_executable(ArtifactInfo const& artifact,
         symbols[index] = variant.symbol;
     }
     return runtime::load_object_executable(
-        artifact.metadata, artifact.workspace, objects, std::move(symbols),
-        output);
+        artifact.adapter_kind, artifact.metadata, artifact.workspace, objects,
+        std::move(symbols), output);
 }
 
 }  // namespace
@@ -597,11 +617,13 @@ Status serialize_artifact(CompilationResult const& compilation,
         append_i64_vector(bytes, argument.strides);
     }
 
-    append_u32(
-        bytes,
-        static_cast<std::uint32_t>(ArtifactAdapterKind::kConv2DRankedMemref));
+    append_u32(bytes,
+               static_cast<std::uint32_t>(compilation.adapter_kind));
     std::vector<std::uint8_t> adapter_metadata;
-    append_conv_adapter_metadata(adapter_metadata, compilation.metadata);
+    if (compilation.adapter_kind ==
+        ArtifactAdapterKind::kConv2DRankedMemref) {
+        append_conv_adapter_metadata(adapter_metadata, compilation.metadata);
+    }
     append_blob(bytes, adapter_metadata);
 
     append_u64(bytes, compilation.workspace.size_bytes);
@@ -738,14 +760,21 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             return parse_failure("adapter metadata is truncated or malformed");
         }
         if (adapter_kind != static_cast<std::uint32_t>(
-                                ArtifactAdapterKind::kConv2DRankedMemref)) {
+                                ArtifactAdapterKind::kConv2DRankedMemref) &&
+            adapter_kind != static_cast<std::uint32_t>(
+                                ArtifactAdapterKind::
+                                    kGenericRankedMemrefPointerTable)) {
             return parse_failure("adapter kind is unsupported");
         }
         result.adapter_kind = static_cast<ArtifactAdapterKind>(adapter_kind);
-        Reader adapter_reader(adapter_metadata);
-        if (!read_conv_adapter_metadata(adapter_reader, result.metadata) ||
-            adapter_reader.remaining() != 0) {
-            return parse_failure("Conv adapter metadata is malformed");
+        if (result.adapter_kind == ArtifactAdapterKind::kConv2DRankedMemref) {
+            Reader adapter_reader(adapter_metadata);
+            if (!read_conv_adapter_metadata(adapter_reader, result.metadata) ||
+                adapter_reader.remaining() != 0) {
+                return parse_failure("Conv adapter metadata is malformed");
+            }
+        } else if (!adapter_metadata.empty()) {
+            return parse_failure("generic adapter metadata must be empty");
         }
     } else {
         result.adapter_kind = ArtifactAdapterKind::kConv2DRankedMemref;
@@ -758,10 +787,11 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         }
     }
 
-    if (!valid_shape(result.metadata.x_shape) ||
-        !valid_shape(result.metadata.w_shape) ||
-        !valid_shape(result.metadata.y_shape) ||
-        !valid_shape(result.metadata.padded_x_shape)) {
+    if (result.adapter_kind == ArtifactAdapterKind::kConv2DRankedMemref &&
+        (!valid_shape(result.metadata.x_shape) ||
+         !valid_shape(result.metadata.w_shape) ||
+         !valid_shape(result.metadata.y_shape) ||
+         !valid_shape(result.metadata.padded_x_shape))) {
         return parse_failure("serialized shape is invalid");
     }
 
@@ -820,8 +850,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         return parse_failure("artifact has trailing payload bytes");
     }
     std::string detail;
-    if (!validate_contract(result.metadata, result.workspace, result.variants,
-                           detail)) {
+    if (!validate_contract(result.adapter_kind, result.metadata,
+                           result.workspace, result.variants, detail)) {
         return parse_failure("contract is invalid: " + detail);
     }
     output = std::move(result);

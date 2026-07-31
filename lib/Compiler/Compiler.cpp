@@ -2,6 +2,7 @@
 
 #include "DeepForge/Compiler/Lowering.h"
 #include "DeepForge/Import/SerializedGraphImporter.h"
+#include "FoundationalGraph.h"
 #include "../Runtime/RuntimeInternal.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -24,8 +25,10 @@
 #include "mlir/Target/LLVMIR/Export.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Error.h"
@@ -52,6 +55,12 @@ struct TargetSpec {
     char const* cpu = "x86-64";
     char const* features = "";
     char const* feature_name = "baseline";
+};
+
+struct PointerTableAdapter {
+    std::string_view internal_symbol;
+    std::string_view public_symbol;
+    std::size_t descriptor_count = 0;
 };
 
 TargetSpec target_spec(runtime::CpuVariant variant) {
@@ -145,14 +154,91 @@ llvm::Expected<std::unique_ptr<llvm::TargetMachine>> make_target_machine(
     return std::unique_ptr<llvm::TargetMachine>(machine);
 }
 
+Status add_pointer_table_adapter(llvm::Module& module,
+                                 PointerTableAdapter const& adapter) {
+    auto const internal_c_name =
+        "_mlir_ciface_" + std::string(adapter.internal_symbol);
+    auto* internal = module.getFunction(internal_c_name);
+    if (internal == nullptr || internal->isVarArg() ||
+        !internal->getReturnType()->isVoidTy() ||
+        internal->arg_size() != adapter.descriptor_count) {
+        return compiler_error(
+            "llvm.adapter",
+            "internal ranked-memref C wrapper has an unexpected signature");
+    }
+    for (auto const& argument : internal->args()) {
+        if (!argument.getType()->isPointerTy()) {
+            return compiler_error(
+                "llvm.adapter",
+                "internal ranked-memref C wrapper argument is not a pointer");
+        }
+    }
+
+    auto& context = module.getContext();
+    auto* pointer_type = llvm::PointerType::get(context, 0);
+    auto* adapter_type = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context), {pointer_type}, false);
+    auto make_function = [&](std::string const& name) -> llvm::Function* {
+        if (module.getNamedValue(name) != nullptr) {
+            return nullptr;
+        }
+        auto* function = llvm::Function::Create(
+            adapter_type, llvm::GlobalValue::ExternalLinkage, name, module);
+        function->setVisibility(llvm::GlobalValue::HiddenVisibility);
+        return function;
+    };
+
+    auto* raw = make_function(std::string(adapter.public_symbol));
+    if (raw == nullptr) {
+        return compiler_error("llvm.adapter", "public adapter symbol collides");
+    }
+    auto* raw_block = llvm::BasicBlock::Create(context, "entry", raw);
+    llvm::IRBuilder<> raw_builder(raw_block);
+    auto* table = raw->getArg(0);
+    table->setName("descriptor_table");
+    llvm::SmallVector<llvm::Value*> arguments;
+    arguments.reserve(adapter.descriptor_count);
+    for (std::size_t index = 0; index < adapter.descriptor_count; ++index) {
+        auto* slot = raw_builder.CreateConstInBoundsGEP1_64(
+            pointer_type, table, index, "descriptor_slot");
+        arguments.push_back(raw_builder.CreateLoad(pointer_type, slot,
+                                                   "descriptor"));
+    }
+    raw_builder.CreateCall(internal, arguments);
+    raw_builder.CreateRetVoid();
+
+    auto* wrapper = make_function(
+        "_mlir_ciface_" + std::string(adapter.public_symbol));
+    if (wrapper == nullptr) {
+        return compiler_error("llvm.adapter", "public C adapter symbol collides");
+    }
+    auto* wrapper_block = llvm::BasicBlock::Create(context, "entry", wrapper);
+    llvm::IRBuilder<> wrapper_builder(wrapper_block);
+    wrapper_builder.CreateCall(raw, {wrapper->getArg(0)});
+    wrapper_builder.CreateRetVoid();
+
+    if (llvm::verifyModule(module, &llvm::errs())) {
+        return compiler_error("llvm.adapter",
+                              "pointer-table wrapper failed verification");
+    }
+    return Status::ok();
+}
+
 Status translate_to_llvm(mlir::ModuleOp module,
                          runtime::CpuVariant variant,
                          std::string& llvm_ir,
-                         std::vector<std::uint8_t>& object) {
+                         std::vector<std::uint8_t>& object,
+                         PointerTableAdapter const* adapter = nullptr) {
     llvm::LLVMContext llvm_context;
     auto llvm_module = mlir::translateModuleToLLVMIR(module, llvm_context);
     if (!llvm_module) {
         return compiler_error("llvm.translation", "MLIR to LLVM IR failed");
+    }
+    if (adapter != nullptr) {
+        auto status = add_pointer_table_adapter(*llvm_module, *adapter);
+        if (status.is_bad()) {
+            return status;
+        }
     }
 
     auto target_machine_or_error = make_target_machine(variant);
@@ -182,6 +268,97 @@ Status translate_to_llvm(mlir::ModuleOp module,
     return Status::ok();
 }
 
+Status compile_foundational_graph(mlir::MLIRContext& context,
+                                  import::SerializedGraph const& graph,
+                                  CompileOptions const& options,
+                                  CompilationResult& output) {
+    CompilationResult result;
+    mlir::OwningOpRef<mlir::ModuleOp> imported;
+    Conv2DCompileMetadata metadata;
+    WorkspacePlan workspace;
+    auto status = build_foundational_graph(
+        context, graph, options.foundational_function_name, imported, metadata,
+        workspace);
+    if (status.is_bad()) {
+        return status;
+    }
+    if (options.capture_mlir) {
+        result.imported_mlir = print_module(*imported);
+        result.bufferized_mlir = result.imported_mlir;
+    }
+
+    std::array<std::string, 3> symbols;
+    constexpr std::array<runtime::CpuVariant, 3> variants{
+        runtime::CpuVariant::kScalar, runtime::CpuVariant::kAvx2,
+        runtime::CpuVariant::kAvx512};
+    for (std::size_t index = 0; index < variants.size(); ++index) {
+        auto variant = variants[index];
+        auto cloned_module = imported->clone();
+        if (!cloned_module) {
+            return compiler_error("compiler.clone",
+                                  "failed to clone foundational graph module");
+        }
+        mlir::OwningOpRef<mlir::ModuleOp> variant_module(cloned_module);
+        auto public_symbol = variant_symbol(metadata.function_name, variant);
+        auto internal_symbol = public_symbol + "_impl";
+        auto function = variant_module->lookupSymbol<mlir::func::FuncOp>(
+            metadata.function_name);
+        if (!function) {
+            return compiler_error("compiler.symbol",
+                                  "foundational graph function is absent");
+        }
+        function.setSymName(internal_symbol);
+        auto variant_metadata = metadata;
+        variant_metadata.function_name = internal_symbol;
+        status = lower_to_llvm(*variant_module, variant_metadata, variant);
+        if (status.is_bad()) {
+            return status;
+        }
+
+        auto& code = result.variants[index];
+        code.variant = variant;
+        code.symbol = public_symbol;
+        code.required_features = target_spec(variant).feature_name;
+        symbols[index] = public_symbol;
+        if (options.capture_mlir) {
+            code.mlir = print_module(*variant_module);
+        }
+        PointerTableAdapter adapter{
+            internal_symbol, public_symbol, metadata.arguments.size() + 1};
+        status = translate_to_llvm(*variant_module, variant, code.llvm_ir,
+                                   code.object, &adapter);
+        if (status.is_bad()) {
+            return status;
+        }
+    }
+
+    std::array<std::span<std::uint8_t const>, 3> runtime_objects;
+    for (std::size_t index = 0; index < result.variants.size(); ++index) {
+        runtime_objects[index] = result.variants[index].object;
+    }
+    status = runtime::load_object_executable(
+        InvocationAdapterKind::kGenericRankedMemrefPointerTable, metadata,
+        workspace, runtime_objects, std::move(symbols), result.executable);
+    if (status.is_bad()) {
+        return status;
+    }
+    for (auto& code : result.variants) {
+        if (!options.emit_llvm_ir) {
+            code.llvm_ir.clear();
+        }
+        if (!options.emit_object) {
+            code.object.clear();
+        }
+    }
+    result.adapter_kind =
+        InvocationAdapterKind::kGenericRankedMemrefPointerTable;
+    result.metadata = std::move(metadata);
+    result.workspace = std::move(workspace);
+    result.target_triple = llvm::sys::getDefaultTargetTriple();
+    output = std::move(result);
+    return Status::ok();
+}
+
 }  // namespace
 
 Status compile_graph(import::SerializedGraph const& graph,
@@ -192,6 +369,10 @@ Status compile_graph(import::SerializedGraph const& graph,
     auto registry = make_registry();
     mlir::MLIRContext context(registry, mlir::MLIRContext::Threading::DISABLED);
     context.loadAllAvailableDialects();
+
+    if (graph.single_conv_fprop() == nullptr) {
+        return compile_foundational_graph(context, graph, options, output);
+    }
 
     mlir::OwningOpRef<mlir::ModuleOp> imported;
     Conv2DCompileMetadata metadata;
@@ -265,7 +446,8 @@ Status compile_graph(import::SerializedGraph const& graph,
         runtime_objects[index] = result.variants[index].object;
     }
     status = runtime::load_object_executable(
-        metadata, bufferized.workspace, runtime_objects, std::move(symbols),
+        InvocationAdapterKind::kConv2DRankedMemref, metadata,
+        bufferized.workspace, runtime_objects, std::move(symbols),
         result.executable);
     if (status.is_bad()) {
         return status;
@@ -279,6 +461,7 @@ Status compile_graph(import::SerializedGraph const& graph,
         }
     }
     result.metadata = metadata;
+    result.adapter_kind = InvocationAdapterKind::kConv2DRankedMemref;
     result.workspace = bufferized.workspace;
     result.target_triple = llvm::sys::getDefaultTargetTriple();
     output = std::move(result);

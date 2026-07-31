@@ -9,6 +9,11 @@
 
 namespace deepforge::compiler {
 
+enum class InvocationAdapterKind : std::uint32_t {
+    kConv2DRankedMemref = 0,
+    kGenericRankedMemrefPointerTable = 1,
+};
+
 enum class TensorAccess : std::uint8_t {
     kRead,
     kWrite,

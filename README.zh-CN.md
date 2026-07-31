@@ -6,12 +6,13 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C4 已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C5 已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
-的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。Importer 已识别
-v1.24.0 全部 39 个 serialized tag，其中 30 个 tag 目前具有已验证的 CPU 执行子集。
+的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。v1.24.0 全部
+39 个 serialized tag 都已有明确声明并经过测试的 CPU 执行子集；这些子集严格
+小于 cuDNN backend 允许的完整配置空间。
 
 **MVP**：静态、连续、f32 的单个 Conv2D FWD，目标为 x86-64，提供标量、
 AVX2 和 AVX-512 三个代码变体。Machine Dialect、AMX、bf16、多线程及多算子
@@ -91,18 +92,21 @@ CPU-only MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
 
 - 原有优化的单节点 packed f32 rank-4 `CONV_FPROP` 路径；
 - 使用 3 个 convolution tag、8 个 C2 基础 tag、14 个 C3
-  normalization/statistics tag 和 5 个 C4 sequence/attention tag 的静态有序 DAG，
-  精确约束见
+  normalization/statistics tag 和 5 个 C4 sequence/attention tag 的静态有序 DAG；
+- 在精确约束内执行 block-scale conversion、FP8 matmul、FP8/MXFP8 attention 和
+  MoE grouped matmul 的 9 个 C5 特殊 tag。精确约束见
   [schema capability matrix](docs/cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 通用路径支持 rank 3-5 grouped convolution、stride、dilation、非对称 padding、
-FPROP/DGRAD/WGRAD 及 C2-C4 混合图；也支持 capability matrix 范围内的
+FPROP/DGRAD/WGRAD 及 C2-C5 混合图；也支持 capability matrix 范围内的
 normalization forward/backward、batch statistics、running-stat 更新、确定性
-Bernoulli RNG、RoPE forward/backward 和 f32 SDPA forward/backward。C4 sequence
-metadata 使用 INT32 length 和 scalar INT64 seed/offset tensor。支持 virtual
-workspace 中间值和正且不重叠的 strided layout。动态 shape、显式 alias、scalar
-pass-by-value、分布式 peer statistics、其他非 f32 data tensor 以及其余 9 个已识别
-tag 暂不可执行。
+Bernoulli RNG、RoPE forward/backward 和 f32 SDPA forward/backward。C5 在 9 个
+特殊 tag 所需端口加入软件 FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion 和 packed
+storage。C4 sequence metadata 使用 INT32 length 和 scalar INT64 seed/offset
+tensor。支持 virtual workspace 中间值和正且不重叠的 strided layout。动态/override
+shape、显式 alias、scalar pass-by-value、ragged tensor、tensor reorder、paged/cache
+attention metadata、分布式 peer statistics 和文档列出的可选特殊 attention 特性
+暂不可执行。
 
 ## 架构
 
@@ -113,7 +117,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-MVP Conv: Tensor + Linalg    通用 C2-C4: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    通用 C2-C5: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -284,8 +288,8 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P4 | 已完成：scalar LLVM/object、JIT 和 runtime |
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
-| C0-C4 | 已完成：通用 graph/runtime 基础、39-tag schema 识别、30 个已验证执行 tag |
-| C5-C6 | 进行中：data type、特殊操作、动态 metadata 和优化 |
+| C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
+| C6 | 进行中：动态 metadata、reorder/ragged/paged 支持、优化和发布验收 |
 | Optimize | 待 benchmark 驱动：外层 tiling、padding fusion、并行化 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

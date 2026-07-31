@@ -211,9 +211,12 @@ padding, both diagonal alignments, sliding windows, custom/probability dropout,
 row statistics, RNG dump, and Q/K/V/bias gradients. Tests include independent
 references, finite differences, fully masked rows, artifact reload, CPU variant
 agreement, and Release/ASan/UBSan suites. Paged/cache, block-mask, sink-token,
-packed/ragged, and FP8/MXFP8 paths remain assigned to C5/C6.
+and packed/ragged paths remain assigned to C6; FP8/MXFP8 is delivered by C5
+under the subset below.
 
 ### C5. Data types and specialized operations
+
+**Status:** completed and validated on 2026-07-31.
 
 **Work:** expand execution from f32 to f64, f16, bf16, integer, and boolean
 where legal, then add FP8/FP4/INT4 storage and conversion semantics. Implement
@@ -226,6 +229,21 @@ operation/data-type pair; enum recognition alone is not execution support.
 **Exit gate:** conversion edge cases, saturation/rounding, special floating
 values, packed storage, accumulator type, and per-type numeric tolerances are
 tested. Unsupported host ISA paths fall back correctly or fail explicitly.
+
+The delivered numeric layer provides CPU storage and f32 conversion for f64,
+f16, bf16, signed/unsigned integer, boolean, FP8 E4M3/E5M2/E8M0, packed FP4
+E2M1, and packed INT4. Execution remains declared per operation and port; it
+does not enable these types on every generic operation. The nine specialized
+tags now have static validated subsets: block-scale conversion, FP8 matmul,
+MoE grouped matmul forward/backward, and FP8/MXFP8 SDPA forward/backward.
+
+The C5 tests execute raw low-precision buffers through the public UID
+variant-pack ABI and cover round-to-nearest-even, saturation, NaN/infinity,
+packed virtual workspace, block scales, amax, supplied backward Stats, MoE
+expert partitioning, all four specialized attention tags, malformed transpose
+shapes, and full Release/ASan/UBSan suites. Physical `F8_128x4` reordering,
+dynamic/ragged metadata, optional FP8 attention features, and exact MXFP8 dS
+block requantization remain C6 work.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
@@ -299,8 +317,9 @@ The first implementation increment is C0 only:
 5. specify and test `.dfo` v2 while keeping a v1 reader;
 6. rerun all existing correctness, artifact, sanitizer, and CI gates.
 
-No new operation lowering begins until this compatibility-preserving migration
-is complete.
+This compatibility-preserving C0 migration completed before operation lowering
+started; the rule remains a historical ordering constraint rather than an open
+gate.
 
 ## 10. Confirmed Project Decisions
 

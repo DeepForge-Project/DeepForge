@@ -151,8 +151,8 @@ The nine reduction modes are `ADD`, `MUL`, `MIN`, `MAX`, `AMAX`, `AVG`,
 
 All 39 rows are `parsed`: JSON and canonical UBJSON are accepted and
 normalized, known malformed fields are rejected, and references form an
-ordered DAG. At C4 completion, 30 rows have a declared `validated` execution
-subset:
+ordered DAG. At C5 completion, all 39 rows have a declared `validated`
+execution subset:
 
 | Tag | Validated CPU subset |
 |---|---|
@@ -186,6 +186,15 @@ subset:
 | `ROPE_BWD` | Adjoint of the validated full or partial `ROPE` transform, including `output_scale` |
 | `SDPA` | Static f32 BHSD attention with GQA, bias, scale, ALiBi, padding, top-left/bottom-right windows, custom or probability dropout, and serialized row/RNG outputs under the restrictions below |
 | `SDPA_BWD` | Data and optional bias gradients for the same attention subset using serialized `O` and log-sum-exp `Stats` |
+| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute; FP4 E2M1, FP8 E4M3/E5M2, or INT4 X; f32/f16/bf16/FP8 E4M3/E8M0 scale; trailing static block dimensions; f32/f16/bf16 Y |
+| `BLOCK_SCALE_QUANTIZE` | FLOAT compute; f32/f16/bf16 X; one divisible static block axis; FP4 E2M1 or FP8 E4M3/E5M2 Y and the corresponding E4M3/E8M0 scale |
+| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, FLOAT scalar controls and amax, static rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, no M/N/K override |
+| `MOE_GROUPED_MATMUL` | `mode=NONE`, `top_k` 0 or 1, `[1,T,K]` tokens, `[E,K,N]` weights, INT32 `[E,1,1]` first-token offsets, shared f32/f16/bf16 data type |
+| `MOE_GROUPED_MATMUL_BWD` | Per-expert weight gradient for the same static `mode=NONE` tensor and offset layout |
+| `SDPA_FP8_FWD` | Static FP8 E4M3/E5M2 BHSD/GQA, scalar FLOAT scale controls, both diagonal alignments and bounded windows, optional row outputs, amax; no padding, dropout, or ALiBi |
+| `SDPA_FP8_BWD` | Q/K/V gradients and amax for the same subset, consuming serialized `O`, `Stats`, FP8 dO, and scalar FLOAT scale controls |
+| `SDPA_MXFP8_FWD` | Static BHSD/GQA with 32-element E8M0 descale blocks, f16/bf16/f32 O, required Stats and amax; logical `NONE` scale ordering in C5 |
+| `SDPA_MXFP8_BWD` | Static transpose-oriented Q/K/dO inputs and E8M0 block descales, f16/bf16/f32 gradients and amax; f32 dS reference approximation and logical `NONE` scale ordering in C5 |
 
 All validated generic rows require static, positive, explicitly UID-assigned
 tensors and f32 graph context types, positive non-overlapping strides, `NONE`
@@ -194,6 +203,25 @@ C4 additionally permits INT32 sequence lengths and scalar INT64 RNG seed and
 offset tensors on their documented ports. Virtual intermediates use planned
 workspace. Convolution grouping is inferred from `X.C / W.C`; output channels
 must be divisible by that group count.
+
+The nine C5 specialized rows use FLOAT accumulation and software conversion on
+the CPU. FP8 E4M3/E5M2 uses saturating round-to-nearest-even conversion; E8M0
+is unsigned power-of-two scale storage with canonical NaN; FP4 E2M1 and INT4
+use two logical values per byte. Only the operation/port combinations listed
+above are enabled. Recognizing f64, integer, boolean, or another serializer
+enum value does not make it legal on a generic operation.
+
+For both validated MoE rows, runtime `FirstTokenOffset` values are a caller
+precondition: element zero is 0, values are nondecreasing, and every value is
+in `[0,T]`. The serialized graph fixes the offset tensor shape and type, but it
+does not carry those runtime values for compile-time validation.
+
+MXFP8 block size is 32. C5 consumes scale tensors in their logical strided
+order and therefore rejects the `F8_128x4` reordering emitted by normal
+Frontend MXFP8 producers; physical reorder decoding is a C6 requirement.
+FP8/MXFP8 attention rejects padding, dropout, ALiBi, block masks, sink tokens,
+and unlisted optional ports. Windowed forms that could produce fully masked
+rows are rejected. Backward consumes the supplied log-sum-exp `Stats`.
 
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
 are explicit f32 tensors whose dimensions are all one; scalar pass-by-value
@@ -214,21 +242,21 @@ and left/right bounds are executable; the v1.24.0 bottom-right causal path does
 not combine with bias, ALiBi, or dropout. ALiBi requires `right_bound == 0`.
 Probability dropout takes scalar INT64 seed/offset and can expose `RNG_DUMP`;
 custom dropout takes a mask and explicit scale, plus scale inverse in backward.
-Paged/cache attention, block masks, sink tokens, packed/ragged metadata, FP8
-controls, and dynamic shapes remain deferred.
+Paged/cache attention, block masks, sink tokens, packed/ragged metadata,
+dynamic shapes, and the C5-specialized optional features above remain deferred.
 
 The CPU Bernoulli stream is stable and bit-identical across DeepForge CPU
 variants for the same seed and offset. It is an implementation-defined CPU
 stream and is not claimed to reproduce cuDNN's GPU Philox bits.
 
-Comparison, logical, and `GEN_INDEX` pointwise results are represented as f32
-`0`/`1` or f32 indices in C2; native boolean/integer outputs are deferred to
-C5. C2, C3, and C4 operations can be mixed in one ordered DAG. Explicit
-aliasing, dynamic shape metadata, shape overrides, and other non-f32 execution
-are deferred.
+Comparison, logical, and `GEN_INDEX` pointwise results remain f32 `0`/`1` or
+f32 indices. C2-C5 operations can be mixed in one ordered DAG when every
+connecting port accepts the tensor type. Explicit aliasing, dynamic shape
+metadata, shape overrides, ragged tensors, and physical reorder handling are
+deferred.
 
-The remaining 9 rows stay `parsed`. Passing schema recognition never implies
-lowering or CPU execution support. A recognized node without lowering returns
-`kUnsupportedOperation`, not `kUnsupportedNode`. `validated` always refers to
-the declared subset above, not every legal cuDNN backend configuration for the
+Passing schema recognition never implies that every configuration lowers or
+executes on the CPU. An attribute combination outside a declared subset
+returns `kUnsupportedOperation`, not `kUnsupportedNode`. `validated` always
+refers to the subset above, not every legal cuDNN backend configuration for the
 tag.

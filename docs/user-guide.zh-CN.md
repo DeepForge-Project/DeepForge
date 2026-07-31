@@ -14,9 +14,10 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | 30 个已验证 tag：3 个 convolution、8 个基础操作、14 个 normalization/statistics、5 个 sequence/attention tag |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证静态 CPU 子集 |
 | 通用 Tensor | 静态 rank 1-64 f32 data、显式 UID；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
+| C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
 | Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
 | CPU 代码 | scalar、AVX2+FMA、AVX-512F+FMA，运行时自动分发 |
 | 输出 | LLVM IR 或包含三个原生 object 的 `.dfo` artifact |
@@ -54,15 +55,27 @@ C4 sequence/attention 支持如下：
 | `ROPE`, `ROPE_BWD` | f32 BHSD split-half rotation，旋转完整末维或最后一个偶数宽度子空间；支持 `[S,1,1,R]` frequency 和 output scale |
 | `SDPA`, `SDPA_BWD` | f32 BHSD、GQA、scalar scale、broadcast bias、ALiBi causal mask、INT32 sequence length、top-left/bottom-right window、custom/probability dropout、forward row 输出和 backward Q/K/V/bias gradient |
 
-Paged/cache attention、block mask、sink token、packed/ragged attention、FP8
-control 和动态 shape 延后。v1.24.0 的 bottom-right causal 路径不与 bias、ALiBi
-或 dropout 组合。CPU RNG 在 DeepForge variant 间可复现，但不承诺匹配 cuDNN GPU
-Philox bit pattern。
+C5 特殊操作支持如下：
 
-本阶段 comparison、logical 和 generated-index pointwise 输出使用 f32 `0`/`1`
-或 f32 index。C2/C3/C4 tag 可在同一个图中混合。不支持动态 shape、显式 alias、
-scalar pass-by-value、分布式 peer statistics、文档 metadata 以外的其他 tag/data
-type、GPU 执行、CUDA device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
+| Tags | 当前约束 |
+|---|---|
+| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | 静态且可整除的 block、FLOAT compute；声明端口支持 f32/f16/bf16 value 和 FP8/FP4/INT4 storage；FP4 按低/高 nibble 打包 |
+| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、scalar FLOAT descale/output scale、rank >= 2 batch broadcast；C 可为 FP8/f32/f16/bf16，`Amax_C` 为 scalar FLOAT；无 M/N/K override |
+| `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`、`top_k` 为 0/1、Token `[1,T,K]`、Weight `[E,K,N]`、INT32 offset `[E,1,1]`，data 共享 f32/f16/bf16 类型 |
+| `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | 静态 FP8 E4M3/E5M2 BHSD、GQA、scalar FLOAT scale/descale、两种 diagonal window、Stats/amax；无 padding、dropout、ALiBi |
+| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | 静态 BHSD/GQA、32 元素 E8M0 block descale、f16/bf16/f32 输出或梯度、backward transpose-oriented 输入、Stats/amax；scale tensor 当前采用逻辑 `NONE` ordering，backward dS 使用文档声明的 f32 CPU reference approximation |
+
+Paged/cache attention、block mask、sink token、packed/ragged attention 和动态
+shape 延后。C5 FP8 attention 还将 padding、dropout、ALiBi、可选端口和 producer
+生成的 `F8_128x4` scale reorder 延后到 C6。v1.24.0 标准 SDPA 的 bottom-right
+causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
+复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
+
+Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
+index。连接 tensor 类型同时受两端操作支持时，C2-C5 tag 可在同一个图中混合。
+不支持动态 shape、显式 alias、scalar pass-by-value、文档 C5 子集外的
+ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA device pointer、
+AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-frontend`
@@ -162,7 +175,7 @@ X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 `pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 会被
 拒绝，因为它们包含当前 CPU MVP 未实现的执行语义。
 
-通用 C2-C4 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
+通用 C2-C5 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
 tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
 argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 `in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
@@ -345,7 +358,7 @@ CSV 输出包含编译耗时、单次执行耗时、GFLOP/s，以及相对 scala
 | `DFE_SCHEMA_VERSION_MISMATCH` | 使用 Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | 使用 cuDNN Frontend `v1.24.0` 重新序列化 |
 | `DFE_UNSUPPORTED_NODE` | 使用当前 capability matrix 列出的 tag |
-| `DFE_UNSUPPORTED_OPERATION` | 移除延后 attribute、不支持的 peer statistics 或尚未 lowering 的已识别 tag |
+| `DFE_UNSUPPORTED_OPERATION` | 移除延后 attribute、不支持的 peer statistics 或超出该 tag 已声明 CPU 子集的配置 |
 | `DFE_INVALID_LAYOUT` | 检查 Conv packed stride，或基础 tensor 的正且不重叠 stride |
 | `DFE_INVALID_SHAPE` | 检查静态维度、操作 shape 规则和 Conv 输出公式 |
 | `DFE_INVALID_VARIANT_PACK` | 检查 UID、host pointer、对齐、别名和 workspace |

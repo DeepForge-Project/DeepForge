@@ -427,7 +427,7 @@ The MVP is complete only when all of the following hold:
 
 ## 9. Result and Next Steps
 
-P0-P6 completed in this order:
+P0-P6 and post-MVP C0-C5 completed in this order:
 
 1. Installed and verified LLVM/MLIR `llvmorg-22.1.8` and recorded P0 tools.
 2. Fixed the Conv2D JSON fixture against Frontend `v1.24.0` serializer source
@@ -445,10 +445,14 @@ P0-P6 completed in this order:
    recognition, eight foundational tags, rank-3 through rank-5 convolution
    forward/backward, 14 normalization/statistics tags, and five
    sequence/attention tags with integer sequence metadata.
+8. Completed C5: CPU low-precision storage/conversion, packed FP4/INT4,
+   block-scale quantize/dequantize, FP8 matmul, MoE grouped matmul
+   forward/backward, and all four FP8/MXFP8 attention tags. The public UID
+   variant-pack ABI and CPU-only dependency boundary are unchanged.
 
-The next functional stage is C5 data types and specialized operations, followed
-by C6 dynamic metadata/release qualification. Benchmark-driven optimization
-remains owned by the
+The next functional stage is C6 dynamic/reordered/ragged/paged metadata,
+optimization, and release qualification. Benchmark-driven optimization remains
+owned by the
 Loop/Schedule layer: establish repeatable pinned-core measurements first, then
 evaluate outer tiling, padding fusion, and multithreading independently.
 Optimizations must not change the frozen serialization, ABI, workspace

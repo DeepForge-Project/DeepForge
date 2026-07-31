@@ -15,9 +15,10 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | 30 validated tags: three convolution, eight foundational, 14 normalization/statistics, and five sequence/attention tags |
+| Operations | Validated static CPU subsets for all 39 serialized v1.24.0 tags |
 | Generic tensors | Static rank 1-64 f32 data with explicit UID; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
+| C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
 | Output | LLVM IR or a `.dfo` artifact containing three native objects |
@@ -55,17 +56,30 @@ C4 sequence and attention support is:
 | `ROPE`, `ROPE_BWD` | f32 BHSD split-half rotation of the full or final even-width subspace; `[S,1,1,R]` frequencies and output scaling |
 | `SDPA`, `SDPA_BWD` | f32 BHSD, GQA, scalar scale, broadcast bias, ALiBi causal mask, INT32 sequence lengths, top-left/bottom-right windows, custom/probability dropout, forward row outputs, and backward Q/K/V/bias gradients |
 
-Paged/cache attention, block masks, sink tokens, packed/ragged attention,
-FP8 controls, and dynamic shapes are deferred. The v1.24.0 bottom-right causal
-path does not combine with bias, ALiBi, or dropout. The CPU RNG is reproducible
-across DeepForge variants, but it is not claimed to match cuDNN GPU Philox bits.
+C5 specialized operation support is:
 
-Comparison, logical, and generated-index pointwise outputs use f32 `0`/`1` or
-f32 index values in this stage. C2, C3, and C4 tags can be mixed in one graph.
-Dynamic shapes, explicit aliasing, scalar pass-by-value, distributed peer
-statistics, other tags or data types beyond the documented metadata, GPU
-execution, CUDA device pointers, AMX, and internal multithreading are not
-supported. The maximum input file size is 16 MiB. The exact per-tag matrix is in the
+| Tags | Current constraints |
+|---|---|
+| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | Static divisible blocks; FLOAT compute; f32/f16/bf16 values and FP8/FP4/INT4 storage on the declared ports; FP4 uses packed low/high nibbles |
+| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, scalar FLOAT descales/output scale, rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, scalar FLOAT `Amax_C`; no M/N/K override |
+| `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`, `top_k` 0 or 1, Token `[1,T,K]`, Weight `[E,K,N]`, INT32 offsets `[E,1,1]`, and one shared f32/f16/bf16 data type |
+| `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | Static FP8 E4M3/E5M2 BHSD with GQA, scalar FLOAT scales/descales, top-left or bottom-right windows, Stats and amax outputs; no padding, dropout, or ALiBi |
+| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; scale tensors currently use logical `NONE` ordering and backward dS uses the documented f32 CPU reference approximation |
+
+Paged/cache attention, block masks, sink tokens, packed/ragged attention, and
+dynamic shapes are deferred. C5 FP8 attention also defers padding, dropout,
+ALiBi, optional ports, and producer-emitted `F8_128x4` scale reordering to C6.
+The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
+ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
+it is not claimed to match cuDNN GPU Philox bits.
+
+Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
+or f32 index values. C2-C5 tags can be mixed when connected tensor types are
+supported by both operations. Dynamic shapes, explicit aliasing,
+scalar pass-by-value, ragged/reordered tensors outside the documented C5
+subset, distributed peer statistics, GPU execution, CUDA device pointers, AMX,
+and internal multithreading are not supported. The maximum input file size is
+16 MiB. The exact per-tag matrix is in the
 [schema inventory](cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 The CUDA Toolkit and cuDNN backend are not dependencies. The project uses only
@@ -174,7 +188,7 @@ X, W, and Y must have explicit, distinct UIDs. Non-empty UBJSON
 are rejected because they carry execution semantics not implemented by the
 CPU MVP.
 
-For a generic C2-C4 graph, every non-virtual tensor that is read or written
+For a generic C2-C5 graph, every non-virtual tensor that is read or written
 must be present in the execute-time UID map. Virtual tensors are omitted from
 the map and allocated in the queried workspace. Writable buffers must not
 overlap another argument or workspace. `VIEW_ONLY`, `in_place_index`, and a
@@ -365,7 +379,7 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 | `DFE_SCHEMA_VERSION_MISMATCH` | Use Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | Re-serialize with cuDNN Frontend `v1.24.0` |
 | `DFE_UNSUPPORTED_NODE` | Use a tag listed in the current capability matrix |
-| `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, unsupported peer statistics, or a recognized but unlowered tag |
+| `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, unsupported peer statistics, or a configuration outside the tag's declared CPU subset |
 | `DFE_INVALID_LAYOUT` | Check packed Conv strides or positive non-overlapping foundational strides |
 | `DFE_INVALID_SHAPE` | Check static dimensions, operation shape rules, and the Conv output formula |
 | `DFE_INVALID_VARIANT_PACK` | Check UIDs, host pointers, alignment, aliasing, and workspace |

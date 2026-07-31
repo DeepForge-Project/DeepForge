@@ -141,7 +141,7 @@ Pointwise mode 的输入元数被严格验证：
 ## 5. Capability 含义
 
 39 行都达到 `parsed`：JSON 与 canonical UBJSON 都可被接受和归一化，已知错误
-字段会被拒绝，reference 构成有序 DAG。C4 完成时，以下 30 行具有明确声明的
+字段会被拒绝，reference 构成有序 DAG。C5 完成时，全部 39 行都具有明确声明的
 `validated` 执行子集：
 
 | Tag | 已验证 CPU 子集 |
@@ -176,12 +176,37 @@ Pointwise mode 的输入元数被严格验证：
 | `ROPE_BWD` | 已验证 full/partial `ROPE` 变换的 adjoint，包含 `output_scale` |
 | `SDPA` | 静态 f32 BHSD attention；在下述约束内支持 GQA、bias、scale、ALiBi、padding、top-left/bottom-right window、两类 dropout 和序列化 row/RNG 输出 |
 | `SDPA_BWD` | 同一 attention 子集的 data/可选 bias gradient，读取序列化 `O` 和 log-sum-exp `Stats` |
+| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute；X 为 FP4 E2M1、FP8 E4M3/E5M2 或 INT4；scale 为 f32/f16/bf16/FP8 E4M3/E8M0；尾部静态 block dimension；Y 为 f32/f16/bf16 |
+| `BLOCK_SCALE_QUANTIZE` | FLOAT compute；X 为 f32/f16/bf16；单个可整除静态 block axis；Y 为 FP4 E2M1 或 FP8 E4M3/E5M2，并输出对应 E4M3/E8M0 scale |
+| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、FLOAT scalar control/amax、静态 rank >= 2 batch broadcast；C 为 FP8/f32/f16/bf16；无 M/N/K override |
+| `MOE_GROUPED_MATMUL` | `mode=NONE`、`top_k` 为 0/1、token `[1,T,K]`、weight `[E,K,N]`、INT32 first-token offset `[E,1,1]`，共享 f32/f16/bf16 data type |
+| `MOE_GROUPED_MATMUL_BWD` | 同一静态 `mode=NONE` tensor/offset layout 的 per-expert weight gradient |
+| `SDPA_FP8_FWD` | 静态 FP8 E4M3/E5M2 BHSD/GQA、scalar FLOAT scale control、两种 diagonal alignment/window、可选 row output 和 amax；无 padding、dropout、ALiBi |
+| `SDPA_FP8_BWD` | 同一子集的 Q/K/V gradient 和 amax，读取 serialized `O`、`Stats`、FP8 dO 和 scalar FLOAT scale control |
+| `SDPA_MXFP8_FWD` | 静态 BHSD/GQA、32 元素 E8M0 descale block、f16/bf16/f32 O、必需 Stats/amax；C5 采用逻辑 `NONE` scale ordering |
+| `SDPA_MXFP8_BWD` | 静态 transpose-oriented Q/K/dO 输入和 E8M0 block descale、f16/bf16/f32 gradient/amax；C5 使用 f32 dS reference approximation 和逻辑 `NONE` scale ordering |
 
 全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
 stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。data tensor 为
 f32；C4 额外允许在文档指定端口使用 INT32 sequence length 和 scalar INT64 RNG
 seed/offset。virtual 中间值使用规划的 workspace。Convolution group 数由
 `X.C / W.C` 推导，输出 channel 必须可被 group 数整除。
+
+9 个 C5 特殊行使用 FLOAT accumulation 和 CPU 软件 conversion。FP8 E4M3/E5M2
+使用 saturation + round-to-nearest-even；E8M0 是无符号 2 的幂 scale storage，并
+有 canonical NaN；FP4 E2M1 和 INT4 每 byte 存两个逻辑值。只启用上表声明的
+operation/port 组合；识别 f64、integer、boolean 或其他 serializer enum，不表示
+它可用于通用操作。
+
+两个已验证 MoE 行都把运行时 `FirstTokenOffset` 内容作为调用者前置条件：第 0 个
+元素必须为 0，所有值单调非降且位于 `[0,T]`。序列化图只固定 offset tensor 的
+shape 和 type，不携带这些运行时数值，编译阶段无法验证它们。
+
+MXFP8 block size 固定为 32。C5 按逻辑 stride 顺序读取 scale tensor，因此会拒绝
+正常 Frontend MXFP8 producer 生成的 `F8_128x4` reorder；物理 reorder 解码属于
+C6。FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
+和未列出的可选端口；可能产生全 mask row 的 window 组合也会被拒绝。Backward
+读取外部提供的 log-sum-exp `Stats`。
 
 epsilon、momentum、accumulation count 等 normalization scalar 输入必须是所有维度
 均为 1 的显式 f32 tensor；scalar pass-by-value metadata 仍延后。非空分布式
@@ -198,17 +223,16 @@ Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride，K/V head �
 bottom-right causal 路径不与 bias、ALiBi 或 dropout 组合。ALiBi 要求
 `right_bound == 0`。Probability dropout 接收 scalar INT64 seed/offset，并可输出
 `RNG_DUMP`；custom dropout 接收 mask 和显式 scale，backward 还接收 scale inverse。
-Paged/cache attention、block mask、sink token、packed/ragged metadata、FP8 control
-和动态 shape 延后。
+Paged/cache attention、block mask、sink token、packed/ragged metadata、动态 shape
+以及上述 C5 特殊可选能力延后。
 
 相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
 bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
 
-C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或 f32 index
-表示；原生 boolean/integer 输出延后到 C5。C2/C3/C4 操作可在同一个有序 DAG 中
-混合。显式 alias、动态 shape metadata、shape override 和其他非 f32 执行尚未支持。
+Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index 表示。
+连接端口均接受 tensor type 时，C2-C5 操作可在同一个有序 DAG 中混合。显式
+alias、动态 shape metadata、shape override、ragged tensor 和物理 reorder 处理延后。
 
-其余 9 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
-已识别但未 lowering 的 node 返回 `kUnsupportedOperation`，而不是
-`kUnsupportedNode`。`validated` 仅指上表声明的子集，不代表该 tag 的所有合法
-cuDNN backend 配置。
+Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
+以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。
+`validated` 仅指上表声明的子集，不代表该 tag 的所有合法 cuDNN backend 配置。

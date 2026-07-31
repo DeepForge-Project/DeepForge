@@ -423,11 +423,13 @@ Status check_tensor_element_size(TensorDesc const& tensor, std::string const& pa
         return fail(ErrorCode::kUnsupportedDataType, path,
                     "data type has no storage representation");
     }
-    auto const storage_bytes =
-        static_cast<std::size_t>((storage_bits + 7U) / 8U);
-    auto const max_elements =
-        std::numeric_limits<std::size_t>::max() / storage_bytes;
-    if (static_cast<std::uintmax_t>(element_count) > static_cast<std::uintmax_t>(max_elements)) {
+    auto const count = static_cast<std::uintmax_t>(element_count);
+    auto const bits = static_cast<std::uintmax_t>(storage_bits);
+    if (count > (std::numeric_limits<std::uintmax_t>::max() - 7U) / bits) {
+        return fail(ErrorCode::kDimensionOverflow, path, "tensor byte size overflows size_t");
+    }
+    auto const storage_bytes = (count * bits + 7U) / 8U;
+    if (storage_bytes > std::numeric_limits<std::size_t>::max()) {
         return fail(ErrorCode::kDimensionOverflow, path, "tensor byte size overflows size_t");
     }
     return Status::ok();

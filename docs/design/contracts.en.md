@@ -246,9 +246,42 @@ explicit mask and scale; backward additionally consumes scale inverse.
 plus optional reduced dBias.
 
 Paged/cache attention, block masks, sink tokens, max-total packed metadata,
-FP8/MXFP8 controls, ragged layouts, and dynamic shapes remain unsupported.
+FP8/MXFP8 controls, ragged layouts, and dynamic shapes remain unsupported by
+C4.
 C2, C3, and C4 nodes may be mixed; the primitive scalar implementation may
 recompute softmax rows rather than materialize a private attention workspace.
+
+### 3.4 Post-MVP C5 Extension
+
+C5 adds static subsets for the remaining nine serialized tags:
+`BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE`, `MATMUL_FP8`,
+`MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD`, `SDPA_FP8_FWD`,
+`SDPA_FP8_BWD`, `SDPA_MXFP8_FWD`, and `SDPA_MXFP8_BWD`. Their exact port,
+shape, type, and optional-feature constraints are normative in the
+[schema capability inventory](../cudnn-graph-schema-inventory.en.md#5-capability-meaning).
+
+The CPU numeric layer accumulates in f32. FP8 E4M3/E5M2 conversion saturates
+and rounds to nearest with ties to even. E8M0 stores unsigned powers of two and
+uses `0xff` as canonical NaN. FP4 E2M1 and signed INT4 pack the lower-indexed
+logical value into the low nibble and the next value into the high nibble.
+External pointers and virtual workspace therefore use byte counts rounded up
+from the exact storage-bit span.
+
+FP8/MXFP8 SDPA is static rank-4 BHSD with GQA and supplied log-sum-exp Stats in
+backward. C5 excludes padding, dropout, ALiBi, block masks, sink tokens, ragged
+metadata, and unlisted optional ports. MXFP8 block size is 32; C5 accepts
+logical `NONE` scale ordering and uses an f32 dS reference approximation.
+Frontend-produced `F8_128x4` physical scale ordering remains a C6 gate.
+
+Validated MoE execution requires runtime `FirstTokenOffset` values to start at
+zero, be nondecreasing, and remain in `[0,T]`. This is a caller precondition:
+the graph compiler validates the INT32 `[E,1,1]` descriptor, while the public
+execute ABI intentionally does not inspect tensor contents before dispatch.
+
+C2-C5 nodes may be mixed when both ends support the connected tensor type.
+The public UID variant-pack and workspace ABI is unchanged. Dynamic/override
+shapes, pass-by-value, aliasing, ragged/reordered storage, and paged/cache
+metadata remain unsupported.
 
 ## 4. Public Execution Interface
 

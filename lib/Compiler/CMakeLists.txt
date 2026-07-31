@@ -2,9 +2,12 @@ add_library(deepforge_compiler STATIC
     Artifact.cpp
     Compiler.cpp
     FoundationalGraph.cpp
+    Numeric.cpp
     NormalizationGraph.cpp
     ScalarLowering.cpp
     SequenceGraph.cpp
+    SpecializedAttention.cpp
+    SpecializedGraph.cpp
     TrainingGraph.cpp
 )
 add_library(DeepForge::Compiler ALIAS deepforge_compiler)

@@ -215,8 +215,37 @@ dropout 使用 scalar INT64 seed/offset 和隐式 reciprocal keep scale；custom
 一致的 Q/K/V/O/dO/Stats，输出 dQ/dK/dV 和可选 reduced dBias。
 
 Paged/cache attention、block mask、sink token、max-total packed metadata、
-FP8/MXFP8 control、ragged layout 和动态 shape 仍不支持。C2/C3/C4 node 可以混合；
+FP8/MXFP8 control、ragged layout 和动态 shape 在 C4 中仍不支持。C2/C3/C4 node 可以混合；
 primitive scalar 实现允许重算 softmax row，而不构造私有 attention workspace。
+
+### 3.4 MVP 后 C5 扩展
+
+C5 为其余 9 个 serialized tag 加入静态子集：`BLOCK_SCALE_QUANTIZE`、
+`BLOCK_SCALE_DEQUANTIZE`、`MATMUL_FP8`、`MOE_GROUPED_MATMUL`、
+`MOE_GROUPED_MATMUL_BWD`、`SDPA_FP8_FWD`、`SDPA_FP8_BWD`、
+`SDPA_MXFP8_FWD` 和 `SDPA_MXFP8_BWD`。其端口、shape、type 和可选特性精确
+约束以 [schema capability 清单](../cudnn-graph-schema-inventory.md#5-capability-含义)
+为规范。
+
+CPU numeric layer 使用 f32 accumulation。FP8 E4M3/E5M2 conversion 采用
+saturation 和 round-to-nearest-even；E8M0 保存无符号 2 的幂，并以 `0xff` 表示
+canonical NaN。FP4 E2M1 和 signed INT4 将低索引逻辑值放入 low nibble，下一个值
+放入 high nibble。因此 external pointer 和 virtual workspace 的 byte count 按精确
+storage-bit span 向上取整。
+
+FP8/MXFP8 SDPA 使用静态 rank-4 BHSD/GQA，backward 读取外部提供的 log-sum-exp
+Stats。C5 不包含 padding、dropout、ALiBi、block mask、sink token、ragged metadata
+和未列出的可选端口。MXFP8 block size 固定为 32；C5 接受逻辑 `NONE` scale
+ordering，并使用 f32 dS reference approximation。Frontend producer 生成的
+`F8_128x4` 物理 scale ordering 仍是 C6 gate。
+
+已验证 MoE 执行要求运行时 `FirstTokenOffset` 从 0 开始、单调非降且位于
+`[0,T]`。这是调用者前置条件：graph compiler 会验证 INT32 `[E,1,1]`
+descriptor，但公开 execute ABI 按设计不会在 dispatch 前扫描 tensor 内容。
+
+连接 tensor type 同时受两端支持时，C2-C5 node 可以混合。公开 UID variant-pack
+和 workspace ABI 不变。Dynamic/override shape、pass-by-value、alias、
+ragged/reordered storage 和 paged/cache metadata 仍不支持。
 
 ## 4. 对外运行接口
 

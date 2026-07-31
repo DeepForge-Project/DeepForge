@@ -195,9 +195,12 @@ forward/adjoint，以及带 GQA、bias、ALiBi、sequence padding、两种 diago
 alignment、sliding window、custom/probability dropout、row statistics、RNG dump
 和 Q/K/V/bias gradient 的 f32 BHSD SDPA。测试包括独立 reference、有限差分、
 全 mask row、artifact reload、CPU variant 一致性及 Release/ASan/UBSan。Paged/cache、
-block mask、sink token、packed/ragged 和 FP8/MXFP8 路径仍归 C5/C6。
+block mask、sink token 和 packed/ragged 路径仍归 C6；FP8/MXFP8 已在下述 C5
+子集内交付。
 
 ### C5. Data type 和特殊操作
+
+**状态**：已于 2026-07-31 完成并通过验证。
 
 **工作内容**：执行支持从 f32 扩展到合法的 f64、f16、bf16、integer 和 boolean，
 再加入 FP8/FP4/INT4 storage 和 conversion 语义。实现 block-scale
@@ -210,6 +213,19 @@ v1.24.0 enum 有 20 个非 sentinel data type。支持状态按 operation/data t
 **退出条件**：conversion 边界、saturation/rounding、特殊浮点值、packed storage、
 accumulator type 和每种类型的数值误差均有测试。不支持的 host ISA 可以正确 fallback
 或返回明确错误。
+
+已交付 numeric layer 为 f64、f16、bf16、signed/unsigned integer、boolean、FP8
+E4M3/E5M2/E8M0、packed FP4 E2M1 和 packed INT4 提供 CPU storage 与 f32
+conversion。执行能力仍按 operation/port 声明，并未把这些类型开放给所有通用操作。
+9 个特殊 tag 已有静态 validated 子集：block-scale conversion、FP8 matmul、MoE
+grouped matmul forward/backward，以及 FP8/MXFP8 SDPA forward/backward。
+
+C5 测试通过公开 UID variant-pack ABI 直接执行低精度 raw buffer，覆盖
+round-to-nearest-even、saturation、NaN/Inf、packed virtual workspace、block
+scale、amax、外部 backward Stats、MoE expert partition、4 个特殊 attention tag、
+错误 transpose shape 以及完整 Release/ASan/UBSan。物理 `F8_128x4` reorder、
+dynamic/ragged metadata、可选 FP8 attention 特性和精确 MXFP8 dS block
+requantization 仍属于 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
@@ -274,7 +290,8 @@ saturation 和 RNG 可复现性都有专门测试。
 5. 定义和测试 `.dfo` v2，同时保留 v1 reader；
 6. 重新运行现有 correctness、artifact、sanitizer 和 CI gate。
 
-这个保持兼容性的迁移完成之前，不开始新增 operation lowering。
+该保持兼容性的 C0 迁移已在 operation lowering 开始前完成；此规则现在是历史
+顺序约束，不是尚未关闭的 gate。
 
 ## 10. 已确认的项目决策
 

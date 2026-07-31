@@ -183,6 +183,22 @@ else()
 endif()
 add_test(NAME deepforge-sequence COMMAND deepforge_sequence_test)
 
+add_executable(deepforge_specialized_test
+    SpecializedOpsTest.cpp
+)
+target_link_libraries(deepforge_specialized_test PRIVATE DeepForge::Compiler)
+target_include_directories(deepforge_specialized_test SYSTEM
+    PRIVATE
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
+)
+if(MSVC)
+    target_compile_options(deepforge_specialized_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_specialized_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-specialized COMMAND deepforge_specialized_test)
+
 if(TARGET deepforge-compile)
     set(DEEPFORGE_CLI_SCRATCH "${CMAKE_CURRENT_BINARY_DIR}/cli-scratch")
     file(MAKE_DIRECTORY "${DEEPFORGE_CLI_SCRATCH}")

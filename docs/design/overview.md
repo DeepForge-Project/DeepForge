@@ -7,10 +7,11 @@
 DeepForge 将固定版本 cuDNN Frontend 的序列化 Graph 编译为 CPU object code。
 MVP 只实现静态、packed、f32 Conv2D FWD，但输入协议和运行接口直接沿用
 cuDNN Frontend 的 Graph serialization 与 UID variant-pack 概念。
-当前 MVP 后 C4 实现可执行覆盖 30 个已验证 tag 的静态有序 DAG：3 个
-convolution、8 个基础操作、14 个 normalization/statistics 和 5 个
-sequence/attention 操作。data 为 f32，INT32/INT64 只用于文档指定的 sequence
-metadata。公开 runtime 接口保持不变，通用路径内部只使用上游 MemRef、SCF、
+当前 MVP 后 C5 实现可执行全部 39 个 serialized tag 所声明的静态子集：3 个
+convolution、8 个基础操作、14 个 normalization/statistics、5 个
+sequence/attention 和 9 个低精度特殊操作。通用 data 仍为 f32，INT32/INT64
+只用于文档指定的 sequence 端口；特殊路径按 operation 加入 f16/bf16/FP8/FP4/INT4
+storage 与 conversion。公开 runtime 接口保持不变，内部只使用上游 MemRef、SCF、
 Arith、Math 和 LLVM dialect。
 
 规范性支持边界见 [contracts.md](contracts.md) 和
@@ -68,12 +69,12 @@ Arith、Math 和 LLVM dialect。
 +----------------------------------------------------------------+
 ```
 
-上图描述原有优化 Conv 路径。canonical import 之后，通用 C2-C4 图走并行的标准
+上图描述原有优化 Conv 路径。canonical import 之后，通用 C2-C5 图走并行的标准
 MLIR 路径，直接生成静态 MemRef/SCF/Arith/Math IR、规划 virtual tensor workspace
 view，再进入同一 LLVM object pipeline。该路径包含 grouped convolution、
 convolution gradient、normalization、sequence transform 和 attention
-forward/backward；它不运行 MVP Conv 的 Tensor/Linalg bufferization 或
-direct-conv schedule。
+forward/backward，以及 C5 软件低精度 conversion、block scaling、FP8 matmul 和
+MoE；它不运行 MVP Conv 的 Tensor/Linalg bufferization 或 direct-conv schedule。
 
 ### 3.1 Importer
 
@@ -85,7 +86,7 @@ Importer 是文件/对象模型到 MLIR 的边界，不是 MLIR pass。它负责
 - 忽略文档内 GPU-only plan metadata，拒绝非空的未支持执行语义字段；
 - 解析 tensor/node 引用和稳定 UID；
 - 校验适用的 capability 子集；
-- 为优化 MVP Conv 构造标准 Tensor/Linalg IR，或为通用 C2-C4 图构造标准
+- 为优化 MVP Conv 构造标准 Tensor/Linalg IR，或为通用 C2-C5 图构造标准
   MemRef/SCF/Math IR。
 
 不定义 `cudnn.conv_fwd` 临时 op。这样 One-Shot Bufferize 不会遇到没有
@@ -187,9 +188,12 @@ model。
 
 ## 8. 延后范围
 
-以下内容不应混入 MVP 主 pipeline：Machine Dialect、AMX/bf16、cache address
+以下内容仍不属于冻结的 MVP baseline：Machine Dialect、AMX/bf16、cache address
 space、OpenMP、多算子 fusion、动态 shape、非 packed stride、NCHW physical
-layout、grouped/depthwise Conv、GPU backend。
+layout、grouped/depthwise Conv、GPU backend。MVP 后 C2-C5 已独立加入正的任意
+stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能力子集。C6
+仍负责 dynamic/override shape、ragged/physical reorder metadata、paged/cache
+复合语义、threading 和广泛 fusion。
 
 延后不等于删除设计方向。每项在拥有明确语义、上游能力评估、正确性测试和性能
 基线后单独引入。

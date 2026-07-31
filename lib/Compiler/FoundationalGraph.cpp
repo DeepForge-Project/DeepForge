@@ -1,5 +1,7 @@
 #include "FoundationalGraph.h"
+#include "Numeric.h"
 #include "SequenceGraph.h"
+#include "SpecializedGraph.h"
 #include "TrainingGraph.h"
 
 #include "DeepForge/Import/Capability.h"
@@ -345,12 +347,9 @@ bool has_non_overlapping_layout(TensorDesc const& tensor) {
 }
 
 Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
-    if (tensor.data_type != import::DataType::kFloat32 &&
-        tensor.data_type != import::DataType::kInt32 &&
-        tensor.data_type != import::DataType::kInt64) {
+    if (!numeric::is_cpu_storage_type(tensor.data_type)) {
         return fail(ErrorCode::kUnsupportedDataType, path,
-                    "CPU graph execution currently supports FLOAT data and "
-                    "INT32/INT64 sequence metadata");
+                    "data type has no CPU storage implementation");
     }
     if (!tensor.uid_assigned) {
         return unsupported(path, "CPU execution requires an assigned UID");
@@ -911,6 +910,10 @@ Status validate_operation(OperationTag tag,
                           GenericOperationDesc const& operation,
                           SerializedGraph const& graph,
                           std::size_t node_index) {
+    if (is_specialized_operation(tag)) {
+        return validate_specialized_operation(tag, operation, graph,
+                                              node_index);
+    }
     if (is_sequence_operation(tag)) {
         return validate_sequence_operation(tag, operation, graph, node_index);
     }
@@ -963,12 +966,20 @@ Status analyze_graph(SerializedGraph const& graph,
          *graph.context.is_override_shape_enabled)) {
         return unsupported("context", "CPU execution requires static shapes");
     }
+    auto const has_specialized_operation = std::any_of(
+        graph.nodes.begin(), graph.nodes.end(), [](import::NodeDesc const& node) {
+            return is_specialized_operation(node.tag);
+        });
     for (auto const* type : {&graph.context.compute_data_type,
                              &graph.context.intermediate_data_type,
                              &graph.context.io_data_type}) {
-        if (*type && **type != import::DataType::kFloat32) {
+        if (*type &&
+            (**type != import::DataType::kFloat32 &&
+             (!has_specialized_operation ||
+              !numeric::is_cpu_storage_type(**type)))) {
             return fail(ErrorCode::kUnsupportedDataType, "context",
-                        "CPU execution requires FLOAT context data types");
+                        "non-FLOAT context types require a C5 specialized "
+                        "operation with CPU storage support");
         }
     }
 
@@ -999,7 +1010,8 @@ Status analyze_graph(SerializedGraph const& graph,
                                 "].inputs." + port,
                             "tensor reference is unresolved");
             }
-            if (tensor->data_type != import::DataType::kFloat32 &&
+            if (!is_specialized_operation(node.tag) &&
+                tensor->data_type != import::DataType::kFloat32 &&
                 !is_sequence_metadata_input(node.tag, port,
                                             tensor->data_type)) {
                 return fail(ErrorCode::kUnsupportedDataType,
@@ -1017,7 +1029,8 @@ Status analyze_graph(SerializedGraph const& graph,
                                 "].outputs." + port,
                             "tensor reference is unresolved");
             }
-            if (tensor->data_type != import::DataType::kFloat32) {
+            if (!is_specialized_operation(node.tag) &&
+                tensor->data_type != import::DataType::kFloat32) {
                 return fail(ErrorCode::kUnsupportedDataType,
                             "nodes[" + std::to_string(node_index) +
                                 "].outputs." + port,
@@ -1144,16 +1157,7 @@ Status analyze_graph(SerializedGraph const& graph,
 
 ::mlir::Type element_type(::mlir::MLIRContext& context,
                           import::DataType data_type) {
-    switch (data_type) {
-        case import::DataType::kFloat32:
-            return ::mlir::Float32Type::get(&context);
-        case import::DataType::kInt32:
-            return ::mlir::IntegerType::get(&context, 32);
-        case import::DataType::kInt64:
-            return ::mlir::IntegerType::get(&context, 64);
-        default:
-            return {};
-    }
+    return numeric::storage_element_type(context, data_type);
 }
 
 ::mlir::MemRefType tensor_type(::mlir::MLIRContext& context,
@@ -2244,6 +2248,10 @@ Status emit_operation(
     GenericOperationDesc const& operation,
     SerializedGraph const& graph,
     std::map<std::int64_t, ::mlir::Value> const& values) {
+    if (is_specialized_operation(tag)) {
+        return emit_specialized_operation(tag, builder, location, operation,
+                                          graph, values);
+    }
     if (is_sequence_operation(tag)) {
         return emit_sequence_operation(tag, builder, location, operation,
                                        graph, values);

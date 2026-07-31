@@ -7,14 +7,14 @@ defined by the open source `cudnn-frontend` project, lowers the supported graph
 subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
-**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C4 are
+**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C5 are
 implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
-artifacts, CLI tools, benchmarks, and sanitizer coverage. The importer
-recognizes all 39 serialized v1.24.0 tags; 30 tags currently have validated
-CPU execution subsets.
+artifacts, CLI tools, benchmarks, and sanitizer coverage. All 39 serialized
+v1.24.0 tags have declared and tested CPU execution subsets. These subsets are
+strictly narrower than the complete set of legal cuDNN backend configurations.
 
 **MVP scope:** one static, contiguous, f32 Conv2D forward operation targeting
 x86-64, with scalar, AVX2, and AVX-512 code variants. Dynamic shapes, grouped
@@ -115,19 +115,24 @@ The current executable forms are:
 - the original optimized single-node packed f32 rank-4 `CONV_FPROP` path;
 - a static ordered DAG using the three convolution tags, the eight C2
   foundational tags, the 14 C3 normalization/statistics tags, and the five C4
-  sequence/attention tags declared in
+  sequence/attention tags;
+- the nine C5 specialized tags for block-scale conversion, FP8 matmul,
+  FP8/MXFP8 attention, and MoE grouped matmul, within the constraints declared
+  in
   the [schema capability matrix](docs/cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 The generic path supports rank-3 through rank-5 grouped convolution with
-stride, dilation, asymmetric padding, FPROP/DGRAD/WGRAD, and mixed C2-C4
+stride, dilation, asymmetric padding, FPROP/DGRAD/WGRAD, and mixed C2-C5
 graphs. It also supports normalization forward/backward, batch statistics,
 running-stat updates, deterministic Bernoulli RNG, RoPE forward/backward, and
-f32 SDPA forward/backward within the matrix constraints. C4 sequence metadata
-uses INT32 lengths and scalar INT64 seed/offset tensors. Virtual workspace
-intermediates and positive non-overlapping strided layouts are supported.
-Dynamic shapes, explicit aliasing, scalar pass-by-value, distributed peer
-statistics, other non-f32 data tensors, and the remaining 9 recognized tags
-are not executable yet.
+f32 SDPA forward/backward within the matrix constraints. C5 adds software
+FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion and packed storage where required by
+the nine specialized tags. C4 sequence metadata uses INT32 lengths and scalar
+INT64 seed/offset tensors. Virtual workspace intermediates and positive
+non-overlapping strided layouts are supported. Dynamic and override shapes,
+explicit aliasing, scalar pass-by-value, ragged tensors, tensor reordering,
+paged/cache attention metadata, distributed peer statistics, and documented
+optional specialized-attention features are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable
@@ -142,7 +147,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-MVP Conv: Tensor + Linalg    Generic C2-C4: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    Generic C2-C5: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -334,8 +339,8 @@ memref descriptors nor raw generated-kernel signatures.
 | P4 | Complete: scalar LLVM/object generation, JIT, and runtime |
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
-| C0-C4 | Complete: generic graph/runtime foundation, 39-tag schema recognition, and 30 validated execution tags |
-| C5-C6 | In progress: data types, specialized operations, dynamic metadata, and optimization |
+| C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
+| C6 | In progress: dynamic metadata, reorder/ragged/paged support, optimization, and release qualification |
 | Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

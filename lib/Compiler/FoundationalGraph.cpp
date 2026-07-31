@@ -1,4 +1,5 @@
 #include "FoundationalGraph.h"
+#include "TrainingGraph.h"
 
 #include "DeepForge/Import/Capability.h"
 #include "DeepForge/Import/Schema.h"
@@ -84,6 +85,56 @@ SerializedValue const* attribute(GenericOperationDesc const& operation,
                                  std::string_view name) {
     auto const it = operation.attributes.find(std::string(name));
     return it == operation.attributes.end() ? nullptr : &it->second;
+}
+
+SerializedValue serialized_string(std::string value) {
+    SerializedValue result;
+    result.value = std::move(value);
+    return result;
+}
+
+SerializedValue serialized_integer_array(
+    std::array<std::int64_t, 2> const& values) {
+    SerializedValue::Array array;
+    array.reserve(values.size());
+    for (auto value : values) {
+        SerializedValue element;
+        element.value = value;
+        array.push_back(std::move(element));
+    }
+    SerializedValue result;
+    result.value = std::move(array);
+    return result;
+}
+
+GenericOperationDesc const* normalized_operation(
+    import::NodeDesc const& node,
+    std::optional<GenericOperationDesc>& storage) {
+    if (auto const* operation =
+            std::get_if<GenericOperationDesc>(&node.attributes)) {
+        return operation;
+    }
+    auto const* conv = std::get_if<import::ConvFpropDesc>(&node.attributes);
+    if (node.tag != OperationTag::kConvFprop || conv == nullptr) {
+        return nullptr;
+    }
+    storage.emplace();
+    storage->inputs.emplace("X", conv->x_uid);
+    storage->inputs.emplace("W", conv->w_uid);
+    storage->outputs.emplace("Y", conv->y_uid);
+    storage->attributes.emplace("compute_data_type",
+                                serialized_string("FLOAT"));
+    storage->attributes.emplace("pre_padding",
+                                serialized_integer_array(conv->pre_padding));
+    storage->attributes.emplace("post_padding",
+                                serialized_integer_array(conv->post_padding));
+    storage->attributes.emplace("stride",
+                                serialized_integer_array(conv->stride));
+    storage->attributes.emplace("dilation",
+                                serialized_integer_array(conv->dilation));
+    storage->attributes.emplace("math_mode",
+                                serialized_string("CROSS_CORRELATION"));
+    return &*storage;
 }
 
 bool read_string_attribute(GenericOperationDesc const& operation,
@@ -295,13 +346,14 @@ bool has_non_overlapping_layout(TensorDesc const& tensor) {
 Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
     if (tensor.data_type != import::DataType::kFloat32) {
         return fail(ErrorCode::kUnsupportedDataType, path,
-                    "C2 execution requires FLOAT tensors");
+                    "CPU execution requires FLOAT tensors");
     }
     if (!tensor.uid_assigned) {
         return unsupported(path, "CPU execution requires an assigned UID");
     }
     if (tensor.is_pass_by_value || tensor.pass_by_value) {
-        return unsupported(path, "pass-by-value tensors are not in C2");
+        return unsupported(path,
+                           "pass-by-value tensors are not executable yet");
     }
     if (tensor.reordering_type != "NONE" || tensor.ragged_offset_uid ||
         tensor.ragged_offset_name) {
@@ -315,7 +367,7 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
     }
     if (!has_non_overlapping_layout(tensor)) {
         return fail(ErrorCode::kInvalidLayout, path,
-                    "C2 execution requires a non-overlapping strided layout");
+                    "CPU execution requires a non-overlapping strided layout");
     }
     return Status::ok();
 }
@@ -855,6 +907,9 @@ Status validate_operation(OperationTag tag,
                           GenericOperationDesc const& operation,
                           SerializedGraph const& graph,
                           std::size_t node_index) {
+    if (is_training_operation(tag)) {
+        return validate_training_operation(tag, operation, graph, node_index);
+    }
     switch (tag) {
         case OperationTag::kReshape:
             return validate_reshape(operation, graph, node_index);
@@ -899,7 +954,15 @@ Status analyze_graph(SerializedGraph const& graph,
          *graph.context.is_dynamic_shape_enabled) ||
         (graph.context.is_override_shape_enabled &&
          *graph.context.is_override_shape_enabled)) {
-        return unsupported("context", "C2 execution requires static shapes");
+        return unsupported("context", "CPU execution requires static shapes");
+    }
+    for (auto const* type : {&graph.context.compute_data_type,
+                             &graph.context.intermediate_data_type,
+                             &graph.context.io_data_type}) {
+        if (*type && **type != import::DataType::kFloat32) {
+            return fail(ErrorCode::kUnsupportedDataType, "context",
+                        "CPU execution requires FLOAT context data types");
+        }
     }
 
     for (auto const& [uid, tensor] : graph.tensors) {
@@ -913,11 +976,13 @@ Status analyze_graph(SerializedGraph const& graph,
     for (std::size_t node_index = 0; node_index < graph.nodes.size();
          ++node_index) {
         auto const& node = graph.nodes[node_index];
+        std::optional<GenericOperationDesc> normalized_storage;
         auto const* operation =
-            std::get_if<GenericOperationDesc>(&node.attributes);
+            normalized_operation(node, normalized_storage);
         if (operation == nullptr) {
-            return unsupported("nodes[" + std::to_string(node_index) + "]",
-                               "mixed Conv and foundational graphs are deferred to C3");
+            return unsupported(
+                "nodes[" + std::to_string(node_index) + "]",
+                "operation attributes cannot be normalized for CPU execution");
         }
         for (auto const& [output_port, output] : operation->outputs) {
             for (auto const& [input_port, input] : operation->inputs) {
@@ -2117,6 +2182,10 @@ Status emit_operation(
     GenericOperationDesc const& operation,
     SerializedGraph const& graph,
     std::map<std::int64_t, ::mlir::Value> const& values) {
+    if (is_training_operation(tag)) {
+        return emit_training_operation(tag, builder, location, operation,
+                                       graph, values);
+    }
     switch (tag) {
         case OperationTag::kReshape:
             return emit_reshape(builder, location, operation, graph, values);
@@ -2203,8 +2272,13 @@ Status build_module(::mlir::MLIRContext& context,
     }
 
     for (auto const& node : graph.nodes) {
-        auto const& operation = std::get<GenericOperationDesc>(node.attributes);
-        auto status = emit_operation(node.tag, builder, location, operation,
+        std::optional<GenericOperationDesc> normalized_storage;
+        auto const* operation = normalized_operation(node, normalized_storage);
+        if (operation == nullptr) {
+            return fail(ErrorCode::kInvalidValue, "mlir",
+                        "validated node has no normalized operation");
+        }
+        auto status = emit_operation(node.tag, builder, location, *operation,
                                      graph, values);
         if (status.is_bad()) {
             return status;

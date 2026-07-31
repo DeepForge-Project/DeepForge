@@ -441,10 +441,14 @@ P0-P6 completed in this order:
    planning.
 6. Completed P4 scalar, P5 SIMD dispatch, and P6 CLI, artifact, and quality
    gates.
+7. Completed post-MVP C0-C3: generic graph execution, complete 39-tag schema
+   recognition, eight foundational tags, rank-3 through rank-5 convolution
+   forward/backward, and 14 normalization/statistics tags.
 
-Future work enters only a benchmark-driven Optimize phase. First establish
-repeatable pinned-core measurements with isolated load, then evaluate outer
-tiling, padding fusion, and multithreading independently. The Loop/Schedule
-layer owns any future cost model used to choose those schedules. Optimizations
-must not change the frozen serialization, ABI, workspace ownership, numeric, or
-artifact contracts.
+The next functional stage is C4 sequence and attention execution, followed by
+C5 data types and specialized operations and C6 dynamic metadata/release
+qualification. Benchmark-driven optimization remains owned by the
+Loop/Schedule layer: establish repeatable pinned-core measurements first, then
+evaluate outer tiling, padding fusion, and multithreading independently.
+Optimizations must not change the frozen serialization, ABI, workspace
+ownership, numeric, or artifact contracts.

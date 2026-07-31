@@ -14,10 +14,10 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | 原有单节点 `CONV_FPROP`，或只由下面 8 个 C2 基础 tag 构成的图 |
-| 基础 Tensor | 静态 rank 1-64、f32、显式 UID；支持 virtual 中间值 |
-| 基础布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
-| Conv | cross-correlation，stride 1，dilation 1，静态非负 padding |
+| 算子 | 25 个已验证 tag：3 个 convolution、8 个基础操作、14 个 normalization/statistics tag |
+| 通用 Tensor | 静态 rank 1-64、f32、显式 UID；支持 virtual 中间值 |
+| 通用布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
+| Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
 | CPU 代码 | scalar、AVX2+FMA、AVX-512F+FMA，运行时自动分发 |
 | 输出 | LLVM IR 或包含三个原生 object 的 `.dfo` artifact |
 
@@ -34,10 +34,22 @@ DeepForge `0.1.0` 当前支持：
 | `MATMUL` | 相同且 >= 2 的 rank、batch broadcast、无 M/N/K override、padding value 为 0 |
 | `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`；支持 3 个 padding mode 且无 index 输出。`BILINEAR` 因 v1.24.0 序列化丢失 fraction denominator 而被拒绝 |
 
+C3 操作族如下：
+
+| Tags | 当前约束 |
+|---|---|
+| `CONV_FPROP`, `CONV_DGRAD`, `CONV_WGRAD` | logical `[N,C,spatial...]` rank 3-5；group 数为 `X.C / W.C`；输出 shape 必须匹配 padding、stride、dilation |
+| `BATCHNORM`, `BATCHNORM_INFERENCE`, `DBN`, `DBN_WEIGHT` | per-channel 参数/统计量；training running-stat 端口全有或全无；`peer_stats` 必须为空 |
+| `GENSTATS`, `BN_FINALIZE` | per-channel sum/square sum 和 training-stat finalize |
+| `INSTANCE_NORM`, `INSTANCE_NORM_BPROP` | per-channel 参数和 per-instance/channel 保存统计量 |
+| `LAYER_NORM`, `LAYER_NORM_BPROP` | 归一化轴由同 rank broadcast scale shape 推导 |
+| `RMS_NORM`, `RMS_NORM_BPROP` | RMS 统计量由 scale shape 推导；serializer 允许时 bias/bias gradient 可选 |
+| `ADA_LAYER_NORM`, `ADA_LAYER_NORM_BPROP` | 保留 batch 统计量和 adaptive 同 rank 参数的 layer normalization |
+
 本阶段 comparison、logical 和 generated-index pointwise 输出使用 f32 `0`/`1`
-或 f32 index。一个图暂时不能混合 `CONV_FPROP` 与基础 tag。不支持动态 shape、
-显式 alias、group/depthwise Conv、其他 tag 或 data type、GPU 执行、CUDA device
-pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
+或 f32 index。C2/C3 tag 可在同一个图中混合。不支持动态 shape、显式 alias、
+scalar pass-by-value、分布式 peer statistics、其他 tag 或 data type、GPU 执行、
+CUDA device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-frontend`
@@ -107,7 +119,7 @@ DeepForge 不定义私有 JSON schema。可以先用仓库 fixture 验证安装�
 cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
-`CONV_FPROP` 路径的逻辑维度和 packed stride 必须满足：
+原有优化 `CONV_FPROP` 路径的逻辑维度和 packed stride 必须满足：
 
 | Tensor | 逻辑 dim | packed stride |
 |---|---|---|
@@ -122,15 +134,28 @@ P = H + pre_h + post_h - R + 1
 Q = W + pre_w + post_w - S + 1
 ```
 
+通用 C3 convolution 路径接受 rank 3-5 tensor 和正且不重叠的 stride。每个空间轴
+的输出 extent 为：
+
+```text
+effective_filter = dilation * (filter_extent - 1) + 1
+output_extent = 1 + (input_extent + pre + post - effective_filter) / stride
+```
+
+`W` 的 logical shape 为 `[K,C_per_group,filter...]`；group 数由
+`X.C / C_per_group` 推导，且 `Y.K` 必须可被 group 数整除。
+
 X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 `pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 会被
 拒绝，因为它们包含当前 CPU MVP 未实现的执行语义。
 
-基础图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
+通用 C2/C3 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
 tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
 argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 `in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
-不能替代显式 UID。
+不能替代显式 UID。epsilon、momentum、accumulation count 等 normalization scalar
+输入是与操作 rank 匹配、shape 全为 1 的显式 f32 tensor；scalar pass-by-value
+serialization 仍延后。
 
 ## 5. 编译 artifact
 
@@ -301,7 +326,7 @@ CSV 输出包含编译耗时、单次执行耗时、GFLOP/s，以及相对 scala
 | `DFE_SCHEMA_VERSION_MISMATCH` | 使用 Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | 使用 cuDNN Frontend `v1.24.0` 重新序列化 |
 | `DFE_UNSUPPORTED_NODE` | 使用当前 capability matrix 列出的 tag |
-| `DFE_UNSUPPORTED_OPERATION` | 移除延后 attribute、混合 Conv/基础节点或尚未 lowering 的已识别 tag |
+| `DFE_UNSUPPORTED_OPERATION` | 移除延后 attribute、不支持的 peer statistics 或尚未 lowering 的已识别 tag |
 | `DFE_INVALID_LAYOUT` | 检查 Conv packed stride，或基础 tensor 的正且不重叠 stride |
 | `DFE_INVALID_SHAPE` | 检查静态维度、操作 shape 规则和 Conv 输出公式 |
 | `DFE_INVALID_VARIANT_PACK` | 检查 UID、host pointer、对齐、别名和 workspace |

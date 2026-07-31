@@ -15,10 +15,10 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | The original one-node `CONV_FPROP` path, or a graph made only from the eight C2 foundational tags below |
-| Foundational tensors | Static rank 1-64, f32, explicit UID; virtual intermediates are supported |
-| Foundational layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
-| Convolution | Cross-correlation, stride 1, dilation 1, static non-negative padding |
+| Operations | 25 validated tags: three convolution, eight foundational, and 14 normalization/statistics tags |
+| Generic tensors | Static rank 1-64, f32, explicit UID; virtual intermediates are supported |
+| Generic layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
+| Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
 | Output | LLVM IR or a `.dfo` artifact containing three native objects |
 
@@ -35,10 +35,22 @@ The foundational operation subset is:
 | `MATMUL` | Equal rank >= 2, broadcast batch dimensions, no M/N/K override, zero padding value |
 | `RESAMPLE` | Three pooling modes plus integer `NEAREST`; three padding modes and no index output. `BILINEAR` is rejected because v1.24.0 drops fraction denominators during serialization |
 
+The C3 operation families are:
+
+| Tags | Current constraints |
+|---|---|
+| `CONV_FPROP`, `CONV_DGRAD`, `CONV_WGRAD` | Logical `[N,C,spatial...]` tensors of rank 3-5; group count is `X.C / W.C`; output shape must match padding, stride, and dilation |
+| `BATCHNORM`, `BATCHNORM_INFERENCE`, `DBN`, `DBN_WEIGHT` | Per-channel parameters/statistics; training running-stat ports are all present or all absent; `peer_stats` must be empty |
+| `GENSTATS`, `BN_FINALIZE` | Per-channel sum/square sum and training-stat finalization |
+| `INSTANCE_NORM`, `INSTANCE_NORM_BPROP` | Per-channel parameters and per-instance/channel saved statistics |
+| `LAYER_NORM`, `LAYER_NORM_BPROP` | Normalized axes derive from the full-rank broadcast scale shape |
+| `RMS_NORM`, `RMS_NORM_BPROP` | RMS statistics derive from scale shape; bias and bias gradient are optional where serialized |
+| `ADA_LAYER_NORM`, `ADA_LAYER_NORM_BPROP` | Layer normalization with batch-preserving statistics and adaptive full-rank parameters |
+
 Comparison, logical, and generated-index pointwise outputs use f32 `0`/`1` or
-f32 index values in this stage. A graph cannot yet mix `CONV_FPROP` with the
-foundational tags. Dynamic shapes, explicit aliasing, grouped/depthwise
-convolution, other tags or data types, GPU execution, CUDA device pointers,
+f32 index values in this stage. C2 and C3 tags can be mixed in one graph.
+Dynamic shapes, explicit aliasing, scalar pass-by-value, distributed peer
+statistics, other tags or data types, GPU execution, CUDA device pointers,
 AMX, and internal multithreading are not supported. The maximum input file
 size is 16 MiB. The exact per-tag matrix is in the
 [schema inventory](cudnn-graph-schema-inventory.en.md#5-capability-meaning).
@@ -117,7 +129,8 @@ verify an installation:
 cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
-For the `CONV_FPROP` path, logical dimensions and packed strides must be:
+For the original optimized `CONV_FPROP` path, logical dimensions and packed
+strides must be:
 
 | Tensor | Logical dimensions | Packed stride |
 |---|---|---|
@@ -132,17 +145,31 @@ P = H + pre_h + post_h - R + 1
 Q = W + pre_w + post_w - S + 1
 ```
 
+The generic C3 convolution path accepts rank 3-5 tensors and positive
+non-overlapping strides. For each spatial axis its output extent is:
+
+```text
+effective_filter = dilation * (filter_extent - 1) + 1
+output_extent = 1 + (input_extent + pre + post - effective_filter) / stride
+```
+
+`W` is logically `[K,C_per_group,filter...]`; the group count is inferred as
+`X.C / C_per_group`, and `Y.K` must be divisible by it.
+
 X, W, and Y must have explicit, distinct UIDs. Non-empty UBJSON
 `pass_by_values`, `workspace_modifications`, or `variant_pack_replacements`
 are rejected because they carry execution semantics not implemented by the
 CPU MVP.
 
-For a foundational graph, every non-virtual tensor that is read or written
+For a generic C2/C3 graph, every non-virtual tensor that is read or written
 must be present in the execute-time UID map. Virtual tensors are omitted from
 the map and allocated in the queried workspace. Writable buffers must not
 overlap another argument or workspace. `VIEW_ONLY`, `in_place_index`, and a
 node that reuses one UID as both input and output are rejected until alias
 semantics are implemented. Tensor names do not replace explicit UIDs.
+Normalization scalar inputs such as epsilon, momentum, and accumulation count
+are explicit f32 tensors with an all-ones shape matching the operation rank;
+pass-by-value scalar serialization is deferred.
 
 ## 5. Compile an Artifact
 
@@ -320,7 +347,7 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 | `DFE_SCHEMA_VERSION_MISMATCH` | Use Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | Re-serialize with cuDNN Frontend `v1.24.0` |
 | `DFE_UNSUPPORTED_NODE` | Use a tag listed in the current capability matrix |
-| `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, mixed Conv/foundational nodes, or a recognized but unlowered tag |
+| `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, unsupported peer statistics, or a recognized but unlowered tag |
 | `DFE_INVALID_LAYOUT` | Check packed Conv strides or positive non-overlapping foundational strides |
 | `DFE_INVALID_SHAPE` | Check static dimensions, operation shape rules, and the Conv output formula |
 | `DFE_INVALID_VARIANT_PACK` | Check UIDs, host pointers, alignment, aliasing, and workspace |

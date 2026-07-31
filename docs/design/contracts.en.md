@@ -165,13 +165,48 @@ in the [schema capability inventory](../cudnn-graph-schema-inventory.en.md#5-cap
 
 All C2 tensors have positive static dimensions and positive non-overlapping
 strides, explicit UIDs, `NONE` reordering, and no pass-by-value or ragged
-metadata. Virtual tensors are assigned to static workspace. Mixed
-Conv/foundational graphs, `VIEW_ONLY` reshape, in-place concatenate, same-UID
+metadata. Virtual tensors are assigned to static workspace. `VIEW_ONLY`
+reshape, in-place concatenate, same-UID
 input/output, MATMUL dimension override or nonzero padding, and RESAMPLE index
 outputs remain unsupported. RESAMPLE `BILINEAR` is also rejected because the
 v1.24.0 serialized fraction representation omits the denominator needed to
 reconstruct fractional scale semantics. The public execution interface in
 section 4 is unchanged; only the runtime's hidden invocation adapter differs.
+
+### 3.2 Post-MVP C3 Extension
+
+C3 extends the same static f32 DAG with `CONV_FPROP`, `CONV_DGRAD`, and
+`CONV_WGRAD` at rank 3-5. Logical tensors use `[N,C,spatial...]` and filters use
+`[K,C_per_group,filter...]`. The group count is inferred as
+`X.C / C_per_group`; it and `Y.K / groups` must be integral and positive.
+Spatial stride and dilation are positive, pre/post padding is non-negative,
+and both `CROSS_CORRELATION` and filter-reversing `CONVOLUTION` are supported.
+Every serialized output extent must equal the checked convolution formula.
+
+C3 also executes the 14 normalization/statistics rows declared in the schema
+capability inventory. Batch parameters and statistics use
+`[1,C,1,...]`; instance parameters use that same per-channel shape while saved
+statistics use `[N,C,1,...]`. Layer/RMS reduction axes derive from dimensions
+where the full-rank scale is non-unit. Adaptive layer normalization follows
+the same rule but always preserves the batch axis.
+
+Forward normalization uses population variance for normalization and
+`1/sqrt(variance + epsilon)` as the serialized inverse-variance output.
+Running variance updates use sample variance when the reduction count exceeds
+one. A running-stat update is `(1 - momentum) * previous + momentum * current`.
+Backward rows consume saved statistics and implement gradients for data,
+scale, and serialized bias outputs. `GENSTATS`, `BN_FINALIZE`, and
+`DBN_WEIGHT` expose their serialized sums, equivalent affine values, and
+gradient coefficients without a private side channel.
+
+Scalar-like inputs are explicit, non-pass-by-value f32 tensors with every
+dimension equal to one. Nonempty distributed `peer_stats` is rejected.
+BATCHNORM running-stat ports must be all present or all absent. At execution,
+epsilon must make the square-root operand positive and `ACCUM_COUNT` must be
+positive; these data values are caller preconditions rather than compile-time
+metadata. C2 and C3 nodes may be mixed, including through virtual workspace
+tensors. Dynamic shape, aliasing, pass-by-value, ragged/reordered storage, and
+non-f32 execution remain deferred.
 
 ## 4. Public Execution Interface
 

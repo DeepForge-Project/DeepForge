@@ -135,6 +135,38 @@ else()
 endif()
 add_test(NAME deepforge-foundational-math COMMAND deepforge_foundational_math_test)
 
+add_executable(deepforge_training_conv_test
+    TrainingConvOpsTest.cpp
+)
+target_link_libraries(deepforge_training_conv_test PRIVATE DeepForge::Compiler)
+target_include_directories(deepforge_training_conv_test SYSTEM
+    PRIVATE
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
+)
+if(MSVC)
+    target_compile_options(deepforge_training_conv_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_training_conv_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-training-conv COMMAND deepforge_training_conv_test)
+
+add_executable(deepforge_training_norm_test
+    TrainingNormOpsTest.cpp
+)
+target_link_libraries(deepforge_training_norm_test PRIVATE DeepForge::Compiler)
+target_include_directories(deepforge_training_norm_test SYSTEM
+    PRIVATE
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
+)
+if(MSVC)
+    target_compile_options(deepforge_training_norm_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_training_norm_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-training-norm COMMAND deepforge_training_norm_test)
+
 if(TARGET deepforge-compile)
     set(DEEPFORGE_CLI_SCRATCH "${CMAKE_CURRENT_BINARY_DIR}/cli-scratch")
     file(MAKE_DIRECTORY "${DEEPFORGE_CLI_SCRATCH}")

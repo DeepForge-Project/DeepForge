@@ -178,6 +178,8 @@ artifact round-trip, workspace, runtime validation, ASan, and UBSan tests.
 
 ### C3. Convolution and training families
 
+**Status:** completed and validated on 2026-07-31.
+
 **Work:** generalize `CONV_FPROP`, then add `CONV_DGRAD` and `CONV_WGRAD`;
 add `GENSTATS`, `BN_FINALIZE`, `DBN`, `DBN_WEIGHT`, batch normalization,
 instance normalization, layer normalization, RMS normalization, adaptive layer
@@ -186,6 +188,11 @@ normalization, and their serialized backward variants.
 **Exit gate:** forward/backward shape inference and gradients are independently
 checked; finite-difference gradient tests cover representative cases; mixed
 graphs compose with C2 operations.
+
+The delivered subset covers rank-3 through rank-5 grouped convolution,
+independent FPROP/DGRAD/WGRAD references, normalization forward/backward
+references, LayerNorm finite differences, running statistics, C2/C3 mixed
+graphs, artifact reload, and full Release/ASan/UBSan suites.
 
 ### C4. Sequence and attention families
 

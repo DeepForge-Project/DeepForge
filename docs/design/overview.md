@@ -7,9 +7,9 @@
 DeepForge 将固定版本 cuDNN Frontend 的序列化 Graph 编译为 CPU object code。
 MVP 只实现静态、packed、f32 Conv2D FWD，但输入协议和运行接口直接沿用
 cuDNN Frontend 的 Graph serialization 与 UID variant-pack 概念。
-当前 MVP 后 C2 实现还可执行覆盖另外 8 个 serialized tag 的静态 f32 基础图；
-公开 runtime 接口保持不变，内部只使用上游 MemRef、SCF、Arith、Math 和 LLVM
-dialect。
+当前 MVP 后 C3 实现可执行覆盖 25 个已验证 tag 的静态 f32 有序 DAG：3 个
+convolution、8 个基础操作和 14 个 normalization/statistics 操作。公开 runtime
+接口保持不变，通用路径内部只使用上游 MemRef、SCF、Arith、Math 和 LLVM dialect。
 
 规范性支持边界见 [contracts.md](contracts.md) 和
 [schema capability 清单](../cudnn-graph-schema-inventory.md)。
@@ -66,10 +66,11 @@ dialect。
 +----------------------------------------------------------------+
 ```
 
-上图描述原始 Conv 路径。canonical import 之后，C2 基础图走并行的标准 MLIR
-路径，直接生成静态 MemRef/SCF/Arith/Math IR、规划 virtual tensor workspace view，
-再进入同一 LLVM object pipeline；它不运行 Conv 的 Tensor/Linalg bufferization 或
-direct-conv schedule。
+上图描述原有优化 Conv 路径。canonical import 之后，通用 C2/C3 图走并行的标准
+MLIR 路径，直接生成静态 MemRef/SCF/Arith/Math IR、规划 virtual tensor workspace
+view，再进入同一 LLVM object pipeline。该路径包含 grouped convolution、
+convolution gradient、normalization 和 normalization gradient；它不运行 MVP Conv
+的 Tensor/Linalg bufferization 或 direct-conv schedule。
 
 ### 3.1 Importer
 
@@ -81,7 +82,8 @@ Importer 是文件/对象模型到 MLIR 的边界，不是 MLIR pass。它负责
 - 忽略文档内 GPU-only plan metadata，拒绝非空的未支持执行语义字段；
 - 解析 tensor/node 引用和稳定 UID；
 - 校验适用的 capability 子集；
-- 为 Conv 构造标准 Tensor/Linalg IR，或为基础图构造标准 MemRef/SCF/Math IR。
+- 为优化 MVP Conv 构造标准 Tensor/Linalg IR，或为通用 C2/C3 图构造标准
+  MemRef/SCF/Math IR。
 
 不定义 `cudnn.conv_fwd` 临时 op。这样 One-Shot Bufferize 不会遇到没有
 `BufferizableOpInterface` 的未知自定义 op。

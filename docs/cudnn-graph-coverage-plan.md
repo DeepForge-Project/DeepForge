@@ -165,6 +165,8 @@ round-trip、workspace、runtime validation、ASan 和 UBSan 测试。
 
 ### C3. Convolution 和训练操作族
 
+**状态**：已于 2026-07-31 完成并通过验证。
+
 **工作内容**：先泛化 `CONV_FPROP`，再加入 `CONV_DGRAD` 和 `CONV_WGRAD`；
 加入 `GENSTATS`、`BN_FINALIZE`、`DBN`、`DBN_WEIGHT`、batch normalization、
 instance normalization、layer normalization、RMS normalization、adaptive layer
@@ -172,6 +174,10 @@ normalization 及其已序列化的 backward variant。
 
 **退出条件**：forward/backward shape inference 和 gradient 被独立检查；代表性
 输入通过 finite-difference gradient test；这些操作可与 C2 操作组成多节点图。
+
+交付子集覆盖 rank 3-5 grouped convolution、独立 FPROP/DGRAD/WGRAD reference、
+normalization forward/backward reference、LayerNorm finite difference、running
+statistics、C2/C3 混合图、artifact 重载以及完整 Release/ASan/UBSan 测试。
 
 ### C4. Sequence 和 attention 操作族
 

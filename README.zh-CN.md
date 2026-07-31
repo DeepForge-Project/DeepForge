@@ -6,12 +6,12 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C2 已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C3 已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
 的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。Importer 已识别
-v1.24.0 全部 39 个 serialized tag，其中 9 个 tag 目前具有已验证的 CPU 执行子集。
+v1.24.0 全部 39 个 serialized tag，其中 25 个 tag 目前具有已验证的 CPU 执行子集。
 
 **MVP**：静态、连续、f32 的单个 Conv2D FWD，目标为 x86-64，提供标量、
 AVX2 和 AVX-512 三个代码变体。Machine Dialect、AMX、bf16、多线程及多算子
@@ -89,15 +89,17 @@ CPU-only MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
 输入必须满足 `json_version == "1.0"`、`cudnn_frontend_version == 12400`，单个
 文件最大 16 MiB。当前可执行形式为：
 
-- 单个静态 f32 `CONV_FPROP`，X/Y 为 packed NHWC、W 为 packed KRSC，空间
-  stride/dilation 为 1，padding 静态非负；
-- 只由 `RESHAPE`、`TRANSPOSE`、`SLICE`、`CONCATENATE`、`POINTWISE`、
-  `REDUCTION`、`MATMUL`、`RESAMPLE` 组成的静态 f32 图，精确约束见
+- 原有优化的单节点 packed f32 rank-4 `CONV_FPROP` 路径；
+- 使用 3 个 convolution tag、8 个 C2 基础 tag 和 14 个 C3
+  normalization/statistics tag 的静态 f32 有序 DAG，精确约束见
   [schema capability matrix](docs/cudnn-graph-schema-inventory.md#5-capability-含义)。
 
-基础图支持 virtual workspace 中间值和正且不重叠的 strided layout。混合
-Conv/基础图、动态 shape、显式 alias、非 f32 tensor 以及其余 30 个已识别 tag
-暂不可执行。
+通用路径支持 rank 3-5 grouped convolution、stride、dilation、非对称 padding、
+FPROP/DGRAD/WGRAD 及 C2/C3 混合图；也支持 capability matrix 范围内的
+normalization forward/backward、batch statistics 和 running-stat 更新。支持
+virtual workspace 中间值和正且不重叠的 strided layout。动态 shape、显式
+alias、scalar pass-by-value、分布式 peer statistics、非 f32 tensor 以及其余 14 个
+已识别 tag 暂不可执行。
 
 ## 架构
 
@@ -108,7 +110,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-Conv: Tensor + Linalg        基础操作: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    通用 C2/C3: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -279,8 +281,8 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P4 | 已完成：scalar LLVM/object、JIT 和 runtime |
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
-| C0-C2 | 已完成：通用 graph/runtime 基础、39-tag schema 识别、8 个基础执行 tag |
-| C3-C6 | 进行中：训练、attention、data type、动态 metadata 和优化 |
+| C0-C3 | 已完成：通用 graph/runtime 基础、39-tag schema 识别、25 个已验证执行 tag |
+| C4-C6 | 进行中：attention、data type、动态 metadata 和优化 |
 | Optimize | 待 benchmark 驱动：外层 tiling、padding fusion、并行化 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

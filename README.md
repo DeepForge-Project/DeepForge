@@ -7,13 +7,13 @@ defined by the open source `cudnn-frontend` project, lowers the supported graph
 subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
-**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C2 are
+**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C3 are
 implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
 artifacts, CLI tools, benchmarks, and sanitizer coverage. The importer
-recognizes all 39 serialized v1.24.0 tags; nine tags currently have validated
+recognizes all 39 serialized v1.24.0 tags; 25 tags currently have validated
 CPU execution subsets.
 
 **MVP scope:** one static, contiguous, f32 Conv2D forward operation targeting
@@ -112,16 +112,19 @@ The schema must have `json_version == "1.0"` and
 `cudnn_frontend_version == 12400`. A serialized input is limited to 16 MiB.
 The current executable forms are:
 
-- exactly one static f32 `CONV_FPROP` with packed NHWC X/Y, packed KRSC W,
-  unit spatial stride/dilation, and static non-negative padding;
-- a static f32 graph composed only of `RESHAPE`, `TRANSPOSE`, `SLICE`,
-  `CONCATENATE`, `POINTWISE`, `REDUCTION`, `MATMUL`, and `RESAMPLE` within the
-  constraints in the [schema capability matrix](docs/cudnn-graph-schema-inventory.en.md#5-capability-meaning).
+- the original optimized single-node packed f32 rank-4 `CONV_FPROP` path;
+- a static f32 ordered DAG using the three convolution tags, the eight C2
+  foundational tags, and the 14 C3 normalization/statistics tags declared in
+  the [schema capability matrix](docs/cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
-Foundational graphs support virtual workspace intermediates and positive
-non-overlapping strided layouts. Mixed Conv/foundational graphs, dynamic
-shapes, explicit aliasing, non-f32 tensors, and the other 30 recognized tags
-are not executable yet.
+The generic path supports rank-3 through rank-5 grouped convolution with
+stride, dilation, asymmetric padding, FPROP/DGRAD/WGRAD, and mixed C2/C3
+graphs. It also supports normalization forward/backward, batch statistics,
+and running-stat updates within the matrix constraints. Virtual workspace
+intermediates and positive non-overlapping strided layouts are supported.
+Dynamic shapes, explicit aliasing, scalar pass-by-value, distributed peer
+statistics, non-f32 tensors, and the other 14 recognized tags are not
+executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable
@@ -136,7 +139,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-Conv: Tensor + Linalg        Foundational: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    Generic C2/C3: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -328,8 +331,8 @@ memref descriptors nor raw generated-kernel signatures.
 | P4 | Complete: scalar LLVM/object generation, JIT, and runtime |
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
-| C0-C2 | Complete: generic graph/runtime foundation, 39-tag schema recognition, and eight foundational execution tags |
-| C3-C6 | In progress: training, attention, data types, dynamic metadata, and optimization |
+| C0-C3 | Complete: generic graph/runtime foundation, 39-tag schema recognition, and 25 validated execution tags |
+| C4-C6 | In progress: attention, data types, dynamic metadata, and optimization |
 | Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

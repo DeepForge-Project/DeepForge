@@ -141,12 +141,14 @@ Pointwise mode 的输入元数被严格验证：
 ## 5. Capability 含义
 
 39 行都达到 `parsed`：JSON 与 canonical UBJSON 都可被接受和归一化，已知错误
-字段会被拒绝，reference 构成有序 DAG。C2 完成时，以下 9 行具有明确声明的
+字段会被拒绝，reference 构成有序 DAG。C3 完成时，以下 25 行具有明确声明的
 `validated` 执行子集：
 
 | Tag | 已验证 CPU 子集 |
 |---|---|
-| `CONV_FPROP` | 原有单节点、静态 packed rank-4 f32、unit stride/dilation 路径 |
+| `CONV_FPROP` | 静态 f32 rank 3-5、group channel、正 stride/dilation、非负非对称 padding，以及 `CROSS_CORRELATION` 或 `CONVOLUTION` |
+| `CONV_DGRAD` | 同一 convolution 子集的 X 梯度 |
+| `CONV_WGRAD` | 同一 convolution 子集的 W 梯度 |
 | `RESHAPE` | `LOGICAL` mode、元素数相同；`VIEW_ONLY` alias 延后 |
 | `TRANSPOSE` | 静态 permutation，每个轴恰好出现一次 |
 | `SLICE` | rank 保持、半开区间不越界、正整数 stride |
@@ -155,14 +157,36 @@ Pointwise mode 的输入元数被严格验证：
 | `REDUCTION` | 全部 9 个 mode，输出保持 rank，被归约维度为 1 |
 | `MATMUL` | 相同且至少为 2 的 rank、batch broadcast、无维度 override、padding value 为 0 |
 | `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`，支持 3 个 padding mode 且无 index 输出；`BILINEAR` 因 v1.24.0 序列化遗漏 fraction denominator 而被拒绝 |
+| `ADA_LAYER_NORM` | training/inference、同 rank broadcast 参数、保留 batch 的统计量 |
+| `ADA_LAYER_NORM_BPROP` | 使用保存的 mean/inverse standard deviation、显式全 1 shape epsilon tensor、可选 bias gradient |
+| `BATCHNORM` | training、per-channel 参数/统计量、可选且全有或全无的 running-stat 更新、空 `peer_stats` |
+| `BATCHNORM_INFERENCE` | 使用外部提供的 per-channel mean 和 inverse standard deviation |
+| `BN_FINALIZE` | per-channel sum/square-sum finalize、等价 affine、保存统计量和 sample running variance |
+| `DBN` | batch normalization data/parameter gradient，要求空 `peer_stats` |
+| `DBN_WEIGHT` | batch normalization parameter gradient 和等价 data-gradient coefficient |
+| `GENSTATS` | per-channel sum 和 square sum |
+| `INSTANCE_NORM` | training/inference、per-channel 参数、per-instance/channel 统计量 |
+| `INSTANCE_NORM_BPROP` | 使用保存统计量计算 data 和 per-channel parameter gradient |
+| `LAYER_NORM` | training/inference；归一化轴由同 rank broadcast scale shape 推导 |
+| `LAYER_NORM_BPROP` | 使用保存统计量和全 1 shape epsilon tensor 计算 data/parameter gradient |
+| `RMS_NORM` | training/inference、可选 bias、由 scale shape 推导 RMS 统计量 |
+| `RMS_NORM_BPROP` | data/scale gradient，可选 bias gradient |
 
-8 个基础操作要求 tensor 为静态正维度、显式 UID、f32、正且不重叠的 stride、
-`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。virtual 中间值使用规划的
-workspace。C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或
-f32 index 表示；原生 boolean/integer 输出延后到 C5。混合 Conv/基础操作图、显式
-alias、动态 shape metadata 和 shape override 尚未支持。
+全部已验证通用行都要求静态正维度、显式 UID、f32 tensor 和 f32 graph context、
+正且不重叠的 stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。
+virtual 中间值使用规划的 workspace。Convolution group 数由 `X.C / W.C` 推导，
+输出 channel 必须可被 group 数整除。
 
-其余 30 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
+epsilon、momentum、accumulation count 等 normalization scalar 输入必须是所有维度
+均为 1 的显式 f32 tensor；scalar pass-by-value metadata 仍延后。非空分布式
+`peer_stats` 不可执行。running-stat 端口必须全有或全无，运行时值必须提供正的
+accumulation count 和有效 epsilon。
+
+C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或 f32 index
+表示；原生 boolean/integer 输出延后到 C5。C2/C3 操作可在同一个有序 DAG 中混合。
+显式 alias、动态 shape metadata、shape override 和非 f32 执行尚未支持。
+
+其余 14 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
 已识别但未 lowering 的 node 返回 `kUnsupportedOperation`，而不是
 `kUnsupportedNode`。`validated` 仅指上表声明的子集，不代表该 tag 的所有合法
 cuDNN backend 配置。

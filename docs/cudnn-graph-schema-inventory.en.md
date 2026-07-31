@@ -151,12 +151,14 @@ The nine reduction modes are `ADD`, `MUL`, `MIN`, `MAX`, `AMAX`, `AVG`,
 
 All 39 rows are `parsed`: JSON and canonical UBJSON are accepted and
 normalized, known malformed fields are rejected, and references form an
-ordered DAG. At C2 completion, these nine rows have a declared `validated`
-execution subset:
+ordered DAG. At C3 completion, 25 rows have a declared `validated` execution
+subset:
 
 | Tag | Validated CPU subset |
 |---|---|
-| `CONV_FPROP` | Original single-node static packed rank-4 f32 path, unit stride/dilation |
+| `CONV_FPROP` | Static f32 rank 3-5, grouped channels, positive stride/dilation, non-negative asymmetric padding, and `CROSS_CORRELATION` or `CONVOLUTION` |
+| `CONV_DGRAD` | Gradient with respect to X for the same convolution subset |
+| `CONV_WGRAD` | Gradient with respect to W for the same convolution subset |
 | `RESHAPE` | `LOGICAL` mode, equal element counts; `VIEW_ONLY` aliasing is deferred |
 | `TRANSPOSE` | Static permutation containing every axis exactly once |
 | `SLICE` | Rank-preserving, in-range half-open bounds and positive integer strides |
@@ -165,16 +167,40 @@ execution subset:
 | `REDUCTION` | All 9 modes, rank-preserving output with reduced extents set to one |
 | `MATMUL` | Equal rank of at least two, broadcast batch dimensions, no dimension override, zero padding value |
 | `RESAMPLE` | Three pooling modes plus integer `NEAREST`, with three padding modes and no index output; `BILINEAR` is rejected because v1.24.0 serialization omits fraction denominators |
+| `ADA_LAYER_NORM` | Training or inference, full-rank broadcast parameters, batch-preserving statistics |
+| `ADA_LAYER_NORM_BPROP` | Saved mean/inverse standard deviation, explicit all-ones epsilon tensor, optional bias gradient |
+| `BATCHNORM` | Training, per-channel parameters/statistics, optional all-or-none running-stat update, empty `peer_stats` |
+| `BATCHNORM_INFERENCE` | Per-channel supplied mean and inverse standard deviation |
+| `BN_FINALIZE` | Per-channel sum/square-sum finalization, equivalent affine values, saved statistics, and sample running variance |
+| `DBN` | Batch-normalization data and parameter gradients with empty `peer_stats` |
+| `DBN_WEIGHT` | Batch-normalization parameter gradients and equivalent data-gradient coefficients |
+| `GENSTATS` | Per-channel sum and square sum |
+| `INSTANCE_NORM` | Training or inference, per-channel parameters, per-instance/channel statistics |
+| `INSTANCE_NORM_BPROP` | Data and per-channel parameter gradients from saved statistics |
+| `LAYER_NORM` | Training or inference; normalized axes derive from the full-rank broadcast scale shape |
+| `LAYER_NORM_BPROP` | Data and parameter gradients from saved statistics and an all-ones epsilon tensor |
+| `RMS_NORM` | Training or inference, optional bias, RMS statistics derived from scale shape |
+| `RMS_NORM_BPROP` | Data and scale gradients, with optional bias gradient |
 
-The eight foundational rows require static, positive, explicitly UID-assigned
-f32 tensors with positive non-overlapping strides, `NONE` reordering, and no
-pass-by-value or ragged metadata. Virtual intermediates use planned workspace.
+All validated generic rows require static, positive, explicitly UID-assigned
+f32 tensors and f32 graph context types, positive non-overlapping strides,
+`NONE` reordering, and no pass-by-value or ragged metadata. Virtual
+intermediates use planned workspace. Convolution grouping is inferred from
+`X.C / W.C`; output channels must be divisible by that group count.
+
+Normalization scalar inputs such as epsilon, momentum, and accumulation count
+are explicit f32 tensors whose dimensions are all one; scalar pass-by-value
+metadata remains deferred. Distributed nonempty `peer_stats` is not
+executable. Running-stat ports must be either all present or all absent, and
+their runtime values are required to provide positive accumulation counts and
+valid epsilon values.
+
 Comparison, logical, and `GEN_INDEX` pointwise results are represented as f32
 `0`/`1` or f32 indices in C2; native boolean/integer outputs are deferred to
-C5. Mixed Conv/foundational graphs, explicit aliasing, dynamic shape metadata,
-and shape overrides are deferred.
+C5. C2 and C3 operations can be mixed in one ordered DAG. Explicit aliasing,
+dynamic shape metadata, shape overrides, and non-f32 execution are deferred.
 
-The remaining 30 rows stay `parsed`. Passing schema recognition never implies
+The remaining 14 rows stay `parsed`. Passing schema recognition never implies
 lowering or CPU execution support. A recognized node without lowering returns
 `kUnsupportedOperation`, not `kUnsupportedNode`. `validated` always refers to
 the declared subset above, not every legal cuDNN backend configuration for the

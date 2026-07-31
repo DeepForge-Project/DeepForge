@@ -148,11 +148,40 @@ attribute 和 alias 约束以
 
 C2 tensor 必须具有正的静态维度、正且不重叠的 stride、显式 UID、`NONE`
 reorder，并且不是 pass-by-value 或 ragged tensor。virtual tensor 使用静态规划的
-workspace。混合 Conv/基础图、`VIEW_ONLY` reshape、in-place concatenate、同 UID
+workspace。`VIEW_ONLY` reshape、in-place concatenate、同 UID
 输入输出、MATMUL 维度 override 或非零 padding、RESAMPLE index 输出仍不支持。
 RESAMPLE `BILINEAR` 也会被拒绝，因为 v1.24.0 序列化 fraction 表示省略了恢复
 分数缩放语义所需的 denominator。第 4 节公开执行接口保持不变，差异只存在于
 runtime 隐藏的 invocation adapter。
+
+### 3.2 MVP 后 C3 扩展
+
+C3 在同一个静态 f32 DAG 中加入 rank 3-5 的 `CONV_FPROP`、`CONV_DGRAD` 和
+`CONV_WGRAD`。logical tensor 使用 `[N,C,spatial...]`，filter 使用
+`[K,C_per_group,filter...]`。group 数由 `X.C / C_per_group` 推导；group 数和
+`Y.K / groups` 都必须是正整数。空间 stride/dilation 为正，pre/post padding 非负，
+支持 `CROSS_CORRELATION` 和反转 filter 的 `CONVOLUTION`。序列化输出的每个 extent
+必须与 checked convolution 公式一致。
+
+C3 还执行 schema capability 清单声明的 14 个 normalization/statistics 行。
+Batch 参数和统计量 shape 为 `[1,C,1,...]`；instance 参数同样为 per-channel，保存
+统计量为 `[N,C,1,...]`。Layer/RMS 在同 rank scale 非 1 的维度做归一化；adaptive
+layer normalization 使用相同规则，但始终保留 batch 轴。
+
+Forward normalization 使用 population variance 做归一化，并输出
+`1/sqrt(variance + epsilon)` 作为序列化 inverse variance。running variance 在
+reduction count 大于 1 时使用 sample variance；running-stat 更新公式为
+`(1 - momentum) * previous + momentum * current`。Backward 行读取保存的统计量，
+计算 data、scale 和 serializer 声明的 bias gradient。`GENSTATS`、`BN_FINALIZE`
+和 `DBN_WEIGHT` 通过公开序列化端口输出 sum、等价 affine 和 gradient coefficient，
+不引入私有 side channel。
+
+scalar-like 输入必须是所有维度为 1、非 pass-by-value 的显式 f32 tensor。非空
+分布式 `peer_stats` 被拒绝。BATCHNORM running-stat 端口必须全有或全无。执行时
+epsilon 必须使 square-root 输入为正，`ACCUM_COUNT` 必须为正；这些数据值属于调用者
+前置条件，而不是编译期 metadata。C2/C3 node 可通过 virtual workspace tensor
+混合。dynamic shape、alias、pass-by-value、ragged/reordered storage 和非 f32 执行
+仍延后。
 
 ## 4. 对外运行接口
 

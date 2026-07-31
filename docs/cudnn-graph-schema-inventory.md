@@ -140,8 +140,29 @@ Pointwise mode 的输入元数被严格验证：
 
 ## 5. Capability 含义
 
-C1 完成时，39 行都达到 `parsed`：JSON 与 canonical UBJSON 都可被接受和归一化，
-已知错误字段会被拒绝，reference 构成有序 DAG。只有原有静态、连续、rank-4 f32、
-unit-stride `CONV_FPROP` 子集达到 `validated` 并可执行。Schema 识别通过不代表已经
-lowering 或可在 CPU 执行。已识别但未 lowering 的 node 返回
-`kUnsupportedOperation`，而不是 `kUnsupportedNode`。
+39 行都达到 `parsed`：JSON 与 canonical UBJSON 都可被接受和归一化，已知错误
+字段会被拒绝，reference 构成有序 DAG。C2 完成时，以下 9 行具有明确声明的
+`validated` 执行子集：
+
+| Tag | 已验证 CPU 子集 |
+|---|---|
+| `CONV_FPROP` | 原有单节点、静态 packed rank-4 f32、unit stride/dilation 路径 |
+| `RESHAPE` | `LOGICAL` mode、元素数相同；`VIEW_ONLY` alias 延后 |
+| `TRANSPOSE` | 静态 permutation，每个轴恰好出现一次 |
+| `SLICE` | rank 保持、半开区间不越界、正整数 stride |
+| `CONCATENATE` | 静态编号输入和非负 axis；不支持 `in_place_index` |
+| `POINTWISE` | 全部 50 个 mode、f32 输出、尾维对齐的 NumPy broadcast |
+| `REDUCTION` | 全部 9 个 mode，输出保持 rank，被归约维度为 1 |
+| `MATMUL` | 相同且至少为 2 的 rank、batch broadcast、无维度 override、padding value 为 0 |
+| `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`，支持 3 个 padding mode 且无 index 输出；`BILINEAR` 因 v1.24.0 序列化遗漏 fraction denominator 而被拒绝 |
+
+8 个基础操作要求 tensor 为静态正维度、显式 UID、f32、正且不重叠的 stride、
+`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。virtual 中间值使用规划的
+workspace。C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或
+f32 index 表示；原生 boolean/integer 输出延后到 C5。混合 Conv/基础操作图、显式
+alias、动态 shape metadata 和 shape override 尚未支持。
+
+其余 30 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
+已识别但未 lowering 的 node 返回 `kUnsupportedOperation`，而不是
+`kUnsupportedNode`。`validated` 仅指上表声明的子集，不代表该 tag 的所有合法
+cuDNN backend 配置。

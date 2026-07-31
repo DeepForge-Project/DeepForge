@@ -154,6 +154,8 @@ attribute 的诊断确定；已知 tag 不会被报成 unknown；未 lowering �
 
 ### C2. 基础可执行操作
 
+**状态**：已于 2026-07-31 完成并通过验证。
+
 **工作内容**：实现静态 shape f32 的 `RESHAPE`、`TRANSPOSE`、`SLICE`、
 `CONCATENATE`、适用的全部 `POINTWISE` mode、适用的全部 `REDUCTION` mode、
 `MATMUL` 和 `RESAMPLE`。在 Frontend 契约允许的范围实现 NumPy 风格 broadcast。

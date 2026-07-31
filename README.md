@@ -7,11 +7,14 @@ defined by the open source `cudnn-frontend` project, lowers the supported graph
 subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
-**Current status:** CPU MVP phases P0-P6 are implemented. The end-to-end path
+**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C2 are
+implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
-artifacts, CLI tools, benchmarks, and sanitizer coverage.
+artifacts, CLI tools, benchmarks, and sanitizer coverage. The importer
+recognizes all 39 serialized v1.24.0 tags; nine tags currently have validated
+CPU execution subsets.
 
 **MVP scope:** one static, contiguous, f32 Conv2D forward operation targeting
 x86-64, with scalar, AVX2, and AVX-512 code variants. Dynamic shapes, grouped
@@ -105,10 +108,20 @@ The importer accepts the two carriers defined by cuDNN Frontend `v1.24.0`:
 - Graph JSON produced through `Graph::serialize(nlohmann::json&)`.
 - Canonical UBJSON produced through `Graph::serialize(std::vector<uint8_t>&)`.
 
-The accepted MVP subset is exactly one static f32 `CONV_FPROP` with packed NHWC
-X/Y tensors, a packed KRSC filter, unit spatial stride and dilation, and static
-non-negative padding. The schema must have `json_version == "1.0"` and
+The schema must have `json_version == "1.0"` and
 `cudnn_frontend_version == 12400`. A serialized input is limited to 16 MiB.
+The current executable forms are:
+
+- exactly one static f32 `CONV_FPROP` with packed NHWC X/Y, packed KRSC W,
+  unit spatial stride/dilation, and static non-negative padding;
+- a static f32 graph composed only of `RESHAPE`, `TRANSPOSE`, `SLICE`,
+  `CONCATENATE`, `POINTWISE`, `REDUCTION`, `MATMUL`, and `RESAMPLE` within the
+  constraints in the [schema capability matrix](docs/cudnn-graph-schema-inventory.en.md#5-capability-meaning).
+
+Foundational graphs support virtual workspace intermediates and positive
+non-overlapping strided layouts. Mixed Conv/foundational graphs, dynamic
+shapes, explicit aliasing, non-f32 tensors, and the other 30 recognized tags
+are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable
@@ -123,9 +136,10 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-Tensor + Linalg Dialect
-        |  structured transforms, then one-shot-bufferize once
-        v
+Conv: Tensor + Linalg        Foundational: MemRef + SCF + Math
+        |  one-shot-bufferize once       |
+        +----------------------+----------+
+                               v
 MemRef + Affine/SCF + Vector Dialect
         |  direct Conv2D schedule, C-reduction vectorization
         v
@@ -138,10 +152,10 @@ scalar / AVX2 / AVX-512 object code
 DeepForge Executable::execute(handle, uid_to_host_ptr, workspace)
 ```
 
-DeepForge-specific logic is limited to import validation, the Conv2D schedule,
-workspace planning, and runtime dispatch. The main IR pipeline uses upstream
-MLIR dialects, without an intermediate `cudnn.*` dialect or a custom Machine
-Dialect.
+DeepForge-specific logic is limited to import/support validation, semantic
+lowering, workspace planning, and runtime dispatch. The main IR pipeline uses
+upstream MLIR dialects, without an intermediate `cudnn.*` dialect or a custom
+Machine Dialect.
 
 ## Documentation
 
@@ -314,8 +328,9 @@ memref descriptors nor raw generated-kernel signatures.
 | P4 | Complete: scalar LLVM/object generation, JIT, and runtime |
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
+| C0-C2 | Complete: generic graph/runtime foundation, 39-tag schema recognition, and eight foundational execution tags |
+| C3-C6 | In progress: training, attention, data types, dynamic metadata, and optimization |
 | Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
-| Later | Multithreading, more operations, and upstream X86 AMX/bf16 paths |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 
 ## References

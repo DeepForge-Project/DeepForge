@@ -63,6 +63,9 @@ i64 x_uid, w_uid, y_uid
 i64 x_shape[4], w_shape[4], y_shape[4], padded_x_shape[4]
 i64 pre_padding[2], post_padding[2], stride[2], dilation[2]
 
+# adapter_kind 1：通用 ranked-memref pointer-table adapter
+# adapter_metadata_size 为 0；tensor argument table 已包含所需信息
+
 u64 workspace_size
 u64 workspace_alignment
 u32 workspace_allocation_count
@@ -85,9 +88,12 @@ repeated variant {
 u64 fnv1a_64_checksum        # covers every preceding byte
 ```
 
-argument table 与带长度的 adapter section 有意分离：前者与 operation 无关；
-adapter kind `0` 保留当前 ranked-memref Conv2D 调用。后续通用 wrapper 可以增加新的
-adapter kind，而不把算子专属字段写入顶层格式。reader 会拒绝未知 adapter kind。
+argument table 与带长度的 adapter section 有意分离：前者与 operation 无关。
+adapter kind `0` 保留 ranked-memref Conv2D 调用；基础多节点图使用 adapter kind
+`1`，不携带 operation 专属 payload。runtime 按有序 argument table 构造每个
+ranked-memref descriptor 和 workspace descriptor，再调用隐藏的 pointer-table
+wrapper。这个内部 adapter 不改变公开的 handle + UID variant-pack + workspace
+调用形状。reader 会拒绝未知 adapter kind，也会拒绝非空的 kind-1 metadata。
 
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
@@ -99,7 +105,8 @@ DeepForge shared-library 的公开 ABI。
 loader 要求 artifact 的 DeepForge、LLVM、Frontend 和格式版本受当前 runtime 支持，
 并要求 target triple 与当前主机精确一致。每个 object 被加入独立 LLVM ORC `LLJIT`，
 避免三个变体的同类内部符号相互冲突。loader 解析 C-interface wrapper 后，将入口、
-metadata 和 workspace plan 交给与开发期 MLIR ExecutionEngine 相同的 runtime adapter。
+metadata 和 workspace plan 交给对应 runtime adapter。包含 MLIR math lowering 的
+object 从当前进程解析标准 `libm` 符号。
 
 执行前会验证有序 argument table、UID、空指针、每个 tensor 的 alignment 和 byte
 range、workspace 64-byte 对齐及整数溢出。read/read alias 合法；任何涉及 write

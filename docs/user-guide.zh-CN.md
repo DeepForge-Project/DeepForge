@@ -2,7 +2,7 @@
 
 [English](user-guide.en.md)
 
-本文面向使用 DeepForge CPU MVP 编译和执行 cuDNN Frontend 序列化 Graph 的用户。
+本文面向使用 DeepForge CPU runtime 编译和执行 cuDNN Frontend 序列化 Graph 的用户。
 设计和实现细节见 [设计文档](design/overview.md)。
 
 ## 1. 支持范围
@@ -14,15 +14,31 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | 恰好一个 `CONV_FPROP` |
-| Tensor | 静态 rank-4、f32、非 virtual、非 pass-by-value |
-| 布局 | packed NHWC X/Y，packed KRSC W |
+| 算子 | 原有单节点 `CONV_FPROP`，或只由下面 8 个 C2 基础 tag 构成的图 |
+| 基础 Tensor | 静态 rank 1-64、f32、显式 UID；支持 virtual 中间值 |
+| 基础布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
 | Conv | cross-correlation，stride 1，dilation 1，静态非负 padding |
 | CPU 代码 | scalar、AVX2+FMA、AVX-512F+FMA，运行时自动分发 |
 | 输出 | LLVM IR 或包含三个原生 object 的 `.dfo` artifact |
 
-不支持动态 shape、group/depthwise Conv、bias/activation fusion、其他算子、GPU
-执行、CUDA device pointer、bf16、AMX 或内部多线程。输入文件最大为 16 MiB。
+基础操作子集如下：
+
+| Tag | 当前约束 |
+|---|---|
+| `RESHAPE` | 仅 `LOGICAL`，元素数相同 |
+| `TRANSPOSE` | 完整静态 permutation |
+| `SLICE` | 半开区间不越界，stride 为正整数 |
+| `CONCATENATE` | 编号输入、非负 axis、无 in-place mode |
+| `POINTWISE` | v1.24.0 全部 50 个 mode，尾维对齐的 NumPy broadcast |
+| `REDUCTION` | 全部 9 个 mode；输入输出 rank 相同，被归约维度为 1 |
+| `MATMUL` | 相同且 >= 2 的 rank、batch broadcast、无 M/N/K override、padding value 为 0 |
+| `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`；支持 3 个 padding mode 且无 index 输出。`BILINEAR` 因 v1.24.0 序列化丢失 fraction denominator 而被拒绝 |
+
+本阶段 comparison、logical 和 generated-index pointwise 输出使用 f32 `0`/`1`
+或 f32 index。一个图暂时不能混合 `CONV_FPROP` 与基础 tag。不支持动态 shape、
+显式 alias、group/depthwise Conv、其他 tag 或 data type、GPU 执行、CUDA device
+pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
+[schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-frontend`
 源码中的 serialization 协议和 vendored nlohmann/json header。
@@ -91,7 +107,7 @@ DeepForge 不定义私有 JSON schema。可以先用仓库 fixture 验证安装�
 cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
-逻辑维度和 packed stride 必须满足：
+`CONV_FPROP` 路径的逻辑维度和 packed stride 必须满足：
 
 | Tensor | 逻辑 dim | packed stride |
 |---|---|---|
@@ -109,6 +125,12 @@ Q = W + pre_w + post_w - S + 1
 X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 `pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 会被
 拒绝，因为它们包含当前 CPU MVP 未实现的执行语义。
+
+基础图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
+tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
+argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
+`in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
+不能替代显式 UID。
 
 ## 5. 编译 artifact
 
@@ -278,12 +300,14 @@ CSV 输出包含编译耗时、单次执行耗时、GFLOP/s，以及相对 scala
 | 找不到 Frontend 或 JSON header | 将 `v1.24.0` checkout 加入 `CMAKE_PREFIX_PATH`，或显式设置 `DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR` |
 | `DFE_SCHEMA_VERSION_MISMATCH` | 使用 Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | 使用 cuDNN Frontend `v1.24.0` 重新序列化 |
-| `DFE_UNSUPPORTED_NODE` | 将 Graph 限制为单个 `CONV_FPROP` |
-| `DFE_INVALID_LAYOUT` | 检查 X/Y NHWC 和 W KRSC 的 packed stride |
-| `DFE_INVALID_SHAPE` | 检查静态正维度和 Conv 输出公式 |
+| `DFE_UNSUPPORTED_NODE` | 使用当前 capability matrix 列出的 tag |
+| `DFE_UNSUPPORTED_OPERATION` | 移除延后 attribute、混合 Conv/基础节点或尚未 lowering 的已识别 tag |
+| `DFE_INVALID_LAYOUT` | 检查 Conv packed stride，或基础 tensor 的正且不重叠 stride |
+| `DFE_INVALID_SHAPE` | 检查静态维度、操作 shape 规则和 Conv 输出公式 |
 | `DFE_INVALID_VARIANT_PACK` | 检查 UID、host pointer、对齐、别名和 workspace |
 | `DFE_UNSUPPORTED_CPU_FEATURE` | 不要强制执行主机不支持的变体；使用自动 `execute` |
 | artifact target 不匹配 | 在目标主机或相同 target triple 环境重新编译 |
 
-完整规范见 [MVP 兼容性与运行契约](design/contracts.md)，artifact 二进制字段见
+规范子集见 [MVP 兼容性与运行契约](design/contracts.md) 和
+[schema 清单](cudnn-graph-schema-inventory.md)，artifact 二进制字段见
 [DFO Artifact 格式](artifact-format.md)。

@@ -6,10 +6,12 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6 已实现。从 strict JSON/UBJSON importer、标准
+**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C2 已实现。从 strict
+JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
-的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。
+的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。Importer 已识别
+v1.24.0 全部 39 个 serialized tag，其中 9 个 tag 目前具有已验证的 CPU 执行子集。
 
 **MVP**：静态、连续、f32 的单个 Conv2D FWD，目标为 x86-64，提供标量、
 AVX2 和 AVX-512 三个代码变体。Machine Dialect、AMX、bf16、多线程及多算子
@@ -82,6 +84,21 @@ backend。Frontend 仓库的 C++ samples/tests 若要单独编译，仍需要 CU
 types、GPU execution 以及与 Frontend `Graph` object 的二进制互换不属于当前
 CPU-only MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
 
+## 支持输入
+
+输入必须满足 `json_version == "1.0"`、`cudnn_frontend_version == 12400`，单个
+文件最大 16 MiB。当前可执行形式为：
+
+- 单个静态 f32 `CONV_FPROP`，X/Y 为 packed NHWC、W 为 packed KRSC，空间
+  stride/dilation 为 1，padding 静态非负；
+- 只由 `RESHAPE`、`TRANSPOSE`、`SLICE`、`CONCATENATE`、`POINTWISE`、
+  `REDUCTION`、`MATMUL`、`RESAMPLE` 组成的静态 f32 图，精确约束见
+  [schema capability matrix](docs/cudnn-graph-schema-inventory.md#5-capability-含义)。
+
+基础图支持 virtual workspace 中间值和正且不重叠的 strided layout。混合
+Conv/基础图、动态 shape、显式 alias、非 f32 tensor 以及其余 30 个已识别 tag
+暂不可执行。
+
 ## 架构
 
 ```text
@@ -91,9 +108,10 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-Tensor + Linalg Dialect
-        |  structured transforms, then one-shot-bufferize once
-        v
+Conv: Tensor + Linalg        基础操作: MemRef + SCF + Math
+        |  one-shot-bufferize once       |
+        +----------------------+----------+
+                               v
 MemRef + Affine/SCF + Vector Dialect
         |  direct Conv2D schedule, C-reduction vectorization
         v
@@ -106,9 +124,9 @@ scalar / AVX2 / AVX-512 object code
 DeepForge Executable::execute(uid_to_host_ptr, workspace)
 ```
 
-MVP 只在 importer、Conv2D schedule、workspace planning 和运行时分发处增加
-DeepForge 逻辑。IR 主干复用上游 MLIR 方言，不引入临时 `cudnn.*` 方言，也
-不经过自定义 Machine Dialect。
+DeepForge 逻辑集中在 import/support validation、语义 lowering、workspace planning
+和运行时分发。IR 主干复用上游 MLIR 方言，不引入临时 `cudnn.*` 方言，也不经过
+自定义 Machine Dialect。
 
 ## 设计文档
 
@@ -261,8 +279,9 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P4 | 已完成：scalar LLVM/object、JIT 和 runtime |
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
+| C0-C2 | 已完成：通用 graph/runtime 基础、39-tag schema 识别、8 个基础执行 tag |
+| C3-C6 | 进行中：训练、attention、data type、动态 metadata 和优化 |
 | Optimize | 待 benchmark 驱动：外层 tiling、padding fusion、并行化 |
-| Later | 多线程、更多算子、上游 X86 AMX/bf16 路径 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 
 ## 参考

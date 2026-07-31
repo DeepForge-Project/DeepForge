@@ -2,8 +2,11 @@
 
 [中文](contracts.md)
 
-This document defines the normative boundary of the DeepForge MVP. If another
-design document conflicts with this one, this document takes precedence.
+This document defines the normative boundary of the original DeepForge Conv2D
+MVP. Post-MVP operation extensions are normative jointly with the
+[schema capability inventory](../cudnn-graph-schema-inventory.en.md) and the
+[coverage plan](../cudnn-graph-coverage-plan.en.md). The stricter applicable
+contract takes precedence if documents conflict.
 
 ## 1. Version Policy
 
@@ -151,6 +154,24 @@ Every dimension product, packed stride, element byte count, and workspace
 offset uses checked arithmetic. Any input outside the representable range of
 `int64_t` or `size_t` returns `DFE_DIMENSION_OVERFLOW`; it must not silently
 wrap in a later MLIR index or pointer computation.
+
+### 3.1 Post-MVP C2 Extension
+
+C2 adds a second executable graph form without weakening the Conv contract: a
+static f32 DAG composed only of `RESHAPE`, `TRANSPOSE`, `SLICE`,
+`CONCATENATE`, `POINTWISE`, `REDUCTION`, `MATMUL`, and `RESAMPLE`. Its exact
+mode, shape, layout, attribute, and alias restrictions are the validated rows
+in the [schema capability inventory](../cudnn-graph-schema-inventory.en.md#5-capability-meaning).
+
+All C2 tensors have positive static dimensions and positive non-overlapping
+strides, explicit UIDs, `NONE` reordering, and no pass-by-value or ragged
+metadata. Virtual tensors are assigned to static workspace. Mixed
+Conv/foundational graphs, `VIEW_ONLY` reshape, in-place concatenate, same-UID
+input/output, MATMUL dimension override or nonzero padding, and RESAMPLE index
+outputs remain unsupported. RESAMPLE `BILINEAR` is also rejected because the
+v1.24.0 serialized fraction representation omits the denominator needed to
+reconstruct fractional scale semantics. The public execution interface in
+section 4 is unchanged; only the runtime's hidden invocation adapter differs.
 
 ## 4. Public Execution Interface
 

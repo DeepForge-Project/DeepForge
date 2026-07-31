@@ -142,7 +142,7 @@ Json transform_graph() {
                       {"slices",
                        Json::array({Json::array({1, 3}),
                                     Json::array({0, 2})})},
-                      {"slice_strides", Json::array({1, 1})}};
+                      {"slice_strides", Json::array({1})}};
     auto concatenate = Json{
         {"tag", "CONCATENATE"},
         {"name", "concatenate"},
@@ -181,6 +181,17 @@ deepforge::import::Status parse_graph(
     deepforge::import::SerializedGraphImporter importer;
     return importer.parse(std::span<std::uint8_t const>(bytes),
                           deepforge::import::InputFormat::kJson, graph);
+}
+
+deepforge::import::Status compile_document(Json const& document) {
+    deepforge::import::SerializedGraph graph;
+    auto status = parse_graph(document, graph);
+    if (status.is_bad()) {
+        return status;
+    }
+    deepforge::compiler::CompilationResult compilation;
+    return deepforge::compiler::compile_graph(
+        graph, deepforge::compiler::CompileOptions{}, compilation);
 }
 
 bool output_matches(std::vector<float> const& output) {
@@ -361,6 +372,45 @@ int main() {
     status = deepforge::compiler::compile_graph(invalid_graph, options, rejected);
     tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
                 "reshape descriptor mismatch is rejected before codegen");
+
+    auto view_only = reshape_graph();
+    view_only["nodes"][0]["reshape_mode"] = "VIEW_ONLY";
+    status = compile_document(view_only);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "VIEW_ONLY reshape is rejected until alias semantics are supported");
+
+    auto in_place_concatenate = transform_graph();
+    in_place_concatenate["nodes"][2]["in_place_index"] = 0;
+    status = compile_document(in_place_concatenate);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "in-place concatenate is rejected until alias semantics are supported");
+
+    auto reused_uid = reshape_graph();
+    reused_uid["nodes"] = Json::array({reused_uid["nodes"][0]});
+    reused_uid["nodes"][0]["outputs"]["Y"] = 1;
+    reused_uid["nodes"][0]["dim"] = Json::array({2, 3});
+    reused_uid["nodes"][0]["stride"] = Json::array({4, 1});
+    reused_uid["tensors"].erase("2");
+    reused_uid["tensors"].erase("3");
+    status = compile_document(reused_uid);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "same-UID input and output are rejected before codegen");
+
+    auto overlapping_layout = reshape_graph();
+    overlapping_layout["tensors"]["3"]["stride"] = Json::array({1, 1});
+    overlapping_layout["nodes"][1]["stride"] = Json::array({1, 1});
+    status = compile_document(overlapping_layout);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidLayout,
+                "overlapping logical tensor layouts are rejected");
+
+    auto empty_slice_strides = transform_graph();
+    empty_slice_strides["nodes"][1]["slice_strides"] = Json::array();
+    status = compile_document(empty_slice_strides);
+    tests.check(status.is_good(),
+                "empty slice strides use the Frontend unit-stride default");
 
     return tests.finish();
 }

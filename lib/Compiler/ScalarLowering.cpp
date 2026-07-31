@@ -5,6 +5,8 @@
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/LinalgToStandard/LinalgToStandard.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
+#include "mlir/Conversion/MathToLibm/MathToLibm.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
@@ -443,6 +445,8 @@ Status lower_to_llvm(mlir::ModuleOp module,
     passes.addPass(mlir::createSCFToControlFlowPass());
     passes.addPass(mlir::memref::createExpandStridedMetadataPass());
     passes.addPass(mlir::createConvertIndexToLLVMPass());
+    passes.addPass(mlir::createConvertMathToLibmPass());
+    passes.addPass(mlir::createConvertMathToLLVMPass());
     passes.addPass(mlir::createArithToLLVMConversionPass());
     passes.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
     passes.addPass(mlir::createConvertFuncToLLVMPass());

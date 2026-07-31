@@ -30,6 +30,9 @@ target_link_libraries(deepforge_compiler
         MLIRIndexDialect
         MLIRIndexToLLVM
         MLIRLinalgTransforms
+        MLIRMathDialect
+        MLIRMathToLLVM
+        MLIRMathToLibm
         MLIRMemRefToLLVM
         MLIRMemRefTransforms
         MLIRReconcileUnrealizedCasts

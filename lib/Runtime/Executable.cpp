@@ -6,8 +6,9 @@
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 
-#include "llvm/Support/Error.h"
+#include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 
@@ -592,6 +593,15 @@ Status load_object_executable(
                         llvm::toString(jit_or_error.takeError()));
         }
         auto jit = std::move(*jit_or_error);
+        auto generator_or_error =
+            llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+                jit->getDataLayout().getGlobalPrefix());
+        if (!generator_or_error) {
+            return fail(ErrorCode::kGraphExecutionFailed, "runtime.jit",
+                        llvm::toString(generator_or_error.takeError()));
+        }
+        jit->getMainJITDylib().addGenerator(
+            std::move(*generator_or_error));
         auto object = llvm::MemoryBuffer::getMemBufferCopy(
             llvm::StringRef(
                 reinterpret_cast<char const*>(objects[index].data()),

@@ -244,7 +244,7 @@ int main(int argc, char** argv) {
                         "operation tag name round-trips");
         }
         tests.check(capability_names.size() == capabilities.size() &&
-                        validated_count == 1 && parsed_count == 38,
+                        validated_count == 9 && parsed_count == 30,
                     "capability tags are unique and all schemas are parsed");
         auto schemas = deepforge::import::operation_schemas();
         std::set<std::string_view> schema_names;

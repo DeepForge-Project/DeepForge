@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Target/LLVM/ModuleToObject.h"
@@ -118,6 +119,7 @@ mlir::DialectRegistry make_registry() {
                     mlir::index::IndexDialect,
                     mlir::linalg::LinalgDialect,
                     mlir::LLVM::LLVMDialect,
+                    mlir::math::MathDialect,
                     mlir::memref::MemRefDialect,
                     mlir::scf::SCFDialect,
                     mlir::tensor::TensorDialect,

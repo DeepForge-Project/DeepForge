@@ -149,9 +149,33 @@ The nine reduction modes are `ADD`, `MUL`, `MIN`, `MAX`, `AMAX`, `AVG`,
 
 ## 5. Capability Meaning
 
-At C1 completion, all 39 rows are `parsed`: JSON and canonical UBJSON are
-accepted and normalized, known malformed fields are rejected, and references
-form an ordered DAG. Only the original static, contiguous, rank-4 f32,
-unit-stride `CONV_FPROP` subset is `validated` and executable. Passing schema
-recognition never implies lowering or CPU execution support. A recognized node
-without lowering returns `kUnsupportedOperation`, not `kUnsupportedNode`.
+All 39 rows are `parsed`: JSON and canonical UBJSON are accepted and
+normalized, known malformed fields are rejected, and references form an
+ordered DAG. At C2 completion, these nine rows have a declared `validated`
+execution subset:
+
+| Tag | Validated CPU subset |
+|---|---|
+| `CONV_FPROP` | Original single-node static packed rank-4 f32 path, unit stride/dilation |
+| `RESHAPE` | `LOGICAL` mode, equal element counts; `VIEW_ONLY` aliasing is deferred |
+| `TRANSPOSE` | Static permutation containing every axis exactly once |
+| `SLICE` | Rank-preserving, in-range half-open bounds and positive integer strides |
+| `CONCATENATE` | Static indexed inputs and non-negative axis; no `in_place_index` |
+| `POINTWISE` | All 50 modes, f32 outputs, trailing-dimension NumPy broadcasting |
+| `REDUCTION` | All 9 modes, rank-preserving output with reduced extents set to one |
+| `MATMUL` | Equal rank of at least two, broadcast batch dimensions, no dimension override, zero padding value |
+| `RESAMPLE` | Three pooling modes plus integer `NEAREST`, with three padding modes and no index output; `BILINEAR` is rejected because v1.24.0 serialization omits fraction denominators |
+
+The eight foundational rows require static, positive, explicitly UID-assigned
+f32 tensors with positive non-overlapping strides, `NONE` reordering, and no
+pass-by-value or ragged metadata. Virtual intermediates use planned workspace.
+Comparison, logical, and `GEN_INDEX` pointwise results are represented as f32
+`0`/`1` or f32 indices in C2; native boolean/integer outputs are deferred to
+C5. Mixed Conv/foundational graphs, explicit aliasing, dynamic shape metadata,
+and shape overrides are deferred.
+
+The remaining 30 rows stay `parsed`. Passing schema recognition never implies
+lowering or CPU execution support. A recognized node without lowering returns
+`kUnsupportedOperation`, not `kUnsupportedNode`. `validated` always refers to
+the declared subset above, not every legal cuDNN backend configuration for the
+tag.

@@ -2,6 +2,11 @@
 
 [中文](development-plan.md)
 
+This is the completed historical P0-P6 MVP plan. Current post-MVP work follows
+the bilingual [C0-C6 operation coverage plan](cudnn-graph-coverage-plan.en.md);
+the historical Conv constraints below remain the regression baseline rather
+than the complete current capability claim.
+
 ## 1. Goal and Baseline
 
 This plan turns the design documents into an executable development sequence

@@ -2,6 +2,10 @@
 
 [English](development-plan.en.md)
 
+本文是已经完成的历史 P0-P6 MVP 方案。当前 MVP 后开发按中英文
+[C0-C6 全操作覆盖方案](cudnn-graph-coverage-plan.md)执行；下文 Conv 约束仍是
+回归基线，不代表当前完整 capability。
+
 ## 1. 目标和基线
 
 本方案把当前设计文档转成可执行的开发顺序。它针对的是 MVP，不扩大支持范围。

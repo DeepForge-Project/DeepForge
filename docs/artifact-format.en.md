@@ -69,6 +69,9 @@ i64 x_uid, w_uid, y_uid
 i64 x_shape[4], w_shape[4], y_shape[4], padded_x_shape[4]
 i64 pre_padding[2], post_padding[2], stride[2], dilation[2]
 
+# adapter_kind 1: generic ranked-memref pointer-table adapter
+# adapter_metadata_size is zero; the tensor argument table is sufficient
+
 u64 workspace_size
 u64 workspace_alignment
 u32 workspace_allocation_count
@@ -93,9 +96,12 @@ u64 fnv1a_64_checksum        # covers every preceding byte
 
 The argument table and the length-delimited adapter section are separate on
 purpose. The table is operation-independent. Adapter kind `0` preserves the
-current ranked-memref Conv2D invocation while later generic wrappers can add a
-new adapter kind without placing operation-specific fields in the top-level
-format. Readers reject unknown adapter kinds.
+ranked-memref Conv2D invocation. Adapter kind `1` is used by foundational
+multi-node graphs and carries no operation-specific payload: the runtime builds
+one ranked-memref descriptor per ordered argument plus a workspace descriptor,
+then invokes a hidden pointer-table wrapper. This internal adapter does not
+change the public handle + UID variant-pack + workspace call. Readers reject
+unknown adapter kinds and nonempty kind-1 metadata.
 
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
@@ -110,7 +116,8 @@ supported by the current runtime, and an exact target-triple match with the
 host. Each object is added to a separate LLVM ORC `LLJIT` to prevent similar
 internal symbols in three variants from colliding. After resolving the
 C-interface wrapper, the loader passes entries, metadata, and workspace plan to
-the same runtime adapter used by the development-time MLIR ExecutionEngine.
+the corresponding runtime adapter. Objects that contain lowered MLIR math
+operations resolve their standard `libm` symbols from the current process.
 
 Execution validates the ordered argument table, UIDs, null pointers, per-tensor
 alignment and byte ranges, 64-byte workspace alignment, and integer overflow.

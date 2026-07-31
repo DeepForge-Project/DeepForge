@@ -119,6 +119,22 @@ else()
 endif()
 add_test(NAME deepforge-foundational-ops COMMAND deepforge_foundational_ops_test)
 
+add_executable(deepforge_foundational_math_test
+    FoundationalMathOpsTest.cpp
+)
+target_link_libraries(deepforge_foundational_math_test PRIVATE DeepForge::Compiler)
+target_include_directories(deepforge_foundational_math_test SYSTEM
+    PRIVATE
+        "${DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR}"
+)
+if(MSVC)
+    target_compile_options(deepforge_foundational_math_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_foundational_math_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-foundational-math COMMAND deepforge_foundational_math_test)
+
 if(TARGET deepforge-compile)
     set(DEEPFORGE_CLI_SCRATCH "${CMAKE_CURRENT_BINARY_DIR}/cli-scratch")
     file(MAKE_DIRECTORY "${DEEPFORGE_CLI_SCRATCH}")

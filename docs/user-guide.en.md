@@ -3,8 +3,8 @@
 [中文](user-guide.zh-CN.md)
 
 This guide is for users compiling and executing cuDNN Frontend serialized
-Graphs with the DeepForge CPU MVP. See the [design overview](design/overview.en.md)
-for implementation details.
+Graphs on the DeepForge CPU runtime. See the
+[design overview](design/overview.en.md) for implementation details.
 
 ## 1. Supported Scope
 
@@ -15,16 +15,33 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operation | Exactly one `CONV_FPROP` |
-| Tensors | Static rank-4, f32, non-virtual, not pass-by-value |
-| Layout | Packed NHWC X/Y and packed KRSC W |
+| Operations | The original one-node `CONV_FPROP` path, or a graph made only from the eight C2 foundational tags below |
+| Foundational tensors | Static rank 1-64, f32, explicit UID; virtual intermediates are supported |
+| Foundational layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
 | Convolution | Cross-correlation, stride 1, dilation 1, static non-negative padding |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
 | Output | LLVM IR or a `.dfo` artifact containing three native objects |
 
-Dynamic shapes, grouped/depthwise convolution, bias or activation fusion,
-other operations, GPU execution, CUDA device pointers, bf16, AMX, and internal
-multithreading are not supported. The maximum input file size is 16 MiB.
+The foundational operation subset is:
+
+| Tag | Current constraints |
+|---|---|
+| `RESHAPE` | `LOGICAL` only; equal element count |
+| `TRANSPOSE` | Complete static permutation |
+| `SLICE` | In-range half-open bounds and positive integer strides |
+| `CONCATENATE` | Numbered inputs, non-negative axis, no in-place mode |
+| `POINTWISE` | All 50 v1.24.0 modes with trailing-dimension NumPy broadcasting |
+| `REDUCTION` | All 9 modes; same input/output rank and reduced extents equal to one |
+| `MATMUL` | Equal rank >= 2, broadcast batch dimensions, no M/N/K override, zero padding value |
+| `RESAMPLE` | Three pooling modes plus integer `NEAREST`; three padding modes and no index output. `BILINEAR` is rejected because v1.24.0 drops fraction denominators during serialization |
+
+Comparison, logical, and generated-index pointwise outputs use f32 `0`/`1` or
+f32 index values in this stage. A graph cannot yet mix `CONV_FPROP` with the
+foundational tags. Dynamic shapes, explicit aliasing, grouped/depthwise
+convolution, other tags or data types, GPU execution, CUDA device pointers,
+AMX, and internal multithreading are not supported. The maximum input file
+size is 16 MiB. The exact per-tag matrix is in the
+[schema inventory](cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 The CUDA Toolkit and cuDNN backend are not dependencies. The project uses only
 the serialization protocol and vendored nlohmann/json header from the open
@@ -100,7 +117,7 @@ verify an installation:
 cp test/fixtures/conv2d_f32_c17.json /tmp/graph.json
 ```
 
-Logical dimensions and packed strides must be:
+For the `CONV_FPROP` path, logical dimensions and packed strides must be:
 
 | Tensor | Logical dimensions | Packed stride |
 |---|---|---|
@@ -119,6 +136,13 @@ X, W, and Y must have explicit, distinct UIDs. Non-empty UBJSON
 `pass_by_values`, `workspace_modifications`, or `variant_pack_replacements`
 are rejected because they carry execution semantics not implemented by the
 CPU MVP.
+
+For a foundational graph, every non-virtual tensor that is read or written
+must be present in the execute-time UID map. Virtual tensors are omitted from
+the map and allocated in the queried workspace. Writable buffers must not
+overlap another argument or workspace. `VIEW_ONLY`, `in_place_index`, and a
+node that reuses one UID as both input and output are rejected until alias
+semantics are implemented. Tensor names do not replace explicit UIDs.
 
 ## 5. Compile an Artifact
 
@@ -295,13 +319,14 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 | Frontend or JSON header is missing | Add the `v1.24.0` checkout to `CMAKE_PREFIX_PATH`, or set `DEEPFORGE_CUDNN_FRONTEND_INCLUDE_DIR` explicitly |
 | `DFE_SCHEMA_VERSION_MISMATCH` | Use Graph JSON schema `1.0` |
 | `DFE_FRONTEND_VERSION_MISMATCH` | Re-serialize with cuDNN Frontend `v1.24.0` |
-| `DFE_UNSUPPORTED_NODE` | Reduce the Graph to one `CONV_FPROP` |
-| `DFE_INVALID_LAYOUT` | Check packed NHWC X/Y and packed KRSC W strides |
-| `DFE_INVALID_SHAPE` | Check positive static dimensions and the Conv output formula |
+| `DFE_UNSUPPORTED_NODE` | Use a tag listed in the current capability matrix |
+| `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, mixed Conv/foundational nodes, or a recognized but unlowered tag |
+| `DFE_INVALID_LAYOUT` | Check packed Conv strides or positive non-overlapping foundational strides |
+| `DFE_INVALID_SHAPE` | Check static dimensions, operation shape rules, and the Conv output formula |
 | `DFE_INVALID_VARIANT_PACK` | Check UIDs, host pointers, alignment, aliasing, and workspace |
 | `DFE_UNSUPPORTED_CPU_FEATURE` | Do not force an unsupported variant; use automatic `execute` |
 | Artifact target mismatch | Recompile on the target host or an identical target triple |
 
-See the [MVP compatibility and runtime contract](design/contracts.en.md) for the
-normative specification and [DFO Artifact Format](artifact-format.en.md) for the
-binary layout.
+See the [MVP compatibility and runtime contract](design/contracts.en.md) and
+[schema inventory](cudnn-graph-schema-inventory.en.md) for the normative
+subsets, and [DFO Artifact Format](artifact-format.en.md) for the binary layout.

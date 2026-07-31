@@ -166,6 +166,8 @@ unknown; unlowered tags report recognized-but-not-executable.
 
 ### C2. Foundational executable operations
 
+**Status:** completed and validated on 2026-07-31.
+
 **Work:** implement static-shape f32 execution for `RESHAPE`, `TRANSPOSE`,
 `SLICE`, `CONCATENATE`, all applicable `POINTWISE` modes, all applicable
 `REDUCTION` modes, `MATMUL`, and `RESAMPLE`. Implement NumPy-style broadcasting

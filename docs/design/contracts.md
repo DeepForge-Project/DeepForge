@@ -2,7 +2,10 @@
 
 [English](contracts.en.md)
 
-本文档是 DeepForge MVP 的规范性边界。其他设计文档与本文冲突时，以本文为准。
+本文档是 DeepForge 原始 Conv2D MVP 的规范性边界。MVP 后的算子扩展由本文、
+[schema capability 清单](../cudnn-graph-schema-inventory.md) 和
+[全操作覆盖方案](../cudnn-graph-coverage-plan.md) 共同约束；发生冲突时采用更严格的
+适用契约。
 
 ## 1. 版本策略
 
@@ -133,6 +136,23 @@ Q = W + pre_w + post_w - S + 1
 所有维度乘积、packed stride、元素字节数和 workspace offset 都必须使用 checked
 arithmetic 计算；任何超出 `int64_t`/`size_t` 可表示范围的输入返回
 `DFE_DIMENSION_OVERFLOW`，不能在后续 MLIR index 或指针计算中静默回绕。
+
+### 3.1 MVP 后 C2 扩展
+
+C2 在不放宽 Conv 契约的前提下增加第二种可执行图：只由 `RESHAPE`、
+`TRANSPOSE`、`SLICE`、`CONCATENATE`、`POINTWISE`、`REDUCTION`、
+`MATMUL` 和 `RESAMPLE` 构成的静态 f32 DAG。精确 mode、shape、layout、
+attribute 和 alias 约束以
+[schema capability 清单](../cudnn-graph-schema-inventory.md#5-capability-含义)中
+已验证行的声明为准。
+
+C2 tensor 必须具有正的静态维度、正且不重叠的 stride、显式 UID、`NONE`
+reorder，并且不是 pass-by-value 或 ragged tensor。virtual tensor 使用静态规划的
+workspace。混合 Conv/基础图、`VIEW_ONLY` reshape、in-place concatenate、同 UID
+输入输出、MATMUL 维度 override 或非零 padding、RESAMPLE index 输出仍不支持。
+RESAMPLE `BILINEAR` 也会被拒绝，因为 v1.24.0 序列化 fraction 表示省略了恢复
+分数缩放语义所需的 denominator。第 4 节公开执行接口保持不变，差异只存在于
+runtime 隐藏的 invocation adapter。
 
 ## 4. 对外运行接口
 

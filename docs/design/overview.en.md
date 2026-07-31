@@ -8,8 +8,13 @@ DeepForge compiles a serialized Graph from a pinned cuDNN Frontend version into
 CPU object code. The MVP implements only a static, packed, f32 Conv2D forward
 operation, while directly adopting the cuDNN Frontend Graph serialization and
 UID variant-pack concepts for its input protocol and execution interface.
+The current post-MVP C2 implementation also executes static f32 foundational
+graphs over eight additional serialized tags. It preserves the public runtime
+interface and uses only upstream MemRef, SCF, Arith, Math, and LLVM dialects.
 
-See [contracts.en.md](contracts.en.md) for the normative support boundary.
+See [contracts.en.md](contracts.en.md) and the
+[schema capability inventory](../cudnn-graph-schema-inventory.en.md) for the
+normative support boundaries.
 
 ## 2. Design Principles
 
@@ -71,6 +76,12 @@ See [contracts.en.md](contracts.en.md) for the normative support boundary.
 +----------------------------------------------------------------+
 ```
 
+The diagram shows the original Conv path. After canonical import, a C2
+foundational graph takes a parallel standard-MLIR path directly through static
+MemRef/SCF/Arith/Math IR, planned virtual-tensor workspace views, and the same
+LLVM object pipeline. It does not run Conv's Tensor/Linalg bufferization or
+direct-conv schedule.
+
 ### 3.1 Importer
 
 The importer is the boundary from files and the object model into MLIR; it is
@@ -83,8 +94,9 @@ not an MLIR pass. It:
 - ignores in-document GPU-only plan metadata while rejecting nonempty fields
   that carry unsupported execution semantics;
 - resolves tensor and node references plus stable UIDs;
-- validates the MVP support matrix;
-- directly builds standard Tensor/Linalg IR.
+- validates the applicable capability subset;
+- builds standard Tensor/Linalg IR for Conv or standard MemRef/SCF/Math IR for
+  a foundational graph.
 
 There is no temporary `cudnn.conv_fwd` operation. One-Shot Bufferize therefore
 never encounters an unknown custom operation without a

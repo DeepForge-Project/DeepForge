@@ -127,9 +127,11 @@ DeepForge 逻辑。IR 主干复用上游 MLIR 方言，不引入临时 `cudnn.*`
 | [Conv2D 示例](docs/design/example-conv2d.md) | 端到端 IR 示例 |
 | [DFO artifact](docs/artifact-format.md) | `.dfo` 二进制布局、ORC 装载和信任边界 |
 | [性能基线](docs/benchmark-baseline.md) | small/medium/large profile 与复测方法 |
+| [cuDNN Graph 全操作覆盖方案](docs/cudnn-graph-coverage-plan.md) | MVP 后的通用架构、操作阶段和验收门槛 |
 
 开发顺序、阶段退出条件和测试门见
-[开发方案](docs/development-plan.md)。
+[开发方案](docs/development-plan.md)；全操作扩展见
+[cuDNN Graph 全操作覆盖方案](docs/cudnn-graph-coverage-plan.md)。
 
 ## 构建
 

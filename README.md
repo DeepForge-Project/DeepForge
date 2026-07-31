@@ -161,6 +161,7 @@ Dialect.
 | [DFO Artifact Format](docs/artifact-format.en.md) | Binary layout, ORC loading, and trust boundary |
 | [Benchmark Baseline](docs/benchmark-baseline.en.md) | Small, medium, and large profiles and reproduction steps |
 | [Development Plan](docs/development-plan.en.md) | Phase order, exit criteria, and test gates |
+| [cuDNN Graph Operation Coverage Plan](docs/cudnn-graph-coverage-plan.en.md) | Approved post-MVP architecture, operation phases, and acceptance gates |
 
 ## Build
 

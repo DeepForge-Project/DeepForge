@@ -12,6 +12,8 @@ namespace deepforge::compiler::numeric {
 
 [[nodiscard]] bool is_cpu_storage_type(import::DataType type) noexcept;
 [[nodiscard]] bool is_packed_type(import::DataType type) noexcept;
+[[nodiscard]] bool is_supported_reordering(
+    import::TensorDesc const& tensor) noexcept;
 
 [[nodiscard]] ::mlir::Type storage_element_type(
     ::mlir::MLIRContext& context,

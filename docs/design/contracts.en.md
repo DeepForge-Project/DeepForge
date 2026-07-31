@@ -271,7 +271,8 @@ FP8/MXFP8 SDPA is static rank-4 BHSD with GQA and supplied log-sum-exp Stats in
 backward. C5 excludes padding, dropout, ALiBi, block masks, sink tokens, ragged
 metadata, and unlisted optional ports. MXFP8 block size is 32; C5 accepts
 logical `NONE` scale ordering and uses an f32 dS reference approximation.
-Frontend-produced `F8_128x4` physical scale ordering remains a C6 gate.
+Frontend-produced `F8_128x4` physical scale ordering entered through the C6
+extension below.
 
 Validated MoE execution requires runtime `FirstTokenOffset` values to start at
 zero, be nondecreasing, and remain in `[0,T]`. This is a caller precondition:
@@ -280,8 +281,31 @@ execute ABI intentionally does not inspect tensor contents before dispatch.
 
 C2-C5 nodes may be mixed when both ends support the connected tensor type.
 The public UID variant-pack and workspace ABI is unchanged. Dynamic/override
-shapes, pass-by-value, aliasing, ragged/reordered storage, and paged/cache
-metadata remain unsupported.
+shapes, pass-by-value, aliasing, ragged storage, reorder formats outside the
+following scale subset, and paged/cache metadata remain unsupported.
+
+### 3.5 C6 F8_128x4 Physical Scale Extension
+
+`F8_128x4` is executable only for an E4M3/E8M0 scale input to
+`BLOCK_SCALE_DEQUANTIZE`, an E4M3/E8M0 scale output from
+`BLOCK_SCALE_QUANTIZE`, and E8M0 `Descale_*` inputs to
+`SDPA_MXFP8_FWD`/`SDPA_MXFP8_BWD`. It is rejected on all data ports. `INT8x32`
+and `F16x16` remain recognized but non-executable.
+
+The final two descriptor axes represent M and K in either order. M and K must
+be padded to multiples of 128 and 4 respectively. K has stride 1, M has stride
+K, and all leading axes are packed. Given flattened leading coordinate `l`,
+the physical byte offset is
+
+```text
+((((l * (M / 128) + m / 128) * (K / 4) + k / 4) * 512)
+ + (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4).
+```
+
+The runtime pointer covers the complete padded descriptor span. Quantize
+initializes that complete span to numeric one, E4M3 `0x38` or E8M0 `0x7f`,
+before overwriting logical scale coordinates. The public execute and workspace
+ABI is unchanged.
 
 ## 4. Public Execution Interface
 

@@ -192,8 +192,9 @@ model。
 space、OpenMP、多算子 fusion、动态 shape、非 packed stride、NCHW physical
 layout、grouped/depthwise Conv、GPU backend。MVP 后 C2-C5 已独立加入正的任意
 stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能力子集。C6
-仍负责 dynamic/override shape、ragged/physical reorder metadata、paged/cache
-复合语义、threading 和广泛 fusion。
+已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码；仍负责
+dynamic/override shape、ragged/其他 physical reorder metadata、paged/cache 复合
+语义、threading 和广泛 fusion。
 
 延后不等于删除设计方向。每项在拥有明确语义、上游能力评估、正确性测试和性能
 基线后单独引入。

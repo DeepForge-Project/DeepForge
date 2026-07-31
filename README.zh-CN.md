@@ -103,10 +103,11 @@ normalization forward/backward、batch statistics、running-stat 更新、确定
 Bernoulli RNG、RoPE forward/backward 和 f32 SDPA forward/backward。C5 在 9 个
 特殊 tag 所需端口加入软件 FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion 和 packed
 storage。C4 sequence metadata 使用 INT32 length 和 scalar INT64 seed/offset
-tensor。支持 virtual workspace 中间值和正且不重叠的 strided layout。动态/override
-shape、显式 alias、scalar pass-by-value、ragged tensor、tensor reorder、paged/cache
-attention metadata、分布式 peer statistics 和文档列出的可选特殊 attention 特性
-暂不可执行。
+tensor。支持 virtual workspace 中间值和正且不重叠的 strided layout。C6 已在文档
+指定的 FP8 block-scale 和 E8M0 MXFP8 scale 端口解码 Frontend `F8_128x4` 物理布局。动态/override
+shape、显式 alias、scalar pass-by-value、ragged tensor、其他 tensor reorder、
+paged/cache attention metadata、分布式 peer statistics 和文档列出的可选特殊
+attention 特性暂不可执行。
 
 ## 架构
 

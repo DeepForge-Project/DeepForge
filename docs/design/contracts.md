@@ -237,7 +237,7 @@ FP8/MXFP8 SDPA 使用静态 rank-4 BHSD/GQA，backward 读取外部提供的 log
 Stats。C5 不包含 padding、dropout、ALiBi、block mask、sink token、ragged metadata
 和未列出的可选端口。MXFP8 block size 固定为 32；C5 接受逻辑 `NONE` scale
 ordering，并使用 f32 dS reference approximation。Frontend producer 生成的
-`F8_128x4` 物理 scale ordering 仍是 C6 gate。
+`F8_128x4` 物理 scale ordering 通过下述 C6 扩展进入执行范围。
 
 已验证 MoE 执行要求运行时 `FirstTokenOffset` 从 0 开始、单调非降且位于
 `[0,T]`。这是调用者前置条件：graph compiler 会验证 INT32 `[E,1,1]`
@@ -245,7 +245,28 @@ descriptor，但公开 execute ABI 按设计不会在 dispatch 前扫描 tensor 
 
 连接 tensor type 同时受两端支持时，C2-C5 node 可以混合。公开 UID variant-pack
 和 workspace ABI 不变。Dynamic/override shape、pass-by-value、alias、
-ragged/reordered storage 和 paged/cache metadata 仍不支持。
+ragged storage、下述 scale 子集以外的 reorder format 和 paged/cache metadata
+仍不支持。
+
+### 3.5 C6 F8_128x4 物理 scale 扩展
+
+`F8_128x4` 只在以下端口可执行：`BLOCK_SCALE_DEQUANTIZE` 的 E4M3/E8M0 scale
+输入、`BLOCK_SCALE_QUANTIZE` 的 E4M3/E8M0 scale 输出，以及 `SDPA_MXFP8_FWD`/
+`SDPA_MXFP8_BWD` 的 E8M0 `Descale_*` 输入。所有 data 端口均拒绝该布局；
+`INT8x32` 和 `F16x16` 保持“可识别但不可执行”。
+
+Descriptor 最后两个 axis 是顺序可互换的 M 和 K。M/K 必须分别 padding 到 128/4
+的倍数；K stride 为 1，M stride 为 K，全部 leading axis 按 packed 排列。将
+leading coordinate 展平为 `l` 后，物理 byte offset 为：
+
+```text
+((((l * (M / 128) + m / 128) * (K / 4) + k / 4) * 512)
+ + (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4).
+```
+
+运行时 pointer 必须覆盖完整 padded descriptor span。Quantize 先将完整 span
+初始化为数值 one（E4M3 为 `0x38`、E8M0 为 `0x7f`），再覆盖逻辑 scale
+coordinate；公开 execute 和 workspace ABI 不变。
 
 ## 4. 对外运行接口
 

@@ -358,17 +358,22 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
         return unsupported(path,
                            "pass-by-value tensors are not executable yet");
     }
-    if (tensor.reordering_type != "NONE" || tensor.ragged_offset_uid ||
-        tensor.ragged_offset_name) {
+    if (!numeric::is_supported_reordering(tensor)) {
         return unsupported(path,
-                           "reordered and ragged tensors are deferred to C6");
+                           "tensor reordering has no CPU physical-layout "
+                           "implementation");
+    }
+    if (tensor.ragged_offset_uid || tensor.ragged_offset_name) {
+        return unsupported(path, "ragged tensors are not enabled in this C6 "
+                                 "increment");
     }
     if (tensor.dim.empty() || tensor.dim.size() > 64 ||
         tensor.dim.size() != tensor.stride.size()) {
         return fail(ErrorCode::kInvalidShape, path,
                     "rank must be between 1 and 64");
     }
-    if (!has_non_overlapping_layout(tensor)) {
+    if (tensor.reordering_type == "NONE" &&
+        !has_non_overlapping_layout(tensor)) {
         return fail(ErrorCode::kInvalidLayout, path,
                     "CPU execution requires a non-overlapping strided layout");
     }

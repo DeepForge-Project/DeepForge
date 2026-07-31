@@ -82,6 +82,29 @@ Json tensor(std::string name,
                 {"uid_assigned", true}};
 }
 
+Json f8_reordered_scale(std::string name,
+                        std::int64_t uid,
+                        bool transposed = false) {
+    auto result = transposed
+                      ? tensor(std::move(name), uid, {1, 1, 4, 128},
+                               "FP8_E8M0", false, {512, 512, 1, 4})
+                      : tensor(std::move(name), uid, {1, 1, 128, 4},
+                               "FP8_E8M0", false, {512, 512, 4, 1});
+    result["reordering_type"] = "F8_128x4";
+    return result;
+}
+
+std::size_t f8_128x4_offset(std::size_t m,
+                            std::size_t k,
+                            std::size_t leading,
+                            std::size_t m_extent,
+                            std::size_t k_extent) {
+    auto const m_blocks = m_extent / 128;
+    auto const k_blocks = k_extent / 4;
+    return (((leading * m_blocks + m / 128) * k_blocks + k / 4) * 512) +
+           (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4;
+}
+
 Json context(std::string name) {
     return Json{{"name", std::move(name)},
                 {"compute_data_type", "FLOAT"},
@@ -164,6 +187,60 @@ Json block_quantize_graph() {
               {"axis", 1}};
     return graph_document(5002, "block-quantize", Json::array({node}),
                           std::move(tensors));
+}
+
+Json reordered_block_dequantize_graph() {
+    Json tensors = Json::object();
+    tensors["51"] = tensor("X", 51, {128, 32}, "FP8_E4M3");
+    tensors["52"] = tensor("scale", 52, {128, 4}, "FP8_E8M0", false,
+                            {4, 1});
+    tensors["52"]["reordering_type"] = "F8_128x4";
+    tensors["53"] = tensor("Y", 53, {128, 32}, "FLOAT");
+    Json node{{"tag", "BLOCK_SCALE_DEQUANTIZE"},
+              {"name", "reordered_dequantize"},
+              {"inputs", Json::object({{"X", 51}, {"scale", 52}})},
+              {"outputs", Json::object({{"Y", 53}})},
+              {"compute_data_type", "FLOAT"},
+              {"block_size", Json::array({32})},
+              {"is_negative_scale", false}};
+    return graph_document(5014, "reordered-block-dequantize",
+                          Json::array({node}), std::move(tensors));
+}
+
+Json reordered_block_quantize_graph() {
+    Json tensors = Json::object();
+    tensors["61"] = tensor("X", 61, {128, 32}, "FLOAT");
+    tensors["62"] = tensor("Y", 62, {128, 32}, "FP8_E4M3");
+    tensors["63"] = tensor("scale", 63, {128, 4}, "FP8_E8M0", false,
+                            {4, 1});
+    tensors["63"]["reordering_type"] = "F8_128x4";
+    Json node{{"tag", "BLOCK_SCALE_QUANTIZE"},
+              {"name", "reordered_quantize"},
+              {"inputs", Json::object({{"X", 61}})},
+              {"outputs", Json::object({{"Y", 62}, {"scale", 63}})},
+              {"compute_data_type", "FLOAT"},
+              {"block_size", 32},
+              {"axis", 1}};
+    return graph_document(5015, "reordered-block-quantize",
+                          Json::array({node}), std::move(tensors));
+}
+
+Json transposed_reordered_block_dequantize_graph() {
+    Json tensors = Json::object();
+    tensors["71"] = tensor("X", 71, {32, 128}, "FP8_E4M3");
+    tensors["72"] = tensor("scale", 72, {4, 128}, "FP8_E8M0", false,
+                            {1, 4});
+    tensors["72"]["reordering_type"] = "F8_128x4";
+    tensors["73"] = tensor("Y", 73, {32, 128}, "FLOAT");
+    Json node{{"tag", "BLOCK_SCALE_DEQUANTIZE"},
+              {"name", "transposed_reordered_dequantize"},
+              {"inputs", Json::object({{"X", 71}, {"scale", 72}})},
+              {"outputs", Json::object({{"Y", 73}})},
+              {"compute_data_type", "FLOAT"},
+              {"block_size", Json::array({32, 1})},
+              {"is_negative_scale", false}};
+    return graph_document(5017, "transposed-reordered-block-dequantize",
+                          Json::array({node}), std::move(tensors));
 }
 
 Json fp4_roundtrip_graph() {
@@ -311,11 +388,11 @@ Json sdpa_fp8_forward_graph(bool mxfp8) {
         {{"Q", base + 1}, {"K", base + 2}, {"V", base + 3}});
     if (mxfp8) {
         tensors[std::to_string(base + 4)] =
-            tensor("Descale_Q", base + 4, {1, 1, 2, 1}, "FP8_E8M0");
+            f8_reordered_scale("Descale_Q", base + 4);
         tensors[std::to_string(base + 5)] =
-            tensor("Descale_K", base + 5, {1, 1, 2, 1}, "FP8_E8M0");
+            f8_reordered_scale("Descale_K", base + 5);
         tensors[std::to_string(base + 6)] =
-            tensor("Descale_V", base + 6, {1, 1, 1, 2}, "FP8_E8M0");
+            f8_reordered_scale("Descale_V", base + 6, true);
         inputs.update(Json{{"Descale_Q", base + 4},
                            {"Descale_K", base + 5},
                            {"Descale_V", base + 6}});
@@ -390,13 +467,13 @@ Json sdpa_fp8_backward_graph(bool mxfp8) {
         for (auto const& name : {"Descale_Q", "Descale_K", "Descale_V",
                                  "Descale_dO"}) {
             tensors[std::to_string(base + next)] =
-                tensor(name, base + next, {1, 1, 2, 1}, "FP8_E8M0");
+                f8_reordered_scale(name, base + next);
             inputs[name] = base + next++;
         }
         for (auto const& name : {"Descale_Q_T", "Descale_K_T",
                                  "Descale_dO_T"}) {
             tensors[std::to_string(base + next)] =
-                tensor(name, base + next, {1, 1, 1, 2}, "FP8_E8M0");
+                f8_reordered_scale(name, base + next, true);
             inputs[name] = base + next++;
         }
     } else {
@@ -585,6 +662,119 @@ void run_block_tests(TestRunner& tests) {
                              {0x3c00, 0x4000, 0xc400, 0x4800}),
                     "BF16 load and F16 store preserve exact block-scaled values");
     }
+
+    deepforge::compiler::CompilationResult reordered_dequantize;
+    status = compile_document(reordered_block_dequantize_graph(),
+                              reordered_dequantize);
+    tests.good(status, "compile F8_128x4 block-scale dequantize");
+    if (status.is_good() && reordered_dequantize.executable) {
+        std::vector<std::uint8_t> x(128 * 32, 0x38);
+        std::vector<std::uint8_t> scale(128 * 4, 127);
+        scale[f8_128x4_offset(32, 0, 0, 128, 4)] = 128;
+        scale[f8_128x4_offset(127, 0, 0, 128, 4)] = 126;
+        std::vector<float> y(128 * 32, -99.0F);
+        deepforge::runtime::VariantPack pack{
+            {51, x.data()}, {52, scale.data()}, {53, y.data()}};
+        status = reordered_dequantize.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+        tests.good(status, "execute F8_128x4 block-scale dequantize");
+        std::vector<float> expected(128 * 32, 1.0F);
+        std::fill_n(expected.begin() + 32 * 32, 32, 2.0F);
+        std::fill_n(expected.begin() + 127 * 32, 32, 0.5F);
+        tests.check(close_vectors(y, expected) &&
+                        f8_128x4_offset(32, 0, 0, 128, 4) == 4 &&
+                        f8_128x4_offset(127, 0, 0, 128, 4) == 508,
+                    "F8_128x4 scale bytes use the CUTLASS 32x4xrest mapping");
+    }
+
+    deepforge::compiler::CompilationResult transposed_dequantize;
+    status = compile_document(transposed_reordered_block_dequantize_graph(),
+                              transposed_dequantize);
+    tests.good(status, "compile transposed F8_128x4 block-scale dequantize");
+    if (status.is_good() && transposed_dequantize.executable) {
+        std::vector<std::uint8_t> x(32 * 128, 0x38);
+        std::vector<std::uint8_t> scale(4 * 128, 127);
+        scale[f8_128x4_offset(32, 0, 0, 128, 4)] = 128;
+        scale[f8_128x4_offset(127, 0, 0, 128, 4)] = 126;
+        std::vector<float> y(32 * 128, -99.0F);
+        deepforge::runtime::VariantPack pack{
+            {71, x.data()}, {72, scale.data()}, {73, y.data()}};
+        status = transposed_dequantize.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+        tests.good(status, "execute transposed F8_128x4 dequantize");
+        std::vector<float> expected(32 * 128, 1.0F);
+        for (std::size_t row = 0; row < 32; ++row) {
+            expected[row * 128 + 32] = 2.0F;
+            expected[row * 128 + 127] = 0.5F;
+        }
+        tests.check(close_vectors(y, expected),
+                    "transposed KxM descriptor uses the same physical tile");
+    }
+
+    deepforge::compiler::CompilationResult reordered_quantize;
+    status = compile_document(reordered_block_quantize_graph(),
+                              reordered_quantize);
+    tests.good(status, "compile F8_128x4 block-scale quantize");
+    if (status.is_good() && reordered_quantize.executable) {
+        std::vector<float> x(128 * 32, 448.0F);
+        std::fill_n(x.begin() + 32 * 32, 32, 224.0F);
+        std::fill_n(x.begin() + 127 * 32, 32, 112.0F);
+        std::vector<std::uint8_t> y(128 * 32, 0);
+        std::vector<std::uint8_t> scale(128 * 4, 0);
+        deepforge::runtime::VariantPack pack{
+            {61, x.data()}, {62, y.data()}, {63, scale.data()}};
+        status = reordered_quantize.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+        tests.good(status, "execute F8_128x4 block-scale quantize");
+        bool scale_matches = true;
+        for (std::size_t m = 0; m < 128; ++m) {
+            for (std::size_t k = 0; k < 4; ++k) {
+                auto expected = static_cast<std::uint8_t>(127);
+                if (k == 0 && m == 32) expected = 126;
+                if (k == 0 && m == 127) expected = 125;
+                scale_matches = scale_matches &&
+                                scale[f8_128x4_offset(m, k, 0, 128, 4)] ==
+                                    expected;
+            }
+        }
+        tests.check(y == std::vector<std::uint8_t>(128 * 32, 0x7e) &&
+                        scale_matches,
+                    "reordered quantize writes logical scales and initializes "
+                    "all padded scale slots");
+    }
+
+    auto reordered_fp4_document = reordered_block_quantize_graph();
+    reordered_fp4_document["graph_uid"] = 5016;
+    reordered_fp4_document["tensors"]["62"]["data_type"] = "FP4_E2M1";
+    reordered_fp4_document["tensors"]["63"]["data_type"] = "FP8_E4M3";
+    deepforge::compiler::CompilationResult reordered_fp4_quantize;
+    status = compile_document(reordered_fp4_document,
+                              reordered_fp4_quantize);
+    tests.good(status, "compile E4M3 F8_128x4 scale quantize");
+    if (status.is_good() && reordered_fp4_quantize.executable) {
+        std::vector<float> x(128 * 32, 6.0F);
+        std::fill_n(x.begin() + 32 * 32, 32, 3.0F);
+        std::vector<std::uint8_t> y(128 * 32 / 2, 0);
+        std::vector<std::uint8_t> scale(128 * 4, 0);
+        deepforge::runtime::VariantPack pack{
+            {61, x.data()}, {62, y.data()}, {63, scale.data()}};
+        status = reordered_fp4_quantize.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+        tests.good(status, "execute E4M3 F8_128x4 scale quantize");
+        bool scale_matches = true;
+        for (std::size_t m = 0; m < 128; ++m) {
+            for (std::size_t k = 0; k < 4; ++k) {
+                auto const expected = static_cast<std::uint8_t>(
+                    k == 0 && m == 32 ? 0x30 : 0x38);
+                scale_matches = scale_matches &&
+                                scale[f8_128x4_offset(m, k, 0, 128, 4)] ==
+                                    expected;
+            }
+        }
+        tests.check(y == std::vector<std::uint8_t>(128 * 32 / 2, 0x77) &&
+                        scale_matches,
+                    "E4M3 reordered scale supports Frontend FP4 producers");
+    }
 }
 
 void run_matmul_test(TestRunner& tests) {
@@ -667,9 +857,9 @@ void run_attention_forward_test(TestRunner& tests, bool mxfp8) {
     std::vector<std::uint8_t> output_fp8(4, 0);
     std::vector<float> amax_s(1, -99.0F);
     std::vector<float> scalar_scales(6, 1.0F);
-    std::vector<std::uint8_t> mx_q_scale(2, 127);
-    std::vector<std::uint8_t> mx_k_scale(2, 127);
-    std::vector<std::uint8_t> mx_v_scale(2, 127);
+    std::vector<std::uint8_t> mx_q_scale(512, 127);
+    std::vector<std::uint8_t> mx_k_scale(512, 127);
+    std::vector<std::uint8_t> mx_v_scale(512, 127);
     if (mxfp8) {
         pack.insert_or_assign(base + 4, mx_q_scale.data());
         pack.insert_or_assign(base + 5, mx_k_scale.data());
@@ -728,7 +918,7 @@ void run_attention_backward_test(TestRunner& tests, bool mxfp8) {
     pack.insert_or_assign(base + 4, mxfp8 ? static_cast<void*>(o_float.data())
                                           : static_cast<void*>(o_fp8.data()));
     std::vector<float> scalar_scales(12, 1.0F);
-    std::vector<std::uint8_t> mx_ones(2, 127);
+    std::vector<std::uint8_t> mx_ones(512, 127);
     std::vector<std::uint8_t> mx_q_t(4, 0);
     std::vector<std::uint8_t> mx_k_t(4, 0);
     std::vector<std::uint8_t> mx_do_t(4, 0x38);
@@ -801,6 +991,22 @@ void run_validation_tests(TestRunner& tests) {
     auto status = compile_document(document, compilation);
     tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
                 "MXFP8 backward rejects mismatched Q_T dimensions");
+
+    document = reordered_block_dequantize_graph();
+    document["tensors"]["52"]["stride"] = {5, 1};
+    status = compile_document(document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "F8_128x4 rejects descriptors that do not encode a packed MxK tile");
+
+    document = sdpa_fp8_forward_graph(true);
+    document["tensors"]["201"]["dim"] = {1, 1, 128, 4};
+    document["tensors"]["201"]["stride"] = {512, 512, 4, 1};
+    document["tensors"]["201"]["reordering_type"] = "F8_128x4";
+    status = compile_document(document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "F8_128x4 rejects non-scale MXFP8 ports");
 }
 
 }  // namespace

@@ -243,13 +243,21 @@ packed virtual workspace, block scales, amax, supplied backward Stats, MoE
 expert partitioning, all four specialized attention tags, malformed transpose
 shapes, and full Release/ASan/UBSan suites. Physical `F8_128x4` reordering,
 dynamic/ragged metadata, optional FP8 attention features, and exact MXFP8 dS
-block requantization remain C6 work.
+block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
+
+**Status:** in progress. The first independently validated increment implements
+Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale ordering for block-scale
+quantize/dequantize and E8M0 MXFP8 forward/backward descale ports. Tests cover both
+M/K descriptor orientations, exact physical byte offsets, padded scale slots,
+malformed layouts, and use on an invalid port.
 
 **Work:** add dynamic shapes, shape override, ragged tensors, reorder formats,
 paged/cache-related composite metadata where it appears in serialized graphs,
 then add fusion, threading, vector schedules, and family-specific cost models.
+The remaining reorder work is limited to formats/ports outside the delivered
+`F8_128x4` scale subset.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within

@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string_view>
 
 namespace deepforge::compiler::numeric {
@@ -24,6 +25,64 @@ namespace {
 
 using import::DataType;
 using import::TensorDesc;
+
+struct F8ReorderingLayout {
+    std::size_t m_axis = 0;
+    std::size_t k_axis = 0;
+    std::int64_t m_blocks = 0;
+    std::int64_t k_blocks = 0;
+};
+
+std::optional<F8ReorderingLayout> f8_reordering_layout(
+    TensorDesc const& tensor) noexcept {
+    if (tensor.reordering_type != "F8_128x4" || tensor.dim.size() < 2 ||
+        tensor.dim.size() != tensor.stride.size() ||
+        (tensor.data_type != DataType::kFp8E4M3 &&
+         tensor.data_type != DataType::kFp8E5M2 &&
+         tensor.data_type != DataType::kFp8E8M0)) {
+        return std::nullopt;
+    }
+    auto const first_matrix_axis = tensor.dim.size() - 2;
+    for (auto m_axis : {first_matrix_axis, first_matrix_axis + 1}) {
+        auto const k_axis = m_axis == first_matrix_axis
+                                ? first_matrix_axis + 1
+                                : first_matrix_axis;
+        auto const m = tensor.dim[m_axis];
+        auto const k = tensor.dim[k_axis];
+        if (m <= 0 || k <= 0 || m % 128 != 0 || k % 4 != 0 ||
+            tensor.stride[k_axis] != 1 || tensor.stride[m_axis] != k ||
+            static_cast<std::uint64_t>(m) >
+                std::numeric_limits<std::uint64_t>::max() /
+                    static_cast<std::uint64_t>(k)) {
+            continue;
+        }
+        std::uint64_t expected = static_cast<std::uint64_t>(m) *
+                                 static_cast<std::uint64_t>(k);
+        if (expected > static_cast<std::uint64_t>(
+                           std::numeric_limits<std::int64_t>::max())) {
+            continue;
+        }
+        bool packed = true;
+        for (std::size_t axis = first_matrix_axis; axis > 0; --axis) {
+            auto const leading = axis - 1;
+            if (tensor.dim[leading] <= 0 ||
+                expected > static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()) ||
+                tensor.stride[leading] !=
+                    static_cast<std::int64_t>(expected) ||
+                expected > std::numeric_limits<std::uint64_t>::max() /
+                               static_cast<std::uint64_t>(tensor.dim[leading])) {
+                packed = false;
+                break;
+            }
+            expected *= static_cast<std::uint64_t>(tensor.dim[leading]);
+        }
+        if (packed) {
+            return F8ReorderingLayout{m_axis, k_axis, m / 128, k / 4};
+        }
+    }
+    return std::nullopt;
+}
 
 ::mlir::Value index_constant(::mlir::OpBuilder& builder,
                              ::mlir::Location location,
@@ -171,6 +230,65 @@ DecodeTable decode_table(DataType type) {
     return result;
 }
 
+::mlir::Value f8_reordered_offset(
+    ::mlir::OpBuilder& builder,
+    ::mlir::Location location,
+    TensorDesc const& tensor,
+    llvm::SmallVector<::mlir::Value> const& indices) {
+    auto const layout = *f8_reordering_layout(tensor);
+    auto l = index_constant(builder, location, 0);
+    for (std::size_t axis = 0; axis + 2 < tensor.dim.size(); ++axis) {
+        l = ::mlir::arith::AddIOp::create(
+            builder, location,
+            ::mlir::arith::MulIOp::create(
+                builder, location, l,
+                index_constant(builder, location, tensor.dim[axis])),
+            indices[axis]);
+    }
+    ::mlir::Value m = indices[layout.m_axis];
+    ::mlir::Value k = indices[layout.k_axis];
+    ::mlir::Value m_block = ::mlir::arith::DivUIOp::create(
+        builder, location, m, index_constant(builder, location, 128));
+    ::mlir::Value k_block = ::mlir::arith::DivUIOp::create(
+        builder, location, k, index_constant(builder, location, 4));
+    ::mlir::Value m_in_32 = ::mlir::arith::RemUIOp::create(
+        builder, location, m, index_constant(builder, location, 32));
+    ::mlir::Value m_group = ::mlir::arith::RemUIOp::create(
+        builder, location,
+        ::mlir::arith::DivUIOp::create(
+            builder, location, m, index_constant(builder, location, 32)),
+        index_constant(builder, location, 4));
+    ::mlir::Value k_in_4 = ::mlir::arith::RemUIOp::create(
+        builder, location, k, index_constant(builder, location, 4));
+
+    ::mlir::Value matrix_block = ::mlir::arith::AddIOp::create(
+        builder, location,
+        ::mlir::arith::MulIOp::create(
+            builder, location,
+            ::mlir::arith::AddIOp::create(
+                builder, location,
+                ::mlir::arith::MulIOp::create(
+                    builder, location, l,
+                    index_constant(builder, location, layout.m_blocks)),
+                m_block),
+            index_constant(builder, location, layout.k_blocks)),
+        k_block);
+    ::mlir::Value offset = ::mlir::arith::MulIOp::create(
+        builder, location, matrix_block,
+        index_constant(builder, location, 512));
+    offset = ::mlir::arith::AddIOp::create(
+        builder, location, offset,
+        ::mlir::arith::MulIOp::create(
+            builder, location, m_in_32,
+            index_constant(builder, location, 16)));
+    offset = ::mlir::arith::AddIOp::create(
+        builder, location, offset,
+        ::mlir::arith::MulIOp::create(
+            builder, location, m_group,
+            index_constant(builder, location, 4)));
+    return ::mlir::arith::AddIOp::create(builder, location, offset, k_in_4);
+}
+
 ::mlir::Value packed_byte_view(::mlir::OpBuilder& builder,
                                ::mlir::Location location,
                                ::mlir::Value buffer,
@@ -315,6 +433,13 @@ bool is_cpu_storage_type(DataType type) noexcept {
 
 bool is_packed_type(DataType type) noexcept {
     return type == DataType::kFp4E2M1 || type == DataType::kInt4;
+}
+
+bool is_supported_reordering(TensorDesc const& tensor) noexcept {
+    if (tensor.reordering_type == "NONE") {
+        return true;
+    }
+    return f8_reordering_layout(tensor).has_value();
 }
 
 ::mlir::Type storage_element_type(::mlir::MLIRContext& context,
@@ -503,6 +628,14 @@ bool is_packed_type(DataType type) noexcept {
     ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
+    if (tensor.reordering_type == "F8_128x4") {
+        auto code = ::mlir::memref::LoadOp::create(
+            builder, location,
+            packed_byte_view(builder, location, buffer, tensor),
+            ::mlir::ValueRange{
+                f8_reordered_offset(builder, location, tensor, indices)});
+        return decode_low_precision(builder, location, code, tensor.data_type);
+    }
     if (tensor.data_type == DataType::kFp4E2M1) {
         return decode_low_precision(
             builder, location,
@@ -578,6 +711,16 @@ void store_from_f32(
     ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
+    if (tensor.reordering_type == "F8_128x4") {
+        auto code = encode_low_precision(builder, location, value,
+                                         tensor.data_type);
+        ::mlir::memref::StoreOp::create(
+            builder, location, code,
+            packed_byte_view(builder, location, buffer, tensor),
+            ::mlir::ValueRange{
+                f8_reordered_offset(builder, location, tensor, indices)});
+        return;
+    }
     if (tensor.data_type == DataType::kFp4E2M1) {
         store_packed_code(
             builder, location,

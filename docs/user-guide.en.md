@@ -17,7 +17,7 @@ DeepForge `0.1.0` currently supports:
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
 | Operations | Validated static CPU subsets for all 39 serialized v1.24.0 tags |
 | Generic tensors | Static rank 1-64 f32 data with explicit UID; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
-| Generic layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
+| Generic layout | Positive, non-overlapping arbitrary strides; no ragged metadata; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
@@ -60,15 +60,16 @@ C5 specialized operation support is:
 
 | Tags | Current constraints |
 |---|---|
-| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | Static divisible blocks; FLOAT compute; f32/f16/bf16 values and FP8/FP4/INT4 storage on the declared ports; FP4 uses packed low/high nibbles |
+| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | Static divisible blocks; FLOAT compute; f32/f16/bf16 values and FP8/FP4/INT4 storage on the declared ports; FP4 uses packed low/high nibbles; E4M3/E8M0 scale output/input may use `F8_128x4` |
 | `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, scalar FLOAT descales/output scale, rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, scalar FLOAT `Amax_C`; no M/N/K override |
 | `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`, `top_k` 0 or 1, Token `[1,T,K]`, Weight `[E,K,N]`, INT32 offsets `[E,1,1]`, and one shared f32/f16/bf16 data type |
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | Static FP8 E4M3/E5M2 BHSD with GQA, scalar FLOAT scales/descales, top-left or bottom-right windows, Stats and amax outputs; no padding, dropout, or ALiBi |
-| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; scale tensors currently use logical `NONE` ordering and backward dS uses the documented f32 CPU reference approximation |
+| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; descale tensors accept `NONE` or Frontend `F8_128x4`, and backward dS uses the documented f32 CPU reference approximation |
 
 Paged/cache attention, block masks, sink tokens, packed/ragged attention, and
 dynamic shapes are deferred. C5 FP8 attention also defers padding, dropout,
-ALiBi, optional ports, and producer-emitted `F8_128x4` scale reordering to C6.
+ALiBi, and optional ports. C6 now implements producer-emitted `F8_128x4`
+scale reordering for the documented block-scale and MXFP8 ports.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -76,7 +77,7 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C5 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic shapes, explicit aliasing,
-scalar pass-by-value, ragged/reordered tensors outside the documented C5
+scalar pass-by-value, ragged/reordered tensors outside the documented
 subset, distributed peer statistics, GPU execution, CUDA device pointers, AMX,
 and internal multithreading are not supported. The maximum input file size is
 16 MiB. The exact per-tag matrix is in the
@@ -197,6 +198,21 @@ semantics are implemented. Tensor names do not replace explicit UIDs.
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
 are explicit f32 tensors with an all-ones shape matching the operation rank;
 pass-by-value scalar serialization is deferred.
+
+An `F8_128x4` scale descriptor has two trailing logical matrix axes, M and K,
+in either order. M is padded to a multiple of 128, K to a multiple of 4, the K
+axis has stride 1, the M axis has stride K, and leading axes are packed. For a
+flattened leading coordinate `l`, the byte offset is:
+
+```text
+((((l * (M / 128) + m / 128) * (K / 4) + k / 4) * 512)
+ + (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4)
+```
+
+The UID map must point to the full padded physical byte span. Block-scale
+quantize writes logical scale coordinates and initializes every padding slot
+to numeric one: E4M3 `0x38` or E8M0 `0x7f`. `F8_128x4` on data tensors or undocumented ports, and
+the `INT8x32` and `F16x16` reorder formats, remain unsupported.
 
 SDPA uses rank-4 BHSD tensors. `SEQ_LEN_Q` and `SEQ_LEN_KV` are INT32
 `[B,1,1,1]`; probability dropout and dynamic RNG use one-element INT64 `Seed`

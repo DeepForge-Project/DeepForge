@@ -186,15 +186,15 @@ execution subset:
 | `ROPE_BWD` | Adjoint of the validated full or partial `ROPE` transform, including `output_scale` |
 | `SDPA` | Static f32 BHSD attention with GQA, bias, scale, ALiBi, padding, top-left/bottom-right windows, custom or probability dropout, and serialized row/RNG outputs under the restrictions below |
 | `SDPA_BWD` | Data and optional bias gradients for the same attention subset using serialized `O` and log-sum-exp `Stats` |
-| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute; FP4 E2M1, FP8 E4M3/E5M2, or INT4 X; f32/f16/bf16/FP8 E4M3/E8M0 scale; trailing static block dimensions; f32/f16/bf16 Y |
-| `BLOCK_SCALE_QUANTIZE` | FLOAT compute; f32/f16/bf16 X; one divisible static block axis; FP4 E2M1 or FP8 E4M3/E5M2 Y and the corresponding E4M3/E8M0 scale |
+| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute; FP4 E2M1, FP8 E4M3/E5M2, or INT4 X; f32/f16/bf16/FP8 E4M3/E8M0 scale; trailing static block dimensions; f32/f16/bf16 Y; E4M3/E8M0 scale may use `F8_128x4` |
+| `BLOCK_SCALE_QUANTIZE` | FLOAT compute; f32/f16/bf16 X; one divisible static block axis; FP4 E2M1 or FP8 E4M3/E5M2 Y and the corresponding E4M3/E8M0 scale; FP8 scale output may use `F8_128x4` |
 | `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, FLOAT scalar controls and amax, static rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, no M/N/K override |
 | `MOE_GROUPED_MATMUL` | `mode=NONE`, `top_k` 0 or 1, `[1,T,K]` tokens, `[E,K,N]` weights, INT32 `[E,1,1]` first-token offsets, shared f32/f16/bf16 data type |
 | `MOE_GROUPED_MATMUL_BWD` | Per-expert weight gradient for the same static `mode=NONE` tensor and offset layout |
 | `SDPA_FP8_FWD` | Static FP8 E4M3/E5M2 BHSD/GQA, scalar FLOAT scale controls, both diagonal alignments and bounded windows, optional row outputs, amax; no padding, dropout, or ALiBi |
 | `SDPA_FP8_BWD` | Q/K/V gradients and amax for the same subset, consuming serialized `O`, `Stats`, FP8 dO, and scalar FLOAT scale controls |
-| `SDPA_MXFP8_FWD` | Static BHSD/GQA with 32-element E8M0 descale blocks, f16/bf16/f32 O, required Stats and amax; logical `NONE` scale ordering in C5 |
-| `SDPA_MXFP8_BWD` | Static transpose-oriented Q/K/dO inputs and E8M0 block descales, f16/bf16/f32 gradients and amax; f32 dS reference approximation and logical `NONE` scale ordering in C5 |
+| `SDPA_MXFP8_FWD` | Static BHSD/GQA with 32-element E8M0 descale blocks, f16/bf16/f32 O, required Stats and amax; descales use `NONE` or `F8_128x4` ordering |
+| `SDPA_MXFP8_BWD` | Static transpose-oriented Q/K/dO inputs and E8M0 block descales, f16/bf16/f32 gradients and amax; f32 dS reference approximation; descales use `NONE` or `F8_128x4` ordering |
 
 All validated generic rows require static, positive, explicitly UID-assigned
 tensors and f32 graph context types, positive non-overlapping strides, `NONE`
@@ -216,9 +216,13 @@ precondition: element zero is 0, values are nondecreasing, and every value is
 in `[0,T]`. The serialized graph fixes the offset tensor shape and type, but it
 does not carry those runtime values for compile-time validation.
 
-MXFP8 block size is 32. C5 consumes scale tensors in their logical strided
-order and therefore rejects the `F8_128x4` reordering emitted by normal
-Frontend MXFP8 producers; physical reorder decoding is a C6 requirement.
+MXFP8 block size is 32. C6 decodes the `F8_128x4` scale ordering emitted by
+normal Frontend MXFP8 producers. The padded descriptor uses trailing M/K axes
+in either order, with M divisible by 128, K divisible by 4, K stride 1, M
+stride K, and packed leading axes. This layout is enabled only for E4M3/E8M0
+scale input/output ports of block-scale conversion and for E8M0 MXFP8
+`Descale_*` inputs.
+Other ports and the `INT8x32`/`F16x16` reorder formats are rejected.
 FP8/MXFP8 attention rejects padding, dropout, ALiBi, block masks, sink tokens,
 and unlisted optional ports. Windowed forms that could produce fully masked
 rows are rejected. Backward consumes the supplied log-sum-exp `Stats`.
@@ -252,8 +256,8 @@ stream and is not claimed to reproduce cuDNN's GPU Philox bits.
 Comparison, logical, and `GEN_INDEX` pointwise results remain f32 `0`/`1` or
 f32 indices. C2-C5 operations can be mixed in one ordered DAG when every
 connecting port accepts the tensor type. Explicit aliasing, dynamic shape
-metadata, shape overrides, ragged tensors, and physical reorder handling are
-deferred.
+metadata, shape overrides, ragged tensors, and physical reorder handling
+outside the documented `F8_128x4` scale subset are deferred.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

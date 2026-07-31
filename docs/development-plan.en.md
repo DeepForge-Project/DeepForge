@@ -449,10 +449,13 @@ P0-P6 and post-MVP C0-C5 completed in this order:
    block-scale quantize/dequantize, FP8 matmul, MoE grouped matmul
    forward/backward, and all four FP8/MXFP8 attention tags. The public UID
    variant-pack ABI and CPU-only dependency boundary are unchanged.
+9. Started C6 with independently tested Frontend/CUTLASS `F8_128x4` physical
+   E4M3/E8M0 scale decoding for block-scale conversion and E8M0 MXFP8
+   forward/backward descales.
 
-The next functional stage is C6 dynamic/reordered/ragged/paged metadata,
-optimization, and release qualification. Benchmark-driven optimization remains
-owned by the
+The remaining C6 functional work is dynamic/override shape, ragged/paged
+metadata, reorder formats outside that scale subset, optimization, and release
+qualification. Benchmark-driven optimization remains owned by the
 Loop/Schedule layer: establish repeatable pinned-core measurements first, then
 evaluate outer tiling, padding fusion, and multithreading independently.
 Optimizations must not change the frozen serialization, ABI, workspace

@@ -176,15 +176,15 @@ Pointwise mode 的输入元数被严格验证：
 | `ROPE_BWD` | 已验证 full/partial `ROPE` 变换的 adjoint，包含 `output_scale` |
 | `SDPA` | 静态 f32 BHSD attention；在下述约束内支持 GQA、bias、scale、ALiBi、padding、top-left/bottom-right window、两类 dropout 和序列化 row/RNG 输出 |
 | `SDPA_BWD` | 同一 attention 子集的 data/可选 bias gradient，读取序列化 `O` 和 log-sum-exp `Stats` |
-| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute；X 为 FP4 E2M1、FP8 E4M3/E5M2 或 INT4；scale 为 f32/f16/bf16/FP8 E4M3/E8M0；尾部静态 block dimension；Y 为 f32/f16/bf16 |
-| `BLOCK_SCALE_QUANTIZE` | FLOAT compute；X 为 f32/f16/bf16；单个可整除静态 block axis；Y 为 FP4 E2M1 或 FP8 E4M3/E5M2，并输出对应 E4M3/E8M0 scale |
+| `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute；X 为 FP4 E2M1、FP8 E4M3/E5M2 或 INT4；scale 为 f32/f16/bf16/FP8 E4M3/E8M0；尾部静态 block dimension；Y 为 f32/f16/bf16；E4M3/E8M0 scale 可使用 `F8_128x4` |
+| `BLOCK_SCALE_QUANTIZE` | FLOAT compute；X 为 f32/f16/bf16；单个可整除静态 block axis；Y 为 FP4 E2M1 或 FP8 E4M3/E5M2，并输出对应 E4M3/E8M0 scale；FP8 scale 输出可使用 `F8_128x4` |
 | `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、FLOAT scalar control/amax、静态 rank >= 2 batch broadcast；C 为 FP8/f32/f16/bf16；无 M/N/K override |
 | `MOE_GROUPED_MATMUL` | `mode=NONE`、`top_k` 为 0/1、token `[1,T,K]`、weight `[E,K,N]`、INT32 first-token offset `[E,1,1]`，共享 f32/f16/bf16 data type |
 | `MOE_GROUPED_MATMUL_BWD` | 同一静态 `mode=NONE` tensor/offset layout 的 per-expert weight gradient |
 | `SDPA_FP8_FWD` | 静态 FP8 E4M3/E5M2 BHSD/GQA、scalar FLOAT scale control、两种 diagonal alignment/window、可选 row output 和 amax；无 padding、dropout、ALiBi |
 | `SDPA_FP8_BWD` | 同一子集的 Q/K/V gradient 和 amax，读取 serialized `O`、`Stats`、FP8 dO 和 scalar FLOAT scale control |
-| `SDPA_MXFP8_FWD` | 静态 BHSD/GQA、32 元素 E8M0 descale block、f16/bf16/f32 O、必需 Stats/amax；C5 采用逻辑 `NONE` scale ordering |
-| `SDPA_MXFP8_BWD` | 静态 transpose-oriented Q/K/dO 输入和 E8M0 block descale、f16/bf16/f32 gradient/amax；C5 使用 f32 dS reference approximation 和逻辑 `NONE` scale ordering |
+| `SDPA_MXFP8_FWD` | 静态 BHSD/GQA、32 元素 E8M0 descale block、f16/bf16/f32 O、必需 Stats/amax；descale 使用 `NONE` 或 `F8_128x4` ordering |
+| `SDPA_MXFP8_BWD` | 静态 transpose-oriented Q/K/dO 输入和 E8M0 block descale、f16/bf16/f32 gradient/amax；使用 f32 dS reference approximation；descale 使用 `NONE` 或 `F8_128x4` ordering |
 
 全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
 stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。data tensor 为
@@ -202,9 +202,13 @@ operation/port 组合；识别 f64、integer、boolean 或其他 serializer enum
 元素必须为 0，所有值单调非降且位于 `[0,T]`。序列化图只固定 offset tensor 的
 shape 和 type，不携带这些运行时数值，编译阶段无法验证它们。
 
-MXFP8 block size 固定为 32。C5 按逻辑 stride 顺序读取 scale tensor，因此会拒绝
-正常 Frontend MXFP8 producer 生成的 `F8_128x4` reorder；物理 reorder 解码属于
-C6。FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
+MXFP8 block size 固定为 32。C6 已解码正常 Frontend MXFP8 producer 生成的
+`F8_128x4` scale ordering。Padded descriptor 的最后两个 axis 是可互换顺序的 M/K；
+M 可被 128 整除、K 可被 4 整除、K stride 为 1、M stride 为 K，leading axis
+按 packed 排列。该布局只开放给 block-scale conversion 的 E4M3/E8M0 scale
+输入/输出和 E8M0 MXFP8 `Descale_*` 输入；其他端口以及 `INT8x32`/`F16x16`
+reorder format 会被拒绝。
+FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
 和未列出的可选端口；可能产生全 mask row 的 window 组合也会被拒绝。Backward
 读取外部提供的 log-sum-exp `Stats`。
 
@@ -231,7 +235,8 @@ bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox �
 
 Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index 表示。
 连接端口均接受 tensor type 时，C2-C5 操作可在同一个有序 DAG 中混合。显式
-alias、动态 shape metadata、shape override、ragged tensor 和物理 reorder 处理延后。
+alias、动态 shape metadata、shape override、ragged tensor 和文档所列
+`F8_128x4` scale 子集以外的物理 reorder 处理延后。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
 以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。

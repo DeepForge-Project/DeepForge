@@ -185,6 +185,55 @@ Status require_type(TensorDesc const& tensor,
                     " is not supported on this port");
 }
 
+bool scale_shape_matches(TensorDesc const& scale,
+                         std::vector<std::int64_t> const& logical) {
+    if (scale.dim.size() != logical.size()) return false;
+    if (scale.reordering_type == "NONE") return scale.dim == logical;
+    if (logical.size() < 2) return false;
+    auto const matrix_axis = logical.size() - 2;
+    return std::equal(logical.begin(), logical.begin() + matrix_axis,
+                      scale.dim.begin()) &&
+           scale.dim[matrix_axis] >= logical[matrix_axis] &&
+           scale.dim[matrix_axis + 1] >= logical[matrix_axis + 1];
+}
+
+bool reordered_scale_port(OperationTag tag,
+                          bool input,
+                          std::string_view port) {
+    if (tag == OperationTag::kBlockScaleDequantize) {
+        return input && port == "scale";
+    }
+    if (tag == OperationTag::kBlockScaleQuantize) {
+        return !input && port == "scale";
+    }
+    if (tag == OperationTag::kSdpaMxfp8Fwd ||
+        tag == OperationTag::kSdpaMxfp8Bwd) {
+        return input && port.starts_with("Descale_");
+    }
+    return false;
+}
+
+Status validate_reordered_ports(OperationTag tag,
+                                GenericOperationDesc const& operation,
+                                SerializedGraph const& graph,
+                                std::string const& path) {
+    auto check = [&](bool input, auto const& ports) -> Status {
+        for (auto const& [port, reference] : ports) {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor != nullptr && tensor->reordering_type != "NONE" &&
+                !reordered_scale_port(tag, input, port)) {
+                return unsupported(path + (input ? ".inputs." : ".outputs.") +
+                                       port,
+                                   "F8_128x4 is only supported on documented "
+                                   "block/MXFP8 scale ports");
+            }
+        }
+        return Status::ok();
+    };
+    auto status = check(true, operation.inputs);
+    return status.is_bad() ? status : check(false, operation.outputs);
+}
+
 bool checked_element_count(std::vector<std::int64_t> const& dimensions,
                            std::uint64_t& output) {
     std::uint64_t count = 1;
@@ -279,9 +328,9 @@ Status validate_block_dequantize(GenericOperationDesc const& operation,
         }
         expected[axis] /= blocks[index];
     }
-    if (scale->dim != expected) {
+    if (!scale_shape_matches(*scale, expected)) {
         return fail(ErrorCode::kInvalidShape, path + ".scale",
-                    "scale dimensions do not match the blocked X shape");
+                    "scale dimensions do not cover the blocked X shape");
     }
     (void)negative_scale;
     return Status::ok();
@@ -349,9 +398,9 @@ Status validate_block_quantize(GenericOperationDesc const& operation,
     }
     auto expected = x->dim;
     expected[static_cast<std::size_t>(selected_axis)] /= block;
-    if (scale->dim != expected) {
+    if (!scale_shape_matches(*scale, expected)) {
         return fail(ErrorCode::kInvalidShape, path + ".scale",
-                    "scale dimensions do not match X/block_size");
+                    "scale dimensions do not cover X/block_size");
     }
     return Status::ok();
 }
@@ -773,8 +822,24 @@ Status emit_block_quantize(
     auto const selected_axis = static_cast<std::size_t>(
         axis.value_or(static_cast<std::int64_t>(x.dim.size()) - 1));
 
+    auto logical_scale_dimensions = x.dim;
+    logical_scale_dimensions[selected_axis] /= block;
+
     auto status = emit_flat_loop(
-        builder, location, scale.dim, "BLOCK_SCALE_QUANTIZE.scale",
+        builder, location, scale.dim, "BLOCK_SCALE_QUANTIZE.scale_init",
+        [&](::mlir::OpBuilder& body_builder,
+            ::mlir::Location body_location,
+            llvm::SmallVector<::mlir::Value> const& scale_indices) {
+            numeric::store_from_f32(
+                body_builder, body_location,
+                float_constant(body_builder, body_location, 1.0F),
+                values.at(scale_uid), scale, scale_indices);
+        });
+    if (status.is_bad()) return status;
+
+    status = emit_flat_loop(
+        builder, location, logical_scale_dimensions,
+        "BLOCK_SCALE_QUANTIZE.scale",
         [&](::mlir::OpBuilder& body_builder,
             ::mlir::Location body_location,
             llvm::SmallVector<::mlir::Value> const& scale_indices) {
@@ -1148,6 +1213,8 @@ Status validate_specialized_operation(OperationTag tag,
                                       SerializedGraph const& graph,
                                       std::size_t node_index) {
     auto const path = "nodes[" + std::to_string(node_index) + "]";
+    auto status = validate_reordered_ports(tag, operation, graph, path);
+    if (status.is_bad()) return status;
     switch (tag) {
         case OperationTag::kBlockScaleDequantize:
             return validate_block_dequantize(operation, graph, path);

@@ -16,7 +16,7 @@ DeepForge `0.1.0` 当前支持：
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
 | 算子 | v1.24.0 全部 39 个 serialized tag 的已验证静态 CPU 子集 |
 | 通用 Tensor | 静态 rank 1-64 f32 data、显式 UID；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
-| 通用布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
+| 通用布局 | 正且不重叠的任意 stride；无 ragged metadata；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
 | Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
 | CPU 代码 | scalar、AVX2+FMA、AVX-512F+FMA，运行时自动分发 |
@@ -59,21 +59,22 @@ C5 特殊操作支持如下：
 
 | Tags | 当前约束 |
 |---|---|
-| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | 静态且可整除的 block、FLOAT compute；声明端口支持 f32/f16/bf16 value 和 FP8/FP4/INT4 storage；FP4 按低/高 nibble 打包 |
+| `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | 静态且可整除的 block、FLOAT compute；声明端口支持 f32/f16/bf16 value 和 FP8/FP4/INT4 storage；FP4 按低/高 nibble 打包；E4M3/E8M0 scale 输出/输入可使用 `F8_128x4` |
 | `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、scalar FLOAT descale/output scale、rank >= 2 batch broadcast；C 可为 FP8/f32/f16/bf16，`Amax_C` 为 scalar FLOAT；无 M/N/K override |
 | `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`、`top_k` 为 0/1、Token `[1,T,K]`、Weight `[E,K,N]`、INT32 offset `[E,1,1]`，data 共享 f32/f16/bf16 类型 |
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | 静态 FP8 E4M3/E5M2 BHSD、GQA、scalar FLOAT scale/descale、两种 diagonal window、Stats/amax；无 padding、dropout、ALiBi |
-| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | 静态 BHSD/GQA、32 元素 E8M0 block descale、f16/bf16/f32 输出或梯度、backward transpose-oriented 输入、Stats/amax；scale tensor 当前采用逻辑 `NONE` ordering，backward dS 使用文档声明的 f32 CPU reference approximation |
+| `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | 静态 BHSD/GQA、32 元素 E8M0 block descale、f16/bf16/f32 输出或梯度、backward transpose-oriented 输入、Stats/amax；descale tensor 接受 `NONE` 或 Frontend `F8_128x4`，backward dS 使用文档声明的 f32 CPU reference approximation |
 
 Paged/cache attention、block mask、sink token、packed/ragged attention 和动态
-shape 延后。C5 FP8 attention 还将 padding、dropout、ALiBi、可选端口和 producer
-生成的 `F8_128x4` scale reorder 延后到 C6。v1.24.0 标准 SDPA 的 bottom-right
+shape 延后。C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 已为
+文档指定的 block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder。
+v1.24.0 标准 SDPA 的 bottom-right
 causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
 复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C5 tag 可在同一个图中混合。
-不支持动态 shape、显式 alias、scalar pass-by-value、文档 C5 子集外的
+不支持动态 shape、显式 alias、scalar pass-by-value、文档子集外的
 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA device pointer、
 AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
@@ -182,6 +183,22 @@ argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 不能替代显式 UID。epsilon、momentum、accumulation count 等 normalization scalar
 输入是与操作 rank 匹配、shape 全为 1 的显式 f32 tensor；scalar pass-by-value
 serialization 仍延后。
+
+`F8_128x4` scale descriptor 的最后两个逻辑 matrix axis 是 M 和 K，顺序可以互换。
+M padding 到 128 的倍数，K padding 到 4 的倍数；K axis stride 为 1，M axis stride
+为 K，leading axis 按 packed 排列。将 leading coordinate 展平为 `l` 后，byte offset
+为：
+
+```text
+((((l * (M / 128) + m / 128) * (K / 4) + k / 4) * 512)
+ + (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4)
+```
+
+UID map 必须提供覆盖完整 padded 物理 byte span 的 pointer。Block-scale quantize
+写入逻辑 scale coordinate，并将全部 padding slot 初始化为数值 one：E4M3 为
+`0x38`，E8M0 为 `0x7f`。
+data tensor 或未声明端口上的 `F8_128x4`，以及 `INT8x32`、`F16x16` reorder format
+仍不支持。
 
 SDPA 使用 rank-4 BHSD tensor。`SEQ_LEN_Q`/`SEQ_LEN_KV` 为 INT32
 `[B,1,1,1]`；probability dropout 和 dynamic RNG 使用单元素 INT64 `Seed`/`Offset`

@@ -220,8 +220,10 @@ cache address spaces, OpenMP, multi-operation fusion, dynamic shapes,
 non-packed strides, physical NCHW layout, grouped or depthwise convolution, and
 a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
-the schema inventory. C6 still owns dynamic/override shape, ragged and physical
-reorder metadata, paged/cache composites, threading, and broad fusion.
+the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
+documented block/MXFP8 ports; it still owns dynamic/override shape, ragged and
+other physical reorder metadata, paged/cache composites, threading, and broad
+fusion.
 
 Deferral does not discard a direction. Each capability may be introduced
 independently after its semantics, upstream support, correctness tests, and

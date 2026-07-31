@@ -225,13 +225,20 @@ round-to-nearest-even、saturation、NaN/Inf、packed virtual workspace、block
 scale、amax、外部 backward Stats、MoE expert partition、4 个特殊 attention tag、
 错误 transpose shape 以及完整 Release/ASan/UBSan。物理 `F8_128x4` reorder、
 dynamic/ragged metadata、可选 FP8 attention 特性和精确 MXFP8 dS block
-requantization 仍属于 C6。
+requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
+**状态**：进行中。首个独立验收增量已为 block-scale quantize/dequantize 的
+E4M3/E8M0 scale 和 MXFP8 forward/backward 的 E8M0 descale 端口实现
+Frontend/CUTLASS `F8_128x4` 物理 ordering。测试覆盖两种 M/K descriptor 方向、
+精确物理 byte offset、padded scale
+slot、错误 layout 和错误端口使用。
+
 **工作内容**：加入 dynamic shape、shape override、ragged tensor、reorder format、
 序列化图中出现的 paged/cache 复合元数据；随后增加 fusion、threading、vector
-schedule 和各操作族 cost model。
+schedule 和各操作族 cost model。剩余 reorder 工作仅指已交付 `F8_128x4` scale
+子集以外的 format/port。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能

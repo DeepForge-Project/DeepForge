@@ -406,8 +406,12 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
    quantize/dequantize、FP8 matmul、MoE grouped matmul forward/backward 和全部
    4 个 FP8/MXFP8 attention tag；公开 UID variant-pack ABI 与 CPU-only 依赖边界
    保持不变。
+9. 已开始：C6 首个独立测试增量为 block-scale conversion 的 E4M3/E8M0 scale 和
+   MXFP8 forward/backward 的 E8M0 descale 加入 Frontend/CUTLASS
+   `F8_128x4` 物理解码。
 
-下一功能阶段是 C6 dynamic/reordered/ragged/paged metadata、优化和发布验收。
+剩余 C6 功能工作包括 dynamic/override shape、ragged/paged metadata、上述 scale
+子集以外的 reorder format、优化和发布验收。
 Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
 隔离负载的可重复测量，再逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

@@ -129,10 +129,12 @@ f32 SDPA forward/backward within the matrix constraints. C5 adds software
 FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion and packed storage where required by
 the nine specialized tags. C4 sequence metadata uses INT32 lengths and scalar
 INT64 seed/offset tensors. Virtual workspace intermediates and positive
-non-overlapping strided layouts are supported. Dynamic and override shapes,
-explicit aliasing, scalar pass-by-value, ragged tensors, tensor reordering,
-paged/cache attention metadata, distributed peer statistics, and documented
-optional specialized-attention features are not executable yet.
+non-overlapping strided layouts are supported. C6 additionally decodes the
+Frontend `F8_128x4` physical layout on documented FP8 block-scale and E8M0
+MXFP8 scale ports. Dynamic and override shapes, explicit aliasing, scalar pass-by-value,
+ragged tensors, other tensor reordering, paged/cache attention metadata,
+distributed peer statistics, and documented optional specialized-attention
+features are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable

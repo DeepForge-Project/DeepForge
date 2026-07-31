@@ -181,12 +181,21 @@ statistics、C2/C3 混合图、artifact 重载以及完整 Release/ASan/UBSan �
 
 ### C4. Sequence 和 attention 操作族
 
+**状态**：已于 2026-07-31 完成并通过验证。
+
 **工作内容**：先用 primitive decomposition 实现 `ROPE`、`ROPE_BWD`、`RNG`、
 `SDPA` 和 `SDPA_BWD`。把 mask、causal、bias、dropout、seed/offset 和 sequence
 length metadata 拆成明确的子阶段。
 
 **退出条件**：确定性 RNG、attention reference、mask/边界 shape、backward
 gradient 和 workspace 上界测试全部通过。
+
+交付子集覆盖 fixed/tensor seed-offset Bernoulli RNG、full/partial RoPE
+forward/adjoint，以及带 GQA、bias、ALiBi、sequence padding、两种 diagonal
+alignment、sliding window、custom/probability dropout、row statistics、RNG dump
+和 Q/K/V/bias gradient 的 f32 BHSD SDPA。测试包括独立 reference、有限差分、
+全 mask row、artifact reload、CPU variant 一致性及 Release/ASan/UBSan。Paged/cache、
+block mask、sink token、packed/ragged 和 FP8/MXFP8 路径仍归 C5/C6。
 
 ### C5. Data type 和特殊操作
 

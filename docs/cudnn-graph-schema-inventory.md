@@ -141,7 +141,7 @@ Pointwise mode 的输入元数被严格验证：
 ## 5. Capability 含义
 
 39 行都达到 `parsed`：JSON 与 canonical UBJSON 都可被接受和归一化，已知错误
-字段会被拒绝，reference 构成有序 DAG。C3 完成时，以下 25 行具有明确声明的
+字段会被拒绝，reference 构成有序 DAG。C4 完成时，以下 30 行具有明确声明的
 `validated` 执行子集：
 
 | Tag | 已验证 CPU 子集 |
@@ -171,22 +171,44 @@ Pointwise mode 的输入元数被严格验证：
 | `LAYER_NORM_BPROP` | 使用保存统计量和全 1 shape epsilon tensor 计算 data/parameter gradient |
 | `RMS_NORM` | training/inference、可选 bias、由 scale shape 推导 RMS 统计量 |
 | `RMS_NORM_BPROP` | data/scale gradient，可选 bias gradient |
+| `RNG` | 静态 f32 Bernoulli 输出；使用序列化 fixed seed，或显式 scalar INT64 `Seed`/`Offset` |
+| `ROPE` | 静态 f32 BHSD split-half rotation、可选 scaled pass-through 前缀和 `[S,1,1,R]` frequency |
+| `ROPE_BWD` | 已验证 full/partial `ROPE` 变换的 adjoint，包含 `output_scale` |
+| `SDPA` | 静态 f32 BHSD attention；在下述约束内支持 GQA、bias、scale、ALiBi、padding、top-left/bottom-right window、两类 dropout 和序列化 row/RNG 输出 |
+| `SDPA_BWD` | 同一 attention 子集的 data/可选 bias gradient，读取序列化 `O` 和 log-sum-exp `Stats` |
 
-全部已验证通用行都要求静态正维度、显式 UID、f32 tensor 和 f32 graph context、
-正且不重叠的 stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。
-virtual 中间值使用规划的 workspace。Convolution group 数由 `X.C / W.C` 推导，
-输出 channel 必须可被 group 数整除。
+全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
+stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。data tensor 为
+f32；C4 额外允许在文档指定端口使用 INT32 sequence length 和 scalar INT64 RNG
+seed/offset。virtual 中间值使用规划的 workspace。Convolution group 数由
+`X.C / W.C` 推导，输出 channel 必须可被 group 数整除。
 
 epsilon、momentum、accumulation count 等 normalization scalar 输入必须是所有维度
 均为 1 的显式 f32 tensor；scalar pass-by-value metadata 仍延后。非空分布式
 `peer_stats` 不可执行。running-stat 端口必须全有或全无，运行时值必须提供正的
 accumulation count 和有效 epsilon。
 
-C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或 f32 index
-表示；原生 boolean/integer 输出延后到 C5。C2/C3 操作可在同一个有序 DAG 中混合。
-显式 alias、动态 shape metadata、shape override 和非 f32 执行尚未支持。
+`ROPE` 旋转最后一个偶数宽度的 `rope_dim`；`rope_dim == 0` 时旋转整个末维，
+前缀为 scaled pass-through。`FREQS` shape 为 `[S,1,1,rope_dim]`，split-half
+变换读取其前半。`ROPE_BWD` 使用相同 scale，是该线性变换的 adjoint。
 
-其余 14 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
+Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride，K/V head 可各自
+以整数比例做 GQA。Bias/dropout mask 按尾轴 broadcast；padding length 为 INT32
+`[B,1,1,1]`。两种 diagonal alignment 和 left/right bound 均可执行；v1.24.0 的
+bottom-right causal 路径不与 bias、ALiBi 或 dropout 组合。ALiBi 要求
+`right_bound == 0`。Probability dropout 接收 scalar INT64 seed/offset，并可输出
+`RNG_DUMP`；custom dropout 接收 mask 和显式 scale，backward 还接收 scale inverse。
+Paged/cache attention、block mask、sink token、packed/ragged metadata、FP8 control
+和动态 shape 延后。
+
+相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
+bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
+
+C2 中 comparison、logical 和 `GEN_INDEX` 的结果以 f32 `0`/`1` 或 f32 index
+表示；原生 boolean/integer 输出延后到 C5。C2/C3/C4 操作可在同一个有序 DAG 中
+混合。显式 alias、动态 shape metadata、shape override 和其他非 f32 执行尚未支持。
+
+其余 9 行保持 `parsed`。Schema 识别通过不代表已经 lowering 或可在 CPU 执行。
 已识别但未 lowering 的 node 返回 `kUnsupportedOperation`，而不是
 `kUnsupportedNode`。`validated` 仅指上表声明的子集，不代表该 tag 的所有合法
 cuDNN backend 配置。

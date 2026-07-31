@@ -206,7 +206,49 @@ epsilon must make the square-root operand positive and `ACCUM_COUNT` must be
 positive; these data values are caller preconditions rather than compile-time
 metadata. C2 and C3 nodes may be mixed, including through virtual workspace
 tensors. Dynamic shape, aliasing, pass-by-value, ragged/reordered storage, and
-non-f32 execution remain deferred.
+other non-f32 execution remain deferred.
+
+### 3.3 Post-MVP C4 Extension
+
+C4 adds `RNG`, `ROPE`, `ROPE_BWD`, `SDPA`, and `SDPA_BWD` to the same ordered
+DAG. Data tensors and graph context types remain f32. The only integer tensors
+are INT32 SDPA sequence lengths and scalar INT64 RNG seed/offset inputs on the
+serialized ports defined by v1.24.0.
+
+`RNG` executes Bernoulli output with probability in `[0,1]`. It accepts either
+the serialized fixed seed or exactly two one-element INT64 `Seed` and `Offset`
+inputs. The stream is deterministic and bit-identical across DeepForge CPU
+variants. Its algorithm is part of the DeepForge CPU artifact semantics; bit
+identity with cuDNN's GPU Philox implementation is not promised.
+
+`ROPE` and `ROPE_BWD` accept f32 BHSD data and `[S,1,1,R]` frequencies. The
+effective rotation width is the final dimension when `rope_dim == 0`, otherwise
+the final even `rope_dim` values. Rotation uses split halves; a preceding
+subspace is scaled pass-through. Backward is the linear adjoint and uses the
+same `output_scale`.
+
+Validated SDPA uses rank-4 BHSD Q/K/V/O with unit embedding stride. K and V
+heads may each divide query heads for grouped-query attention. The score is
+`attn_scale * (Q @ K^T) + bias + alibi`, followed by padding and diagonal-band
+masks, softmax, dropout, and multiplication by V. `Stats` is row log-sum-exp;
+`Max`, `Sum_exp`, and Bernoulli-mask `RNG_DUMP` are optional forward outputs.
+Bias and custom dropout masks use trailing-axis broadcasting. Padding lengths
+are INT32 `[B,1,1,1]` and callers must keep each runtime value in the
+corresponding static sequence extent.
+
+Top-left and bottom-right diagonal alignment support optional positive left
+and nonnegative right bounds. ALiBi requires `right_bound == 0`. In accordance
+with the v1.24.0 Frontend composite restrictions, bottom-right causal masking
+does not combine with bias, ALiBi, or dropout. Probability dropout uses scalar
+INT64 seed/offset and implicit reciprocal keep scale. Custom dropout uses an
+explicit mask and scale; backward additionally consumes scale inverse.
+`SDPA_BWD` consumes caller-consistent Q/K/V/O/dO/Stats and produces dQ/dK/dV
+plus optional reduced dBias.
+
+Paged/cache attention, block masks, sink tokens, max-total packed metadata,
+FP8/MXFP8 controls, ragged layouts, and dynamic shapes remain unsupported.
+C2, C3, and C4 nodes may be mixed; the primitive scalar implementation may
+recompute softmax rows rather than materialize a private attention workspace.
 
 ## 4. Public Execution Interface
 

@@ -14,8 +14,8 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | 25 个已验证 tag：3 个 convolution、8 个基础操作、14 个 normalization/statistics tag |
-| 通用 Tensor | 静态 rank 1-64、f32、显式 UID；支持 virtual 中间值 |
+| 算子 | 30 个已验证 tag：3 个 convolution、8 个基础操作、14 个 normalization/statistics、5 个 sequence/attention tag |
+| 通用 Tensor | 静态 rank 1-64 f32 data、显式 UID；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；无 reorder/ragged metadata |
 | Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
 | CPU 代码 | scalar、AVX2+FMA、AVX-512F+FMA，运行时自动分发 |
@@ -46,10 +46,23 @@ C3 操作族如下：
 | `RMS_NORM`, `RMS_NORM_BPROP` | RMS 统计量由 scale shape 推导；serializer 允许时 bias/bias gradient 可选 |
 | `ADA_LAYER_NORM`, `ADA_LAYER_NORM_BPROP` | 保留 batch 统计量和 adaptive 同 rank 参数的 layer normalization |
 
+C4 sequence/attention 支持如下：
+
+| Tags | 当前约束 |
+|---|---|
+| `RNG` | Bernoulli f32 输出；fixed seed 或 scalar INT64 `Seed`/`Offset`；使用确定性的 DeepForge CPU stream |
+| `ROPE`, `ROPE_BWD` | f32 BHSD split-half rotation，旋转完整末维或最后一个偶数宽度子空间；支持 `[S,1,1,R]` frequency 和 output scale |
+| `SDPA`, `SDPA_BWD` | f32 BHSD、GQA、scalar scale、broadcast bias、ALiBi causal mask、INT32 sequence length、top-left/bottom-right window、custom/probability dropout、forward row 输出和 backward Q/K/V/bias gradient |
+
+Paged/cache attention、block mask、sink token、packed/ragged attention、FP8
+control 和动态 shape 延后。v1.24.0 的 bottom-right causal 路径不与 bias、ALiBi
+或 dropout 组合。CPU RNG 在 DeepForge variant 间可复现，但不承诺匹配 cuDNN GPU
+Philox bit pattern。
+
 本阶段 comparison、logical 和 generated-index pointwise 输出使用 f32 `0`/`1`
-或 f32 index。C2/C3 tag 可在同一个图中混合。不支持动态 shape、显式 alias、
-scalar pass-by-value、分布式 peer statistics、其他 tag 或 data type、GPU 执行、
-CUDA device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
+或 f32 index。C2/C3/C4 tag 可在同一个图中混合。不支持动态 shape、显式 alias、
+scalar pass-by-value、分布式 peer statistics、文档 metadata 以外的其他 tag/data
+type、GPU 执行、CUDA device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-frontend`
@@ -149,13 +162,19 @@ X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
 `pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 会被
 拒绝，因为它们包含当前 CPU MVP 未实现的执行语义。
 
-通用 C2/C3 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
+通用 C2-C4 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
 tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
 argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 `in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
 不能替代显式 UID。epsilon、momentum、accumulation count 等 normalization scalar
 输入是与操作 rank 匹配、shape 全为 1 的显式 f32 tensor；scalar pass-by-value
 serialization 仍延后。
+
+SDPA 使用 rank-4 BHSD tensor。`SEQ_LEN_Q`/`SEQ_LEN_KV` 为 INT32
+`[B,1,1,1]`；probability dropout 和 dynamic RNG 使用单元素 INT64 `Seed`/`Offset`
+tensor。这些 metadata buffer 与 data 一样通过 UID map 提供 host pointer。Forward
+`Stats` 保存 row log-sum-exp，并由 `SDPA_BWD` 读取；`Max`、`Sum_exp` 和
+`RNG_DUMP` 是可选序列化输出。
 
 ## 5. 编译 artifact
 
@@ -295,11 +314,11 @@ auto status = deepforge::compiler::load_artifact_executable(
 
 运行时契约：
 
-- variant-pack 必须提供 metadata 中 X、W、Y UID 对应的 host pointer；额外 UID
-  被忽略。
-- X、W、Y 至少按 `alignof(float)` 对齐，并具有完整 tensor 容量；API 不携带
-  buffer length，运行时无法证明实际分配大小。
-- X、W、Y 和 workspace 的有效地址区间不得重叠。
+- variant-pack 必须提供 metadata 中每个非 virtual argument UID 对应的 host
+  pointer；额外 UID 被忽略。
+- 每个 argument 必须满足 metadata 记录的 alignment，并具有完整 tensor 容量；
+  API 不携带 buffer length，运行时无法证明实际分配大小。
+- 可写 argument 与 workspace 的有效地址区间不得重叠。
 - workspace 大小来自 `get_workspace_size()`，非零时必须 64-byte 对齐。
 - `FrontendHandle` 是为 Frontend 调用形状保留的 opaque `void*`，CPU runtime 不
   解引用它，可以传 null。

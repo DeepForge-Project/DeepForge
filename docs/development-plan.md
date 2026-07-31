@@ -398,12 +398,13 @@ P0-P6 已按下面顺序完成：
 4. 已完成：实现 P2 destination-passing MLIR importer/verifier 和 metadata 输出；
 5. 已完成：P3 One-Shot Bufferize、allocation materialization 和 workspace plan；
 6. 已完成：P4 scalar、P5 SIMD 分发以及 P6 CLI/artifact/质量门。
-7. 已完成：MVP 后 C0-C3，包括通用 graph execution、完整 39-tag schema 识别、
-   8 个基础 tag、rank 3-5 convolution forward/backward 和 14 个
-   normalization/statistics tag。
+7. 已完成：MVP 后 C0-C4，包括通用 graph execution、完整 39-tag schema 识别、
+   8 个基础 tag、rank 3-5 convolution forward/backward、14 个
+   normalization/statistics tag 和 5 个带 integer sequence metadata 的
+   sequence/attention tag。
 
-下一功能阶段是 C4 sequence/attention，之后是 C5 data type/特殊操作和 C6 动态
-metadata/发布验收。Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
+下一功能阶段是 C5 data type/特殊操作，之后是 C6 动态 metadata/发布验收。
+Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
 隔离负载的可重复测量，再逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact
 契约。

@@ -196,12 +196,22 @@ graphs, artifact reload, and full Release/ASan/UBSan suites.
 
 ### C4. Sequence and attention families
 
+**Status:** completed and validated on 2026-07-31.
+
 **Work:** implement `ROPE`, `ROPE_BWD`, `RNG`, `SDPA`, and `SDPA_BWD` using
 primitive decompositions first. Add masks, causal behavior, bias, dropout,
 seed/offset handling, and sequence-length metadata as explicit substages.
 
 **Exit gate:** deterministic RNG tests, attention reference tests, mask and
 edge-shape tests, backward gradient checks, and bounded workspace tests pass.
+
+The delivered subset covers fixed and tensor seed/offset Bernoulli RNG, full
+and partial RoPE forward/adjoint, f32 BHSD SDPA with GQA, bias, ALiBi, sequence
+padding, both diagonal alignments, sliding windows, custom/probability dropout,
+row statistics, RNG dump, and Q/K/V/bias gradients. Tests include independent
+references, finite differences, fully masked rows, artifact reload, CPU variant
+agreement, and Release/ASan/UBSan suites. Paged/cache, block-mask, sink-token,
+packed/ragged, and FP8/MXFP8 paths remain assigned to C5/C6.
 
 ### C5. Data types and specialized operations
 

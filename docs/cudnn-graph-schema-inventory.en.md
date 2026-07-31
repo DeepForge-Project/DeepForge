@@ -151,7 +151,7 @@ The nine reduction modes are `ADD`, `MUL`, `MIN`, `MAX`, `AMAX`, `AVG`,
 
 All 39 rows are `parsed`: JSON and canonical UBJSON are accepted and
 normalized, known malformed fields are rejected, and references form an
-ordered DAG. At C3 completion, 25 rows have a declared `validated` execution
+ordered DAG. At C4 completion, 30 rows have a declared `validated` execution
 subset:
 
 | Tag | Validated CPU subset |
@@ -181,12 +181,19 @@ subset:
 | `LAYER_NORM_BPROP` | Data and parameter gradients from saved statistics and an all-ones epsilon tensor |
 | `RMS_NORM` | Training or inference, optional bias, RMS statistics derived from scale shape |
 | `RMS_NORM_BPROP` | Data and scale gradients, with optional bias gradient |
+| `RNG` | Static f32 Bernoulli output; either a serialized fixed seed or explicit scalar INT64 `Seed` and `Offset` inputs |
+| `ROPE` | Static f32 BHSD split-half rotation, optional scaled pass-through prefix, and `[S,1,1,R]` frequencies |
+| `ROPE_BWD` | Adjoint of the validated full or partial `ROPE` transform, including `output_scale` |
+| `SDPA` | Static f32 BHSD attention with GQA, bias, scale, ALiBi, padding, top-left/bottom-right windows, custom or probability dropout, and serialized row/RNG outputs under the restrictions below |
+| `SDPA_BWD` | Data and optional bias gradients for the same attention subset using serialized `O` and log-sum-exp `Stats` |
 
 All validated generic rows require static, positive, explicitly UID-assigned
-f32 tensors and f32 graph context types, positive non-overlapping strides,
-`NONE` reordering, and no pass-by-value or ragged metadata. Virtual
-intermediates use planned workspace. Convolution grouping is inferred from
-`X.C / W.C`; output channels must be divisible by that group count.
+tensors and f32 graph context types, positive non-overlapping strides, `NONE`
+reordering, and no pass-by-value or ragged metadata. Data tensors are f32;
+C4 additionally permits INT32 sequence lengths and scalar INT64 RNG seed and
+offset tensors on their documented ports. Virtual intermediates use planned
+workspace. Convolution grouping is inferred from `X.C / W.C`; output channels
+must be divisible by that group count.
 
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
 are explicit f32 tensors whose dimensions are all one; scalar pass-by-value
@@ -195,12 +202,32 @@ executable. Running-stat ports must be either all present or all absent, and
 their runtime values are required to provide positive accumulation counts and
 valid epsilon values.
 
+`ROPE` rotates the final even `rope_dim` values, or the full final dimension
+when `rope_dim == 0`; the preceding values are scaled pass-through. `FREQS`
+has shape `[S,1,1,rope_dim]`, and the split-half transform consumes its first
+half. `ROPE_BWD` is the linear adjoint with the same scale.
+
+Validated SDPA uses rank-4 BHSD Q/K/V/O, unit embedding stride, and independent
+integer GQA ratios for K and V heads. Bias and dropout masks use trailing-axis
+broadcasting. Padding lengths are INT32 `[B,1,1,1]`. Both diagonal alignments
+and left/right bounds are executable; the v1.24.0 bottom-right causal path does
+not combine with bias, ALiBi, or dropout. ALiBi requires `right_bound == 0`.
+Probability dropout takes scalar INT64 seed/offset and can expose `RNG_DUMP`;
+custom dropout takes a mask and explicit scale, plus scale inverse in backward.
+Paged/cache attention, block masks, sink tokens, packed/ragged metadata, FP8
+controls, and dynamic shapes remain deferred.
+
+The CPU Bernoulli stream is stable and bit-identical across DeepForge CPU
+variants for the same seed and offset. It is an implementation-defined CPU
+stream and is not claimed to reproduce cuDNN's GPU Philox bits.
+
 Comparison, logical, and `GEN_INDEX` pointwise results are represented as f32
 `0`/`1` or f32 indices in C2; native boolean/integer outputs are deferred to
-C5. C2 and C3 operations can be mixed in one ordered DAG. Explicit aliasing,
-dynamic shape metadata, shape overrides, and non-f32 execution are deferred.
+C5. C2, C3, and C4 operations can be mixed in one ordered DAG. Explicit
+aliasing, dynamic shape metadata, shape overrides, and other non-f32 execution
+are deferred.
 
-The remaining 14 rows stay `parsed`. Passing schema recognition never implies
+The remaining 9 rows stay `parsed`. Passing schema recognition never implies
 lowering or CPU execution support. A recognized node without lowering returns
 `kUnsupportedOperation`, not `kUnsupportedNode`. `validated` always refers to
 the declared subset above, not every legal cuDNN backend configuration for the

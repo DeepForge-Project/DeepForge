@@ -8,11 +8,12 @@ DeepForge compiles a serialized Graph from a pinned cuDNN Frontend version into
 CPU object code. The MVP implements only a static, packed, f32 Conv2D forward
 operation, while directly adopting the cuDNN Frontend Graph serialization and
 UID variant-pack concepts for its input protocol and execution interface.
-The current post-MVP C3 implementation executes static f32 ordered DAGs over
-25 validated tags: three convolution operations, eight foundational
-operations, and 14 normalization/statistics operations. It preserves the
-public runtime interface and uses only upstream MemRef, SCF, Arith, Math, and
-LLVM dialects for the generic path.
+The current post-MVP C4 implementation executes static ordered DAGs over 30
+validated tags: three convolution operations, eight foundational operations,
+14 normalization/statistics operations, and five sequence/attention
+operations. Data is f32, with INT32/INT64 allowed only for documented sequence
+metadata. It preserves the public runtime interface and uses only upstream
+MemRef, SCF, Arith, Math, and LLVM dialects for the generic path.
 
 See [contracts.en.md](contracts.en.md) and the
 [schema capability inventory](../cudnn-graph-schema-inventory.en.md) for the
@@ -79,11 +80,12 @@ normative support boundaries.
 ```
 
 The diagram shows the original optimized Conv path. After canonical import, a
-generic C2/C3 graph takes a parallel standard-MLIR path directly through
+generic C2-C4 graph takes a parallel standard-MLIR path directly through
 static MemRef/SCF/Arith/Math IR, planned virtual-tensor workspace views, and
 the same LLVM object pipeline. This path includes grouped convolution,
-convolution gradients, normalization, and normalization gradients. It does not
-run the MVP Conv Tensor/Linalg bufferization or direct-conv schedule.
+convolution gradients, normalization, sequence transforms, and attention
+forward/backward. It does not run the MVP Conv Tensor/Linalg bufferization or
+direct-conv schedule.
 
 ### 3.1 Importer
 
@@ -99,7 +101,7 @@ not an MLIR pass. It:
 - resolves tensor and node references plus stable UIDs;
 - validates the applicable capability subset;
 - builds standard Tensor/Linalg IR for the optimized MVP Conv or standard
-  MemRef/SCF/Math IR for a generic C2/C3 graph.
+  MemRef/SCF/Math IR for a generic C2-C4 graph.
 
 There is no temporary `cudnn.conv_fwd` operation. One-Shot Bufferize therefore
 never encounters an unknown custom operation without a

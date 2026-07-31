@@ -15,8 +15,8 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | 25 validated tags: three convolution, eight foundational, and 14 normalization/statistics tags |
-| Generic tensors | Static rank 1-64, f32, explicit UID; virtual intermediates are supported |
+| Operations | 30 validated tags: three convolution, eight foundational, 14 normalization/statistics, and five sequence/attention tags |
+| Generic tensors | Static rank 1-64 f32 data with explicit UID; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; no reorder or ragged metadata |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
@@ -47,12 +47,25 @@ The C3 operation families are:
 | `RMS_NORM`, `RMS_NORM_BPROP` | RMS statistics derive from scale shape; bias and bias gradient are optional where serialized |
 | `ADA_LAYER_NORM`, `ADA_LAYER_NORM_BPROP` | Layer normalization with batch-preserving statistics and adaptive full-rank parameters |
 
+C4 sequence and attention support is:
+
+| Tags | Current constraints |
+|---|---|
+| `RNG` | Bernoulli f32 output; fixed seed or scalar INT64 `Seed`/`Offset`; deterministic DeepForge CPU stream |
+| `ROPE`, `ROPE_BWD` | f32 BHSD split-half rotation of the full or final even-width subspace; `[S,1,1,R]` frequencies and output scaling |
+| `SDPA`, `SDPA_BWD` | f32 BHSD, GQA, scalar scale, broadcast bias, ALiBi causal mask, INT32 sequence lengths, top-left/bottom-right windows, custom/probability dropout, forward row outputs, and backward Q/K/V/bias gradients |
+
+Paged/cache attention, block masks, sink tokens, packed/ragged attention,
+FP8 controls, and dynamic shapes are deferred. The v1.24.0 bottom-right causal
+path does not combine with bias, ALiBi, or dropout. The CPU RNG is reproducible
+across DeepForge variants, but it is not claimed to match cuDNN GPU Philox bits.
+
 Comparison, logical, and generated-index pointwise outputs use f32 `0`/`1` or
-f32 index values in this stage. C2 and C3 tags can be mixed in one graph.
+f32 index values in this stage. C2, C3, and C4 tags can be mixed in one graph.
 Dynamic shapes, explicit aliasing, scalar pass-by-value, distributed peer
-statistics, other tags or data types, GPU execution, CUDA device pointers,
-AMX, and internal multithreading are not supported. The maximum input file
-size is 16 MiB. The exact per-tag matrix is in the
+statistics, other tags or data types beyond the documented metadata, GPU
+execution, CUDA device pointers, AMX, and internal multithreading are not
+supported. The maximum input file size is 16 MiB. The exact per-tag matrix is in the
 [schema inventory](cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 The CUDA Toolkit and cuDNN backend are not dependencies. The project uses only
@@ -161,7 +174,7 @@ X, W, and Y must have explicit, distinct UIDs. Non-empty UBJSON
 are rejected because they carry execution semantics not implemented by the
 CPU MVP.
 
-For a generic C2/C3 graph, every non-virtual tensor that is read or written
+For a generic C2-C4 graph, every non-virtual tensor that is read or written
 must be present in the execute-time UID map. Virtual tensors are omitted from
 the map and allocated in the queried workspace. Writable buffers must not
 overlap another argument or workspace. `VIEW_ONLY`, `in_place_index`, and a
@@ -170,6 +183,12 @@ semantics are implemented. Tensor names do not replace explicit UIDs.
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
 are explicit f32 tensors with an all-ones shape matching the operation rank;
 pass-by-value scalar serialization is deferred.
+
+SDPA uses rank-4 BHSD tensors. `SEQ_LEN_Q` and `SEQ_LEN_KV` are INT32
+`[B,1,1,1]`; probability dropout and dynamic RNG use one-element INT64 `Seed`
+and `Offset` tensors. These metadata buffers are ordinary host pointers in the
+same UID map. Forward `Stats` stores row log-sum-exp and is required by
+`SDPA_BWD`; `Max`, `Sum_exp`, and `RNG_DUMP` are optional serialized outputs.
 
 ## 5. Compile an Artifact
 
@@ -312,12 +331,11 @@ auto status = deepforge::compiler::load_artifact_executable(
 
 Runtime contract:
 
-- The variant pack must provide host pointers for the X, W, and Y UIDs in the
-  metadata. Extra UIDs are ignored.
-- X, W, and Y must be aligned to at least `alignof(float)` and have full tensor
-  capacity. The API carries no buffer lengths, so the runtime cannot prove the
-  actual allocation sizes.
-- The effective X, W, Y, and workspace address ranges must not overlap.
+- The variant pack must provide host pointers for every non-virtual argument
+  UID in the metadata. Extra UIDs are ignored.
+- Each argument must meet its recorded alignment and have full tensor capacity.
+  The API carries no buffer lengths, so the runtime cannot prove actual sizes.
+- Writable argument and workspace address ranges must not overlap.
 - Allocate the size returned by `get_workspace_size()` with 64-byte alignment
   when it is non-zero.
 - `FrontendHandle` is an opaque `void*` retained for the Frontend call shape.

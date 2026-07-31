@@ -180,8 +180,43 @@ scalar-like 输入必须是所有维度为 1、非 pass-by-value 的显式 f32 t
 分布式 `peer_stats` 被拒绝。BATCHNORM running-stat 端口必须全有或全无。执行时
 epsilon 必须使 square-root 输入为正，`ACCUM_COUNT` 必须为正；这些数据值属于调用者
 前置条件，而不是编译期 metadata。C2/C3 node 可通过 virtual workspace tensor
-混合。dynamic shape、alias、pass-by-value、ragged/reordered storage 和非 f32 执行
-仍延后。
+混合。dynamic shape、alias、pass-by-value、ragged/reordered storage 和其他非 f32
+执行仍延后。
+
+### 3.3 MVP 后 C4 扩展
+
+C4 在同一有序 DAG 中加入 `RNG`、`ROPE`、`ROPE_BWD`、`SDPA` 和 `SDPA_BWD`。
+data tensor 和 graph context 仍为 f32。唯一允许的 integer tensor 是 v1.24.0
+序列化端口指定的 INT32 SDPA sequence length 和 scalar INT64 RNG seed/offset。
+
+`RNG` 执行 probability 位于 `[0,1]` 的 Bernoulli 输出。它使用序列化 fixed seed，
+或恰好两个单元素 INT64 `Seed`/`Offset` 输入。该 stream 在 DeepForge CPU variant
+间确定且 bit-identical；算法属于 DeepForge CPU artifact 语义，不承诺与 cuDNN GPU
+Philox 实现 bit-identical。
+
+`ROPE`/`ROPE_BWD` 接收 f32 BHSD data 和 `[S,1,1,R]` frequency。
+`rope_dim == 0` 时有效 rotation width 是整个末维，否则为最后一个偶数宽度的
+`rope_dim` 子空间。Rotation 使用 split-half 方式，前置子空间为 scaled
+pass-through。Backward 是该线性变换的 adjoint，并使用相同 `output_scale`。
+
+Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride。K/V head 可各自
+整除 query head，以支持 GQA。Score 顺序为
+`attn_scale * (Q @ K^T) + bias + alibi`，然后依次应用 padding/diagonal-band mask、
+softmax、dropout 和 V matmul。`Stats` 保存 row log-sum-exp；`Max`、`Sum_exp` 和
+Bernoulli mask `RNG_DUMP` 是可选 forward 输出。Bias/custom dropout mask 按尾轴
+broadcast。Padding length 为 INT32 `[B,1,1,1]`，调用者必须保证运行时数值位于
+对应静态 sequence extent 内。
+
+Top-left/bottom-right diagonal alignment 支持可选的正 left bound 和非负 right
+bound。ALiBi 要求 `right_bound == 0`。按照 v1.24.0 Frontend composite 约束，
+bottom-right causal masking 不与 bias、ALiBi 或 dropout 组合。Probability
+dropout 使用 scalar INT64 seed/offset 和隐式 reciprocal keep scale；custom dropout
+使用显式 mask/scale，backward 还读取 scale inverse。`SDPA_BWD` 读取调用者保证
+一致的 Q/K/V/O/dO/Stats，输出 dQ/dK/dV 和可选 reduced dBias。
+
+Paged/cache attention、block mask、sink token、max-total packed metadata、
+FP8/MXFP8 control、ragged layout 和动态 shape 仍不支持。C2/C3/C4 node 可以混合；
+primitive scalar 实现允许重算 softmax row，而不构造私有 attention workspace。
 
 ## 4. 对外运行接口
 

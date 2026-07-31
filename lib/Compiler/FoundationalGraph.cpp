@@ -1,4 +1,5 @@
 #include "FoundationalGraph.h"
+#include "SequenceGraph.h"
 #include "TrainingGraph.h"
 
 #include "DeepForge/Import/Capability.h"
@@ -344,9 +345,12 @@ bool has_non_overlapping_layout(TensorDesc const& tensor) {
 }
 
 Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
-    if (tensor.data_type != import::DataType::kFloat32) {
+    if (tensor.data_type != import::DataType::kFloat32 &&
+        tensor.data_type != import::DataType::kInt32 &&
+        tensor.data_type != import::DataType::kInt64) {
         return fail(ErrorCode::kUnsupportedDataType, path,
-                    "CPU execution requires FLOAT tensors");
+                    "CPU graph execution currently supports FLOAT data and "
+                    "INT32/INT64 sequence metadata");
     }
     if (!tensor.uid_assigned) {
         return unsupported(path, "CPU execution requires an assigned UID");
@@ -907,6 +911,9 @@ Status validate_operation(OperationTag tag,
                           GenericOperationDesc const& operation,
                           SerializedGraph const& graph,
                           std::size_t node_index) {
+    if (is_sequence_operation(tag)) {
+        return validate_sequence_operation(tag, operation, graph, node_index);
+    }
     if (is_training_operation(tag)) {
         return validate_training_operation(tag, operation, graph, node_index);
     }
@@ -984,6 +991,39 @@ Status analyze_graph(SerializedGraph const& graph,
                 "nodes[" + std::to_string(node_index) + "]",
                 "operation attributes cannot be normalized for CPU execution");
         }
+        for (auto const& [port, reference] : operation->inputs) {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid,
+                            "nodes[" + std::to_string(node_index) +
+                                "].inputs." + port,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->data_type != import::DataType::kFloat32 &&
+                !is_sequence_metadata_input(node.tag, port,
+                                            tensor->data_type)) {
+                return fail(ErrorCode::kUnsupportedDataType,
+                            "nodes[" + std::to_string(node_index) +
+                                "].inputs." + port,
+                            "non-FLOAT tensors are limited to documented "
+                            "sequence metadata ports");
+            }
+        }
+        for (auto const& [port, reference] : operation->outputs) {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid,
+                            "nodes[" + std::to_string(node_index) +
+                                "].outputs." + port,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->data_type != import::DataType::kFloat32) {
+                return fail(ErrorCode::kUnsupportedDataType,
+                            "nodes[" + std::to_string(node_index) +
+                                "].outputs." + port,
+                            "C4 operation outputs must be FLOAT tensors");
+            }
+        }
         for (auto const& [output_port, output] : operation->outputs) {
             for (auto const& [input_port, input] : operation->inputs) {
                 if (output == input) {
@@ -1046,7 +1086,10 @@ Status analyze_graph(SerializedGraph const& graph,
         argument.data_type = tensor.data_type;
         argument.dimensions = tensor.dim;
         argument.strides = tensor.stride;
-        argument.alignment = alignof(float);
+        auto const storage_bits =
+            import::data_type_storage_bits(argument.data_type);
+        argument.alignment = std::max<std::uint64_t>(
+            1, std::min<std::uint64_t>(8, (storage_bits + 7) / 8));
         argument.access = info.read && info.write
                               ? TensorAccess::kReadWrite
                               : (info.write ? TensorAccess::kWrite
@@ -1080,8 +1123,12 @@ Status analyze_graph(SerializedGraph const& graph,
             return fail(ErrorCode::kDimensionOverflow, tensor.name,
                         "virtual tensor byte range overflows uint64");
         }
+        auto const storage_bits =
+            import::data_type_storage_bits(tensor.data_type);
+        auto const alignment = std::max<std::uint64_t>(
+            1, std::min<std::uint64_t>(8, (storage_bits + 7) / 8));
         requests.push_back(WorkspaceRequest{
-            virtual_name(uid), size_bytes, alignof(float),
+            virtual_name(uid), size_bytes, alignment,
             *use->second.producer,
             std::max(*use->second.producer, use->second.last_consumer)});
     }
@@ -1095,11 +1142,26 @@ Status analyze_graph(SerializedGraph const& graph,
     return Status::ok();
 }
 
+::mlir::Type element_type(::mlir::MLIRContext& context,
+                          import::DataType data_type) {
+    switch (data_type) {
+        case import::DataType::kFloat32:
+            return ::mlir::Float32Type::get(&context);
+        case import::DataType::kInt32:
+            return ::mlir::IntegerType::get(&context, 32);
+        case import::DataType::kInt64:
+            return ::mlir::IntegerType::get(&context, 64);
+        default:
+            return {};
+    }
+}
+
 ::mlir::MemRefType tensor_type(::mlir::MLIRContext& context,
                                TensorDesc const& tensor) {
     auto layout = ::mlir::StridedLayoutAttr::get(&context, 0, tensor.stride);
-    return ::mlir::MemRefType::get(
-        tensor.dim, ::mlir::Float32Type::get(&context), layout);
+    return ::mlir::MemRefType::get(tensor.dim,
+                                   element_type(context, tensor.data_type),
+                                   layout);
 }
 
 ::mlir::Value index_constant(::mlir::OpBuilder& builder,
@@ -2182,6 +2244,10 @@ Status emit_operation(
     GenericOperationDesc const& operation,
     SerializedGraph const& graph,
     std::map<std::int64_t, ::mlir::Value> const& values) {
+    if (is_sequence_operation(tag)) {
+        return emit_sequence_operation(tag, builder, location, operation,
+                                       graph, values);
+    }
     if (is_training_operation(tag)) {
         return emit_training_operation(tag, builder, location, operation,
                                        graph, values);
@@ -2251,15 +2317,18 @@ Status build_module(::mlir::MLIRContext& context,
             [&](WorkspaceAllocation const& item) {
                 return item.name == allocation_name;
             });
-        if (allocation == workspace.allocations.end() ||
-            allocation->size_bytes % sizeof(float) != 0) {
+        auto const storage_bits =
+            import::data_type_storage_bits(tensor.data_type);
+        auto const element_bytes = (storage_bits + 7) / 8;
+        if (allocation == workspace.allocations.end() || element_bytes == 0 ||
+            allocation->size_bytes % element_bytes != 0) {
             return fail(ErrorCode::kInvalidValue, allocation_name,
                         "workspace allocation is absent or misaligned");
         }
         auto storage_elements = static_cast<std::int64_t>(
-            allocation->size_bytes / sizeof(float));
+            allocation->size_bytes / element_bytes);
         auto storage_type = ::mlir::MemRefType::get(
-            {storage_elements}, ::mlir::Float32Type::get(&context));
+            {storage_elements}, element_type(context, tensor.data_type));
         auto byte_shift = index_constant(
             builder, location, static_cast<std::int64_t>(allocation->offset));
         auto storage = ::mlir::memref::ViewOp::create(

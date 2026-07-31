@@ -4,6 +4,7 @@ add_library(deepforge_compiler STATIC
     FoundationalGraph.cpp
     NormalizationGraph.cpp
     ScalarLowering.cpp
+    SequenceGraph.cpp
     TrainingGraph.cpp
 )
 add_library(DeepForge::Compiler ALIAS deepforge_compiler)

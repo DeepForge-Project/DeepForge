@@ -6,7 +6,7 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6 和 MVP 后覆盖阶段 C0-C5 已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前两个 C6 增量已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
@@ -104,10 +104,13 @@ Bernoulli RNG、RoPE forward/backward 和 f32 SDPA forward/backward。C5 在 9 �
 特殊 tag 所需端口加入软件 FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion 和 packed
 storage。C4 sequence metadata 使用 INT32 length 和 scalar INT64 seed/offset
 tensor。支持 virtual workspace 中间值和正且不重叠的 strided layout。C6 已在文档
-指定的 FP8 block-scale 和 E8M0 MXFP8 scale 端口解码 Frontend `F8_128x4` 物理布局。动态/override
-shape、显式 alias、scalar pass-by-value、ragged tensor、其他 tensor reorder、
-paged/cache attention metadata、分布式 peer statistics 和文档列出的可选特殊
-attention 特性暂不可执行。
+指定的 FP8 block-scale 和 E8M0 MXFP8 scale 端口解码 Frontend `F8_128x4` 物理布局，
+并支持单个、无 broadcast、全部参数为 external plain f32 的 `POINTWISE` runtime
+shape override。序列化 dimension 是上界，Frontend-shaped override array 提供不超过
+编译 storage bound 的正 runtime dimension/stride。单独的 dynamic-shape context flag
+会被保存在 plan metadata 中，但不会让其他 operation 自动变为动态。显式 alias、
+scalar pass-by-value、ragged tensor、其他 tensor reorder、paged/cache attention
+metadata、分布式 peer statistics 和文档列出的可选特殊 attention 特性暂不可执行。
 
 ## 架构
 
@@ -118,7 +121,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-MVP Conv: Tensor + Linalg    通用 C2-C5: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    通用 C2-C6: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -273,7 +276,8 @@ std::unique_ptr<deepforge::runtime::Executable> loaded;
 status = deepforge::compiler::load_artifact_executable("conv2d.dfo", loaded);
 ```
 
-公开 execute 固定为 Frontend `v1.24.0` 的 handle、UID map 和 workspace 调用形状；
+公开 execute 与 override workspace query 固定为 Frontend `v1.24.0` 的 handle、
+UID map、workspace、override UID/shape/stride 调用形状；
 CPU runtime 不解引用 handle。MVP 使用 CPU-only opaque handle 和 DeepForge status，
 不把 CUDA/cuDNN backend 作为 public build dependency。
 对外不暴露 memref descriptor 或生成 kernel 的裸指针签名，生成 kernel 是运行时
@@ -290,7 +294,7 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：动态 metadata、reorder/ragged/paged 支持、优化和发布验收 |
+| C6 | 进行中：`F8_128x4` 和 exact-pointwise runtime shape override 已完成；剩余 ragged/paged metadata、优化和发布验收 |
 | Optimize | 待 benchmark 驱动：外层 tiling、padding fusion、并行化 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

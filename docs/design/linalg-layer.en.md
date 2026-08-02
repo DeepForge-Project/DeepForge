@@ -127,9 +127,10 @@ Tensor/Linalg transforms
 ```
 
 One-Shot Bufferize function-boundary options use a predictable identity
-layout. If an internal function needs a dynamic descriptor, the runtime
-adapter must handle it rather than exposing an unknown layout to the generated
-kernel.
+layout. This Conv Tensor/Linalg path remains static. The separate C6 generic
+pointwise path may use an internal dynamic memref signature; its runtime
+adapter supplies validated dimensions and strides, and the descriptor never
+enters the public API.
 
 The MVP workspace planner takes ownership of temporary allocations after
 bufferization. It cannot assume memref addresses before bufferization or infer
@@ -141,7 +142,7 @@ On leaving the Linalg layer:
 
 - only standard Tensor, Linalg, Arith, and Func dialects, plus optional
   transform metadata, remain;
-- every size and stride is static;
+- every size and stride in this Tensor/Linalg Conv path is static;
 - the output is initialized;
 - the named Conv parallel and reduction semantics remain valid;
 - One-Shot Bufferize can complete once, without a second dialect-specific

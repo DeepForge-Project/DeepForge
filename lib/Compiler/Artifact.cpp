@@ -296,6 +296,11 @@ bool validate_conv_arguments(Conv2DCompileMetadata const& metadata,
         detail = "Conv adapter requires exactly three tensor arguments";
         return false;
     }
+    if (metadata.dynamic_shape_enabled || metadata.override_shape_enabled ||
+        metadata.override_policy != ShapeOverridePolicy::kNone) {
+        detail = "Conv adapter does not support dynamic or override metadata";
+        return false;
+    }
     auto const& x = metadata.arguments[0];
     auto const& w = metadata.arguments[1];
     auto const& y = metadata.arguments[2];
@@ -593,6 +598,11 @@ Status serialize_artifact(CompilationResult const& compilation,
                     "string is too large");
     }
 
+    append_u32(bytes, compilation.metadata.dynamic_shape_enabled ? 1U : 0U);
+    append_u32(bytes, compilation.metadata.override_shape_enabled ? 1U : 0U);
+    append_u32(bytes,
+               static_cast<std::uint32_t>(compilation.metadata.override_policy));
+
     if (compilation.metadata.arguments.size() >
         std::numeric_limits<std::uint32_t>::max()) {
         return fail(ErrorCode::kDimensionOverflow, "artifact.arguments",
@@ -687,6 +697,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         return parse_failure("header is truncated");
     }
     if (version != kLegacyArtifactFormatVersion &&
+        version != kStaticMetadataArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -713,6 +724,23 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         return parse_failure("target triple is invalid");
     }
     if (version == kArtifactFormatVersion) {
+        std::uint32_t dynamic_shape_enabled = 0;
+        std::uint32_t override_shape_enabled = 0;
+        std::uint32_t override_policy = 0;
+        if (!reader.read_u32(dynamic_shape_enabled) ||
+            !reader.read_u32(override_shape_enabled) ||
+            !reader.read_u32(override_policy) || dynamic_shape_enabled > 1 ||
+            override_shape_enabled > 1 ||
+            override_policy > static_cast<std::uint32_t>(
+                                  ShapeOverridePolicy::kPointwiseExact)) {
+            return parse_failure("dynamic shape metadata is malformed");
+        }
+        result.metadata.dynamic_shape_enabled = dynamic_shape_enabled != 0;
+        result.metadata.override_shape_enabled = override_shape_enabled != 0;
+        result.metadata.override_policy =
+            static_cast<ShapeOverridePolicy>(override_policy);
+    }
+    if (version != kLegacyArtifactFormatVersion) {
         std::uint32_t argument_count = 0;
         if (!reader.read_u32(argument_count) || argument_count == 0 ||
             argument_count > 4096) {

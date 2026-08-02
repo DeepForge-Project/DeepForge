@@ -268,23 +268,60 @@ leading coordinate 展平为 `l` 后，物理 byte offset 为：
 初始化为数值 one（E4M3 为 `0x38`、E8M0 为 `0x7f`），再覆盖逻辑 scale
 coordinate；公开 execute 和 workspace ABI 不变。
 
+### 3.6 C6 Runtime Shape Override 扩展
+
+`is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
+dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor。当前启用
+override 必须精确包含一个 `POINTWISE` node；全部输入输出必须是编译 dimension
+相同的 external、非 ragged、非 reordered FLOAT tensor，不支持 broadcast 或
+virtual workspace。
+
+编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
+override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
+rank，dimension 为正且不超过编译上界；stride 为正并满足当前支持的不重叠条件，
+计算所得 storage span 不能超过编译 byte bound。应用 partial override 后，所有
+pointwise argument dimension 必须仍完全相同。因此缩小 shape 时通常要覆盖全部
+argument；空 list 按编译最大 shape 执行。
+
+编译器仅对该 policy 生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
+loop bound。runtime descriptor 将解析后的值传给进程内对象和 artifact-loaded
+对象，alias 检查使用本次解析出的 byte span。workspace 保持静态上界，override
+workspace query 与 execute 使用同一套校验。Artifact format `3` 记录两个 context
+flag 和 policy；v1/v2 reader 默认全部关闭。
+
 ## 4. 对外运行接口
 
-MVP 对外只提供 cuDNN Frontend `v1.24.0` Graph execute 的调用形状，不提供第二套
-handle-free API、descriptor 或裸 kernel ABI。CPU-only 形式如下：
+DeepForge 对外提供 cuDNN Frontend `v1.24.0` Graph 的 UID-map execute 和 workspace
+调用形状，不提供第二套 handle-free execute API、descriptor 或裸 kernel ABI。
+CPU-only 形式如下：
 
 ```cpp
 namespace deepforge::runtime {
 
 using FrontendHandle = void *;
 using VariantPack = std::unordered_map<int64_t, void *>;
+using OverrideUids = std::vector<int64_t>;
+using OverrideShapes = std::vector<std::vector<int64_t>>;
+using OverrideStrides = std::vector<std::vector<int64_t>>;
 
 class Executable {
 public:
+  import::Status get_workspace_size(int64_t &workspace_size) const;
+  import::Status get_workspace_size(
+      FrontendHandle handle, int64_t &workspace_size,
+      OverrideUids const &uids, OverrideShapes const &shapes,
+      OverrideStrides const &strides) const;
   int64_t get_workspace_size() const;
+  int64_t get_workspace_size(
+      FrontendHandle handle, OverrideUids const &uids,
+      OverrideShapes const &shapes, OverrideStrides const &strides) const;
   import::Status execute(FrontendHandle handle,
                          VariantPack &uid_to_host_ptr,
                          void *workspace) const;
+  import::Status execute(
+      FrontendHandle handle, VariantPack &uid_to_host_ptr, void *workspace,
+      OverrideUids const &uids, OverrideShapes const &shapes,
+      OverrideStrides const &strides) const;
 };
 
 } // namespace deepforge::runtime
@@ -296,12 +333,12 @@ public:
   非 const 引用以保持调用兼容，但 DeepForge 不修改其中的键或地址。
 - `handle` 仅为调用形状兼容而保留，可以为 null；CPU runtime 不解引用、不查询也
   不转发它。CPU-only 形式使用 opaque `void *`，不要求 CUDA Toolkit/cuDNN backend。
-- variant-pack 中必须存在序列化图的 X、W、Y UID；额外 UID 被忽略。
+- variant-pack 中必须存在序列化图的全部非 virtual argument UID；额外 UID 被忽略。
 - 指针是 CPU 可寻址 host pointer，不是 CUDA device pointer。
-- X/W/Y 至少按 `alignof(float)` 对齐。生成代码不得无条件标注 64-byte 对齐。
+- 每个 argument 满足 metadata 记录的 alignment。生成代码不得无条件标注 64-byte 对齐。
 - workspace 由调用者提供，按 64-byte 对齐；调用者必须先按
   `get_workspace_size()` 分配返回的字节数。若返回值为 0，workspace 可为 null。
-- X、W、Y 和 workspace 的有效字节区间不得重叠。runtime 可以校验 UID、空指针、
+- 两个有效字节区间中任一个可写时，argument 与 workspace 不得重叠。runtime 可以校验 UID、空指针、
   对齐、整数溢出和可计算的区间重叠；C++ 接口没有携带分配长度，不能便携地证明
   指针确实指向足够大的已分配对象，调用者仍必须保证每个 buffer 的容量。
   完成这些前置检查后，内部 kernel 才能使用 `noalias` 假设。
@@ -373,9 +410,9 @@ CPU 上执行带更高 ISA 的函数。
 
 ## 8. 失败策略
 
-以下情况均为编译期错误，不做静默 fallback：schema/版本不匹配、动态 shape、
-非 packed stride、非 f32、未知 node、输出形状不一致、非 unit stride/dilation、
-维度/字节数溢出。
+以下情况均为编译期错误，不做静默 fallback：schema/版本不匹配、超出已声明
+override 子集的动态行为、超出各 operation 子集的 layout/data type、未知 node、
+输出 shape 不一致，以及 dimension/byte count 溢出。
 
 CPU feature 不足不是错误，运行时回退到较低变体。AVX 变体的选择除 CPUID 外还
 必须检查 OS 对 XMM/YMM/ZMM 状态的支持（例如 `OSXSAVE`/`XGETBV`），不能只看

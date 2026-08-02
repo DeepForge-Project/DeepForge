@@ -15,8 +15,8 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated static CPU subsets for all 39 serialized v1.24.0 tags |
-| Generic tensors | Static rank 1-64 f32 data with explicit UID; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; one exact-shape f32 `POINTWISE` subset supports runtime override |
+| Generic tensors | Rank 1-64 f32 data with explicit UID; shapes are otherwise static; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; no ragged metadata; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
@@ -66,20 +66,20 @@ C5 specialized operation support is:
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | Static FP8 E4M3/E5M2 BHSD with GQA, scalar FLOAT scales/descales, top-left or bottom-right windows, Stats and amax outputs; no padding, dropout, or ALiBi |
 | `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; descale tensors accept `NONE` or Frontend `F8_128x4`, and backward dS uses the documented f32 CPU reference approximation |
 
-Paged/cache attention, block masks, sink tokens, packed/ragged attention, and
-dynamic shapes are deferred. C5 FP8 attention also defers padding, dropout,
-ALiBi, and optional ports. C6 now implements producer-emitted `F8_128x4`
-scale reordering for the documented block-scale and MXFP8 ports.
+Paged/cache attention, block masks, sink tokens, and packed/ragged attention
+are deferred. C5 FP8 attention also defers padding, dropout, ALiBi, and optional
+ports. C6 implements producer-emitted `F8_128x4` scale reordering for the
+documented block-scale and MXFP8 ports and the pointwise override subset below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
 
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
-or f32 index values. C2-C5 tags can be mixed when connected tensor types are
-supported by both operations. Dynamic shapes, explicit aliasing,
-scalar pass-by-value, ragged/reordered tensors outside the documented
-subset, distributed peer statistics, GPU execution, CUDA device pointers, AMX,
-and internal multithreading are not supported. The maximum input file size is
+or f32 index values. C2-C6 tags can be mixed when connected tensor types are
+supported by both operations. Dynamic execution outside the pointwise override
+subset, explicit aliasing, scalar pass-by-value, ragged/reordered tensors
+outside the documented subset, distributed peer statistics, GPU execution,
+CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
 16 MiB. The exact per-tag matrix is in the
 [schema inventory](cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
@@ -359,11 +359,47 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
+For a graph serialized with `is_override_shape_enabled=true`, the currently
+executable dynamic subset is exactly one `POINTWISE` node whose inputs and
+output are external, plain FLOAT tensors with identical compiled shapes. It
+does not allow broadcasting, virtual tensors, ragged offsets, or reordering.
+Compiled dimensions and byte spans are maxima. Supply the same Frontend
+v1.24.0 override arrays to workspace query and execution:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes(
+    3, std::vector<std::int64_t>{runtime_m, runtime_n});
+deepforge::runtime::OverrideStrides override_strides(
+    3, std::vector<std::int64_t>{runtime_ld, 1});
+
+std::int64_t workspace_size = 0;
+status = result.executable->get_workspace_size(
+    nullptr, workspace_size, override_uids, override_shapes,
+    override_strides);
+if (status.is_good()) {
+    status = result.executable->execute(
+        nullptr, pack, workspace, override_uids, override_shapes,
+        override_strides);
+}
+```
+
+The three override arrays must have equal counts and unique external UIDs.
+Each shape must preserve rank, use positive dimensions no larger than the
+serialized maxima, and pair with positive, supported non-overlapping strides
+whose storage span fits the compiled byte bound. All final pointwise argument
+shapes must remain equal; a shrinking call therefore normally overrides every
+argument. An empty list executes the compiled maximum shape. The workspace
+query validates the same rules and is statically bounded for this subset.
+`is_dynamic_shape_enabled=true` without the override flag is persisted in the
+plan and `.dfo` metadata but leaves execution descriptors static.
+
 Runtime contract:
 
 - The variant pack must provide host pointers for every non-virtual argument
   UID in the metadata. Extra UIDs are ignored.
-- Each argument must meet its recorded alignment and have full tensor capacity.
+- Each argument must meet its recorded alignment and have capacity for its
+  compiled span, or at least the supplied runtime span for an override call.
   The API carries no buffer lengths, so the runtime cannot prove actual sizes.
 - Writable argument and workspace address ranges must not overlap.
 - Allocate the size returned by `get_workspace_size()` with 64-byte alignment
@@ -397,7 +433,7 @@ benchmark is a regression baseline, not a performance guarantee across hosts.
 | `DFE_UNSUPPORTED_NODE` | Use a tag listed in the current capability matrix |
 | `DFE_UNSUPPORTED_OPERATION` | Remove deferred attributes, unsupported peer statistics, or a configuration outside the tag's declared CPU subset |
 | `DFE_INVALID_LAYOUT` | Check packed Conv strides or positive non-overlapping foundational strides |
-| `DFE_INVALID_SHAPE` | Check static dimensions, operation shape rules, and the Conv output formula |
+| `DFE_INVALID_SHAPE` | Check static dimensions, operation shape rules, the Conv output formula, and override maxima/ranks/spans |
 | `DFE_INVALID_VARIANT_PACK` | Check UIDs, host pointers, alignment, aliasing, and workspace |
 | `DFE_UNSUPPORTED_CPU_FEATURE` | Do not force an unsupported variant; use automatic `execute` |
 | Artifact target mismatch | Recompile on the target host or an identical target triple |

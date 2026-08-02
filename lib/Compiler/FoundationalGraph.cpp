@@ -950,6 +950,65 @@ Status validate_operation(OperationTag tag,
     }
 }
 
+Status validate_shape_override_subset(SerializedGraph const& graph) {
+    if (!graph.context.is_override_shape_enabled.value_or(false)) {
+        return Status::ok();
+    }
+    if (graph.nodes.size() != 1 ||
+        graph.nodes.front().tag != OperationTag::kPointwise) {
+        return unsupported(
+            "context.is_override_shape_enabled",
+            "C6 runtime overrides currently require one POINTWISE node");
+    }
+    auto const* operation =
+        std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+    if (operation == nullptr || !operation->outputs.contains("OUT_0")) {
+        return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                    "POINTWISE attributes are malformed");
+    }
+    auto const* output = graph.find_tensor(operation->outputs.at("OUT_0"));
+    if (output == nullptr) {
+        return fail(ErrorCode::kMissingUid, "nodes[0].outputs.OUT_0",
+                    "tensor reference is unresolved");
+    }
+    auto check = [&](TensorReference const& reference,
+                     std::string const& path) -> Status {
+        auto const* tensor = graph.find_tensor(reference);
+        if (tensor == nullptr) {
+            return fail(ErrorCode::kMissingUid, path,
+                        "tensor reference is unresolved");
+        }
+        if (tensor->is_virtual || tensor->data_type != import::DataType::kFloat32 ||
+            tensor->reordering_type != "NONE" || tensor->ragged_offset_uid ||
+            tensor->ragged_offset_name) {
+            return unsupported(
+                path,
+                "runtime pointwise overrides require external plain f32 tensors");
+        }
+        if (tensor->dim != output->dim) {
+            return unsupported(
+                path,
+                "runtime pointwise overrides require exact equal shapes without broadcasting");
+        }
+        return Status::ok();
+    };
+    for (auto const& [port, reference] : operation->inputs) {
+        auto status = check(reference, "nodes[0].inputs." + port);
+        if (status.is_bad()) return status;
+    }
+    auto status = check(operation->outputs.at("OUT_0"),
+                        "nodes[0].outputs.OUT_0");
+    if (status.is_bad()) return status;
+    if (std::any_of(graph.tensors.begin(), graph.tensors.end(),
+                    [](auto const& entry) {
+                        return entry.second.is_virtual;
+                    })) {
+        return unsupported("tensors",
+                           "runtime pointwise overrides do not use virtual workspace");
+    }
+    return Status::ok();
+}
+
 Status analyze_graph(SerializedGraph const& graph,
                      std::string_view function_name,
                      Conv2DCompileMetadata& metadata,
@@ -965,12 +1024,8 @@ Status analyze_graph(SerializedGraph const& graph,
         return unsupported("tensors",
                            "name-keyed execution is deferred until its public ABI is defined");
     }
-    if ((graph.context.is_dynamic_shape_enabled &&
-         *graph.context.is_dynamic_shape_enabled) ||
-        (graph.context.is_override_shape_enabled &&
-         *graph.context.is_override_shape_enabled)) {
-        return unsupported("context", "CPU execution requires static shapes");
-    }
+    auto status = validate_shape_override_subset(graph);
+    if (status.is_bad()) return status;
     auto const has_specialized_operation = std::any_of(
         graph.nodes.begin(), graph.nodes.end(), [](import::NodeDesc const& node) {
             return is_specialized_operation(node.tag);
@@ -1088,6 +1143,13 @@ Status analyze_graph(SerializedGraph const& graph,
 
     Conv2DCompileMetadata candidate;
     candidate.function_name = function_name;
+    candidate.dynamic_shape_enabled =
+        graph.context.is_dynamic_shape_enabled.value_or(false);
+    candidate.override_shape_enabled =
+        graph.context.is_override_shape_enabled.value_or(false);
+    candidate.override_policy = candidate.override_shape_enabled
+                                    ? ShapeOverridePolicy::kPointwiseExact
+                                    : ShapeOverridePolicy::kNone;
     for (auto const& [uid, info] : usage) {
         auto const tensor_it = graph.tensors.find(uid);
         if (tensor_it == graph.tensors.end()) {
@@ -1151,7 +1213,7 @@ Status analyze_graph(SerializedGraph const& graph,
             std::max(*use->second.producer, use->second.last_consumer)});
     }
     WorkspacePlan planned_workspace;
-    auto status = plan_workspace(requests, planned_workspace);
+    status = plan_workspace(requests, planned_workspace);
     if (status.is_bad()) {
         return status;
     }
@@ -1166,9 +1228,18 @@ Status analyze_graph(SerializedGraph const& graph,
 }
 
 ::mlir::MemRefType tensor_type(::mlir::MLIRContext& context,
-                               TensorDesc const& tensor) {
-    auto layout = ::mlir::StridedLayoutAttr::get(&context, 0, tensor.stride);
-    return ::mlir::MemRefType::get(tensor.dim,
+                               TensorDesc const& tensor,
+                               bool dynamic = false) {
+    auto dimensions = tensor.dim;
+    auto strides = tensor.stride;
+    if (dynamic) {
+        std::fill(dimensions.begin(), dimensions.end(),
+                  ::mlir::ShapedType::kDynamic);
+        std::fill(strides.begin(), strides.end(),
+                  ::mlir::ShapedType::kDynamic);
+    }
+    auto layout = ::mlir::StridedLayoutAttr::get(&context, 0, strides);
+    return ::mlir::MemRefType::get(dimensions,
                                    element_type(context, tensor.data_type),
                                    layout);
 }
@@ -1229,6 +1300,38 @@ Status emit_flat_loop(::mlir::OpBuilder& builder,
             body(body_builder, body_location,
                  logical_indices(body_builder, body_location,
                                  induction_variables.front(), dimensions));
+        });
+    builder.setInsertionPointAfter(loop_nest.loops.front());
+    return Status::ok();
+}
+
+template <typename Body>
+Status emit_dynamic_loop(::mlir::OpBuilder& builder,
+                         ::mlir::Location location,
+                         ::mlir::Value extent_source,
+                         std::size_t rank,
+                         Body&& body) {
+    llvm::SmallVector<::mlir::Value> lowers;
+    llvm::SmallVector<::mlir::Value> uppers;
+    llvm::SmallVector<::mlir::Value> steps;
+    lowers.reserve(rank);
+    uppers.reserve(rank);
+    steps.reserve(rank);
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+        lowers.push_back(index_constant(builder, location, 0));
+        uppers.push_back(::mlir::memref::DimOp::create(
+            builder, location, extent_source,
+            index_constant(builder, location,
+                           static_cast<std::int64_t>(axis))));
+        steps.push_back(index_constant(builder, location, 1));
+    }
+    auto loop_nest = ::mlir::scf::buildLoopNest(
+        builder, location, lowers, uppers, steps,
+        [&](::mlir::OpBuilder& body_builder,
+            ::mlir::Location body_location,
+            ::mlir::ValueRange induction_variables) {
+            body(body_builder, body_location,
+                 llvm::SmallVector<::mlir::Value>(induction_variables));
         });
     builder.setInsertionPointAfter(loop_nest.loops.front());
     return Status::ok();
@@ -1803,36 +1906,40 @@ Status emit_pointwise(
     std::string_view mode;
     (void)read_string_attribute(operation, "mode", mode);
     auto emission_status = Status::ok();
-    auto status = emit_flat_loop(
-        builder, location, output.dim, "POINTWISE",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& output_indices) {
-            llvm::SmallVector<::mlir::Value> loaded;
-            loaded.reserve(operation.inputs.size());
-            for (std::size_t input_index = 0;
-                 input_index < operation.inputs.size(); ++input_index) {
-                auto const uid = std::get<std::int64_t>(
-                    operation.inputs.at("IN_" + std::to_string(input_index)));
-                auto const& input = graph.tensors.at(uid);
-                loaded.push_back(::mlir::memref::LoadOp::create(
-                    body_builder, body_location, values.at(uid),
-                    broadcast_indices(body_builder, body_location,
-                                      output_indices, input, output)));
-            }
-            auto result = pointwise_result(body_builder, body_location, mode,
-                                           loaded, output_indices, operation);
-            if (!result) {
-                emission_status =
-                    fail(ErrorCode::kInvalidValue, "POINTWISE",
-                         "validated mode has no scalar emitter: " +
-                             std::string(mode));
-                return;
-            }
-            ::mlir::memref::StoreOp::create(
-                body_builder, body_location, *result, values.at(output_uid),
-                output_indices);
-        });
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& output_indices) {
+        llvm::SmallVector<::mlir::Value> loaded;
+        loaded.reserve(operation.inputs.size());
+        for (std::size_t input_index = 0;
+             input_index < operation.inputs.size(); ++input_index) {
+            auto const uid = std::get<std::int64_t>(
+                operation.inputs.at("IN_" + std::to_string(input_index)));
+            auto const& input = graph.tensors.at(uid);
+            loaded.push_back(::mlir::memref::LoadOp::create(
+                body_builder, body_location, values.at(uid),
+                broadcast_indices(body_builder, body_location,
+                                  output_indices, input, output)));
+        }
+        auto result = pointwise_result(body_builder, body_location, mode,
+                                       loaded, output_indices, operation);
+        if (!result) {
+            emission_status =
+                fail(ErrorCode::kInvalidValue, "POINTWISE",
+                     "validated mode has no scalar emitter: " +
+                         std::string(mode));
+            return;
+        }
+        ::mlir::memref::StoreOp::create(
+            body_builder, body_location, *result, values.at(output_uid),
+            output_indices);
+    };
+    auto status = graph.context.is_override_shape_enabled.value_or(false)
+                      ? emit_dynamic_loop(builder, location,
+                                          values.at(output_uid),
+                                          output.dim.size(), body)
+                      : emit_flat_loop(builder, location, output.dim,
+                                       "POINTWISE", body);
     return status.is_bad() ? status : emission_status;
 }
 
@@ -2302,8 +2409,9 @@ Status build_module(::mlir::MLIRContext& context,
     llvm::SmallVector<::mlir::Type> argument_types;
     argument_types.reserve(metadata.arguments.size() + 1);
     for (auto const& argument : metadata.arguments) {
-        argument_types.push_back(tensor_type(context,
-                                             graph.tensors.at(argument.uid)));
+        argument_types.push_back(tensor_type(
+            context, graph.tensors.at(argument.uid),
+            metadata.override_shape_enabled));
     }
     auto workspace_type = ::mlir::MemRefType::get(
         {::mlir::ShapedType::kDynamic}, ::mlir::IntegerType::get(&context, 8));

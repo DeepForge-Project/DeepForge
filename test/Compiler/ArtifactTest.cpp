@@ -166,7 +166,13 @@ std::size_t metadata_numbers_offset(
 }
 
 std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
-    return metadata_numbers_offset(bytes);
+    std::size_t version_offset = 8;
+    auto const version = read_u32(bytes, version_offset);
+    auto offset = metadata_numbers_offset(bytes);
+    if (version == deepforge::compiler::kArtifactFormatVersion) {
+        offset += 3 * 4;
+    }
+    return offset;
 }
 
 std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
@@ -220,28 +226,46 @@ std::size_t first_argument_alignment_offset(
 }
 
 std::vector<std::uint8_t> make_legacy_v1(
-    std::span<std::uint8_t const> version_two) {
-    auto common_metadata_end = argument_table_offset(version_two);
-    auto adapter_begin = adapter_payload_offset(version_two);
-    auto workspace_begin = workspace_size_offset(version_two);
+    std::span<std::uint8_t const> current) {
+    auto common_metadata_end = metadata_numbers_offset(current);
+    auto adapter_begin = adapter_payload_offset(current);
+    auto workspace_begin = workspace_size_offset(current);
     std::vector<std::uint8_t> legacy(
-        version_two.begin(),
-        version_two.begin() +
+        current.begin(),
+        current.begin() +
             static_cast<std::ptrdiff_t>(common_metadata_end));
     legacy.insert(legacy.end(),
-                  version_two.begin() +
+                  current.begin() +
                       static_cast<std::ptrdiff_t>(adapter_begin),
-                  version_two.begin() +
+                  current.begin() +
                       static_cast<std::ptrdiff_t>(workspace_begin));
     legacy.insert(legacy.end(),
-                  version_two.begin() +
+                  current.begin() +
                       static_cast<std::ptrdiff_t>(workspace_begin),
-                  version_two.end() - 8);
+                  current.end() - 8);
     legacy.resize(legacy.size() + 8);
     write_u32(legacy, 8,
               deepforge::compiler::kLegacyArtifactFormatVersion);
     refresh_checksum(legacy);
     return legacy;
+}
+
+std::vector<std::uint8_t> make_static_metadata_v2(
+    std::span<std::uint8_t const> current) {
+    auto const flags_begin = metadata_numbers_offset(current);
+    auto const arguments_begin = argument_table_offset(current);
+    std::vector<std::uint8_t> version_two(
+        current.begin(),
+        current.begin() + static_cast<std::ptrdiff_t>(flags_begin));
+    version_two.insert(
+        version_two.end(),
+        current.begin() + static_cast<std::ptrdiff_t>(arguments_begin),
+        current.end() - 8);
+    version_two.resize(version_two.size() + 8);
+    write_u32(version_two, 8,
+              deepforge::compiler::kStaticMetadataArtifactFormatVersion);
+    refresh_checksum(version_two);
+    return version_two;
 }
 
 struct AlignedBytes {
@@ -338,7 +362,7 @@ int main(int argc, char** argv) {
                    "parse serialized artifact");
         tests.check(parsed.format_version ==
                         deepforge::compiler::kArtifactFormatVersion,
-                    "writer emits artifact format v2");
+                    "writer emits artifact format v3");
         tests.check(parsed.adapter_kind ==
                         deepforge::compiler::ArtifactAdapterKind::
                             kConv2DRankedMemref,
@@ -363,6 +387,17 @@ int main(int argc, char** argv) {
                                 compilation.variants[index].object,
                         "artifact variant section round-trips");
         }
+
+        auto static_v2 = make_static_metadata_v2(first);
+        deepforge::compiler::ArtifactInfo static_v2_info;
+        tests.good(deepforge::compiler::parse_artifact(static_v2,
+                                                       static_v2_info),
+                   "parse static-metadata format-v2 artifact");
+        tests.check(
+            static_v2_info.format_version ==
+                    deepforge::compiler::kStaticMetadataArtifactFormatVersion &&
+                static_v2_info.metadata == compilation.metadata,
+            "format-v2 reader defaults dynamic metadata to disabled");
 
         auto legacy_v1 = make_legacy_v1(first);
         deepforge::compiler::ArtifactInfo legacy_info;
@@ -523,6 +558,42 @@ int main(int argc, char** argv) {
         corrupted[20] ^= 0x40;
         status = deepforge::compiler::parse_artifact(corrupted, parsed);
         tests.parse_error(status, "artifact corruption is rejected");
+        auto malformed_dynamic_flag = first;
+        write_u32(malformed_dynamic_flag,
+                  metadata_numbers_offset(malformed_dynamic_flag), 2);
+        refresh_checksum(malformed_dynamic_flag);
+        status = deepforge::compiler::parse_artifact(malformed_dynamic_flag,
+                                                      parsed);
+        tests.parse_error(status,
+                          "checksummed non-boolean dynamic flag is rejected");
+        auto inconsistent_override_policy = first;
+        write_u32(inconsistent_override_policy,
+                  metadata_numbers_offset(inconsistent_override_policy) + 4,
+                  1);
+        refresh_checksum(inconsistent_override_policy);
+        status = deepforge::compiler::parse_artifact(
+            inconsistent_override_policy, parsed);
+        tests.parse_error(status,
+                          "checksummed inconsistent override policy is rejected");
+        auto unknown_override_policy = first;
+        write_u32(unknown_override_policy,
+                  metadata_numbers_offset(unknown_override_policy) + 8,
+                  std::numeric_limits<std::uint32_t>::max());
+        refresh_checksum(unknown_override_policy);
+        status = deepforge::compiler::parse_artifact(unknown_override_policy,
+                                                      parsed);
+        tests.parse_error(status,
+                          "checksummed unknown override policy is rejected");
+        auto dynamic_conv_adapter = first;
+        auto const dynamic_flags = metadata_numbers_offset(dynamic_conv_adapter);
+        write_u32(dynamic_conv_adapter, dynamic_flags, 1);
+        write_u32(dynamic_conv_adapter, dynamic_flags + 4, 1);
+        write_u32(dynamic_conv_adapter, dynamic_flags + 8, 1);
+        refresh_checksum(dynamic_conv_adapter);
+        status = deepforge::compiler::parse_artifact(dynamic_conv_adapter,
+                                                      parsed);
+        tests.parse_error(status,
+                          "Conv adapter rejects dynamic override metadata");
         auto invalid_alignment = first;
         write_u64(invalid_alignment,
                   workspace_alignment_offset(invalid_alignment), 0);
@@ -609,6 +680,15 @@ int main(int argc, char** argv) {
         tests.check(invalid_output == std::vector<std::uint8_t>({0x56, 0x78}),
                     "failed argument serialization leaves output unchanged");
         compilation.metadata.arguments = std::move(saved_arguments);
+        auto const saved_override_flag =
+            compilation.metadata.override_shape_enabled;
+        compilation.metadata.override_shape_enabled = true;
+        status = deepforge::compiler::serialize_artifact(compilation,
+                                                         invalid_output);
+        tests.check(status.code() ==
+                        deepforge::import::ErrorCode::kInvalidValue,
+                    "writer rejects inconsistent override metadata");
+        compilation.metadata.override_shape_enabled = saved_override_flag;
         auto const saved_metadata = compilation.metadata;
         compilation.metadata.x_shape[0] =
             std::numeric_limits<std::int64_t>::max();

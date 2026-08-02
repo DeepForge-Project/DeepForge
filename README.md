@@ -7,8 +7,8 @@ defined by the open source `cudnn-frontend` project, lowers the supported graph
 subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
-**Current status:** CPU MVP phases P0-P6 and post-MVP coverage phases C0-C5 are
-implemented. The end-to-end path
+**Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
+the first two C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
@@ -131,10 +131,15 @@ the nine specialized tags. C4 sequence metadata uses INT32 lengths and scalar
 INT64 seed/offset tensors. Virtual workspace intermediates and positive
 non-overlapping strided layouts are supported. C6 additionally decodes the
 Frontend `F8_128x4` physical layout on documented FP8 block-scale and E8M0
-MXFP8 scale ports. Dynamic and override shapes, explicit aliasing, scalar pass-by-value,
-ragged tensors, other tensor reordering, paged/cache attention metadata,
-distributed peer statistics, and documented optional specialized-attention
-features are not executable yet.
+MXFP8 scale ports. Runtime shape override is executable for one external,
+non-broadcasting, plain f32 `POINTWISE` node: serialized dimensions are maxima,
+and the Frontend-shaped override arrays supply positive runtime dimensions and
+strides within the compiled storage bounds. The standalone dynamic-shape
+context flag is preserved as plan metadata but does not by itself make another
+operation dynamic. Explicit aliasing, scalar pass-by-value, ragged tensors,
+other tensor reordering, paged/cache attention metadata, distributed peer
+statistics, and documented optional specialized-attention features are not
+executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable
@@ -149,7 +154,7 @@ cuDNN Frontend serialized Graph (JSON or UBJSON)
 DeepForge importer + support validation
         |
         v
-MVP Conv: Tensor + Linalg    Generic C2-C5: MemRef + SCF + Math
+MVP Conv: Tensor + Linalg    Generic C2-C6: MemRef + SCF + Math
         |  one-shot-bufferize once       |
         +----------------------+----------+
                                v
@@ -320,10 +325,15 @@ std::unique_ptr<deepforge::runtime::Executable> loaded;
 status = deepforge::compiler::load_artifact_executable("conv2d.dfo", loaded);
 ```
 
-The public call shape is pinned to the cuDNN Frontend `v1.24.0` UID overload:
+The public call shapes are pinned to the cuDNN Frontend `v1.24.0` UID
+overloads:
 
 ```cpp
 execute(handle, std::unordered_map<int64_t, void*>&, workspace);
+execute(handle, uid_map, workspace,
+        override_uids, override_shapes, override_strides);
+get_workspace_size(handle, workspace_size,
+                   override_uids, override_shapes, override_strides);
 ```
 
 The CPU runtime does not inspect the opaque handle. It accepts host pointers,
@@ -342,7 +352,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: dynamic metadata, reorder/ragged/paged support, optimization, and release qualification |
+| C6 | In progress: `F8_128x4` and exact-pointwise runtime shape override complete; ragged/paged metadata, optimization, and release qualification remain |
 | Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

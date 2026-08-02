@@ -307,24 +307,65 @@ initializes that complete span to numeric one, E4M3 `0x38` or E8M0 `0x7f`,
 before overwriting logical scale coordinates. The public execute and workspace
 ABI is unchanged.
 
+### 3.6 C6 Runtime Shape Override Extension
+
+`is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
+persisted independently. The dynamic flag alone is plan metadata and does not
+alter a static kernel descriptor. Enabling override currently requires exactly
+one `POINTWISE` node. Every input and output must be an external, non-ragged,
+non-reordered FLOAT tensor with the same compiled dimensions; broadcasting and
+virtual workspace are excluded.
+
+Compiled dimensions and `size_bytes` are maxima. At workspace query and
+execution, the three Frontend override arrays must have equal counts and unique
+external argument UIDs. Each supplied shape preserves rank, has positive
+dimensions no larger than its compiled maxima, and uses positive strides that
+satisfy the supported non-overlap condition. Its computed storage span must
+not exceed the compiled byte bound. After applying partial overrides, every
+pointwise argument must still have exactly the same dimensions. Consequently,
+a shrinking call normally overrides all arguments; an empty list executes the
+compiled maximum shape.
+
+The compiler emits dynamic memref dimensions and strides plus `memref.dim`
+loop bounds only for this policy. Runtime descriptors carry the resolved values
+to both in-process and artifact-loaded objects. Alias checks use the resolved
+byte spans. Workspace remains statically bounded, and the override workspace
+query performs the same validation as execution. Artifact format `3` records
+both context flags and policy; the v1/v2 readers default them to disabled.
+
 ## 4. Public Execution Interface
 
-The MVP exposes only the call shape of the cuDNN Frontend `v1.24.0` Graph
-execute operation. It does not provide a second handle-free API, descriptor,
-or raw kernel ABI. The CPU-only form is:
+DeepForge exposes the UID-map call shapes of the cuDNN Frontend `v1.24.0`
+Graph execute and workspace operations. It does not provide a second
+handle-free execute API, descriptor, or raw kernel ABI. The CPU-only form is:
 
 ```cpp
 namespace deepforge::runtime {
 
 using FrontendHandle = void *;
 using VariantPack = std::unordered_map<int64_t, void *>;
+using OverrideUids = std::vector<int64_t>;
+using OverrideShapes = std::vector<std::vector<int64_t>>;
+using OverrideStrides = std::vector<std::vector<int64_t>>;
 
 class Executable {
 public:
+  import::Status get_workspace_size(int64_t &workspace_size) const;
+  import::Status get_workspace_size(
+      FrontendHandle handle, int64_t &workspace_size,
+      OverrideUids const &uids, OverrideShapes const &shapes,
+      OverrideStrides const &strides) const;
   int64_t get_workspace_size() const;
+  int64_t get_workspace_size(
+      FrontendHandle handle, OverrideUids const &uids,
+      OverrideShapes const &shapes, OverrideStrides const &strides) const;
   import::Status execute(FrontendHandle handle,
                          VariantPack &uid_to_host_ptr,
                          void *workspace) const;
+  import::Status execute(
+      FrontendHandle handle, VariantPack &uid_to_host_ptr, void *workspace,
+      OverrideUids const &uids, OverrideShapes const &shapes,
+      OverrideStrides const &strides) const;
 };
 
 } // namespace deepforge::runtime
@@ -338,15 +379,16 @@ The contract is:
 - `handle` exists only for call-shape compatibility and may be null. The CPU
   runtime never dereferences, queries, or forwards it. The CPU-only form uses
   opaque `void *` and requires no CUDA Toolkit or cuDNN backend.
-- The variant pack contains the serialized X, W, and Y UIDs. Extra UIDs are
-  ignored.
+- The variant pack contains every serialized non-virtual argument UID. Extra
+  UIDs are ignored.
 - Pointers are CPU-addressable host pointers, not CUDA device pointers.
-- X/W/Y are aligned to at least `alignof(float)`. Generated code must not
+- Every argument meets its recorded alignment. Generated code must not
   unconditionally claim 64-byte alignment.
 - The caller supplies workspace aligned to 64 bytes and allocates the byte
   count returned by `get_workspace_size()`. Workspace may be null when that
   count is zero.
-- Valid X, W, Y, and workspace byte ranges do not overlap. The runtime can
+- Valid argument and workspace byte ranges do not overlap when either range is
+  writable. The runtime can
   validate UIDs, null pointers, alignment, integer overflow, and computable
   range overlap. The C++ interface carries no allocation lengths and therefore
   cannot portably prove that a pointer refers to a sufficiently large object;
@@ -435,9 +477,9 @@ cost model.
 ## 8. Failure Strategy
 
 The following are compile-time errors with no silent fallback: schema or
-version mismatch, dynamic shapes, non-packed strides, non-f32 data, unknown
-nodes, inconsistent output shapes, non-unit stride or dilation, and dimension
-or byte-count overflow.
+version mismatch, dynamic behavior outside the declared override subset,
+layouts or data types outside a per-operation subset, unknown nodes,
+inconsistent output shapes, and dimension or byte-count overflow.
 
 Insufficient CPU features are not an error; the runtime falls back to a lower
 variant. AVX selection must check both CPUID and operating-system support for

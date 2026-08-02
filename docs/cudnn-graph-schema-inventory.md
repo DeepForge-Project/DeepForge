@@ -227,16 +227,21 @@ Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride，K/V head �
 bottom-right causal 路径不与 bias、ALiBi 或 dropout 组合。ALiBi 要求
 `right_bound == 0`。Probability dropout 接收 scalar INT64 seed/offset，并可输出
 `RNG_DUMP`；custom dropout 接收 mask 和显式 scale，backward 还接收 scale inverse。
-Paged/cache attention、block mask、sink token、packed/ragged metadata、动态 shape
-以及上述 C5 特殊可选能力延后。
+Paged/cache attention、block mask、sink token、packed/ragged metadata 以及上述
+C5 特殊可选能力延后。
 
 相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
 bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
 
 Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index 表示。
-连接端口均接受 tensor type 时，C2-C5 操作可在同一个有序 DAG 中混合。显式
-alias、动态 shape metadata、shape override、ragged tensor 和文档所列
-`F8_128x4` scale 子集以外的物理 reorder 处理延后。
+连接端口均接受 tensor type 时，C2-C6 操作可在同一个有序 DAG 中混合。C6 接受
+两个 dynamic context flag。Runtime shape override 仅可执行一个无 broadcast 的
+`POINTWISE` node，其 argument 必须是编译 dimension 相同的 external plain f32
+tensor。编译 dimension 是上界；runtime dimension 必须为正且不超过该上界，
+runtime stride 必须满足当前支持的正且不重叠条件，每个 storage span 必须位于编译
+bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 descriptor 语义。
+显式 alias、其他动态 operation、ragged tensor 和文档所列 `F8_128x4` scale 子集
+以外的物理 reorder 处理延后。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
 以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。

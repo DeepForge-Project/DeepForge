@@ -122,11 +122,12 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
 - generated adapters for arbitrary graph signatures and workspace views;
 - overlap checks based on read/write access rather than Conv-specific names;
 - `.dfo` format version 2 containing a generic tensor/argument table and
-  per-variant symbols.
+  per-variant symbols. C6 later advanced the writer to version 3 for dynamic
+  policy metadata while retaining version-2 read compatibility.
 
-The recommended compatibility rule is to keep reading existing format-v1
-Conv2D artifacts while writing format v2 for newly compiled graphs. Unknown
-artifact versions remain hard errors.
+The compatibility rule keeps reading format-v1 Conv2D and format-v2 generic
+artifacts. Current compilations write format v3. Unknown artifact versions
+remain hard errors.
 
 ### 4.4 Cost model ownership
 
@@ -247,17 +248,20 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. The first independently validated increment implements
-Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale ordering for block-scale
-quantize/dequantize and E8M0 MXFP8 forward/backward descale ports. Tests cover both
-M/K descriptor orientations, exact physical byte offsets, padded scale slots,
-malformed layouts, and use on an invalid port.
+**Status:** in progress. Two independently validated increments are complete.
+The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
+ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
+implements Frontend-shaped runtime dimensions/strides for the exact-shape,
+external plain f32 single-`POINTWISE` subset, artifact v3 policy persistence,
+and matching workspace queries. Tests cover physical offsets and padding,
+runtime descriptor execution, loaded artifacts, maxima and byte-span bounds,
+malformed override lists, and static-artifact rejection.
 
-**Work:** add dynamic shapes, shape override, ragged tensors, reorder formats,
-paged/cache-related composite metadata where it appears in serialized graphs,
-then add fusion, threading, vector schedules, and family-specific cost models.
-The remaining reorder work is limited to formats/ports outside the delivered
-`F8_128x4` scale subset.
+**Work:** expand dynamic behavior beyond the delivered pointwise subset; add
+ragged tensors, reorder formats, and paged/cache-related composite metadata
+where they appear in serialized graphs; then add fusion, threading, vector
+schedules, and family-specific cost models. The remaining reorder work is
+limited to formats/ports outside the delivered `F8_128x4` scale subset.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within

@@ -32,6 +32,15 @@ bool valid_access(TensorAccess access) {
     return false;
 }
 
+bool valid_override_policy(ShapeOverridePolicy policy) {
+    switch (policy) {
+        case ShapeOverridePolicy::kNone:
+        case ShapeOverridePolicy::kPointwiseExact:
+            return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 import::Status validate_graph_compile_metadata(
@@ -43,8 +52,14 @@ import::Status validate_graph_compile_metadata(
     if (metadata.arguments.empty() || metadata.arguments.size() > 4096) {
         return fail("argument count must be between 1 and 4096");
     }
+    if (!valid_override_policy(metadata.override_policy) ||
+        metadata.override_shape_enabled !=
+            (metadata.override_policy != ShapeOverridePolicy::kNone)) {
+        return fail("shape override flag and policy are inconsistent");
+    }
 
     std::set<std::int64_t> uids;
+    std::size_t override_write_count = 0;
     for (auto const& argument : metadata.arguments) {
         std::uint64_t expected_size = 0;
         if (!uids.insert(argument.uid).second) {
@@ -65,6 +80,19 @@ import::Status validate_graph_compile_metadata(
         if (!valid_access(argument.access)) {
             return fail("argument access mode is invalid");
         }
+        if (metadata.override_policy == ShapeOverridePolicy::kPointwiseExact) {
+            if (argument.data_type != import::DataType::kFloat32 ||
+                argument.dimensions != metadata.arguments.front().dimensions) {
+                return fail(
+                    "exact-pointwise override arguments must be equal-shape FLOAT tensors");
+            }
+            if (argument.access == TensorAccess::kWrite) {
+                ++override_write_count;
+            } else if (argument.access != TensorAccess::kRead) {
+                return fail(
+                    "exact-pointwise override arguments cannot be read-write");
+            }
+        }
         if (!import::tensor_storage_bytes(argument.data_type,
                                           argument.dimensions,
                                           argument.strides, expected_size) ||
@@ -74,6 +102,11 @@ import::Status validate_graph_compile_metadata(
                     std::numeric_limits<std::size_t>::max())) {
             return fail("argument storage range is invalid");
         }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kPointwiseExact &&
+        (metadata.arguments.size() < 2 || override_write_count != 1)) {
+        return fail(
+            "exact-pointwise override metadata requires inputs and one output");
     }
     return import::Status::ok();
 }

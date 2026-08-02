@@ -118,8 +118,9 @@ Tensor/Linalg transforms
 ```
 
 One-Shot Bufferize 的 function-boundary 选项固定为可预测的 identity layout；
-若内部函数需要动态 descriptor，必须在 runtime adapter 内处理，不能把未知
-layout 泄漏到 generated kernel。
+该 Conv Tensor/Linalg 路径保持静态。独立的 C6 generic pointwise 路径可使用内部
+dynamic memref 签名，由 runtime adapter 提供经过校验的 dimension/stride，且该
+descriptor 不进入 public API。
 
 MVP 的 workspace planner 在 bufferization 后接管临时 allocation；它不能在
 bufferization 前凭空假定 memref 地址，也不能在 LLVM lowering 后再猜测别名。
@@ -129,7 +130,7 @@ bufferization 前凭空假定 memref 地址，也不能在 LLVM lowering 后再�
 离开 Linalg 层时：
 
 - 只剩标准 Tensor/Linalg/Arith/Func（以及可选的 Transform metadata）；
-- 所有尺寸和 strides 已静态确定；
+- 该 Tensor/Linalg Conv 路径的所有尺寸和 strides 已静态确定；
 - output 已初始化；
 - named Conv 的 parallel/reduction 语义仍然合法；
 - One-Shot Bufferize 可以一次完成，不需要第二个 dialect-specific bufferize。

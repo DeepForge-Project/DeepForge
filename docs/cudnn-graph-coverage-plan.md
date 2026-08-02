@@ -114,10 +114,11 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
   alignment 和读写属性；
 - 支持任意 graph signature 和 workspace view 的生成式 adapter；
 - 基于读写属性而不是 Conv 固定名称的 overlap 检查；
-- `.dfo` format v2，保存通用 tensor/argument table 和各 CPU variant symbol。
+- `.dfo` format v2，保存通用 tensor/argument table 和各 CPU variant symbol；C6
+  后续为 dynamic policy metadata 将 writer 升到 v3，并保持 v2 读取兼容。
 
-建议继续读取现有 format-v1 Conv2D artifact，新编译 graph 写 format v2。未知
-artifact version 仍然直接报错，不能静默解释。
+兼容规则继续读取 format-v1 Conv2D 和 format-v2 generic artifact；当前新编译
+graph 写 format v3。未知 artifact version 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
 
@@ -229,16 +230,18 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中。首个独立验收增量已为 block-scale quantize/dequantize 的
-E4M3/E8M0 scale 和 MXFP8 forward/backward 的 E8M0 descale 端口实现
-Frontend/CUTLASS `F8_128x4` 物理 ordering。测试覆盖两种 M/K descriptor 方向、
-精确物理 byte offset、padded scale
-slot、错误 layout 和错误端口使用。
+**状态**：进行中，两个独立验收增量已完成。第一个为 block-scale conversion 的
+E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
+`F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
+`POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
+持久化和配套 workspace query。测试覆盖物理 offset/padding、runtime descriptor
+执行、artifact reload、dimension/byte-span 上界、错误 override list 和静态 artifact
+拒绝。
 
-**工作内容**：加入 dynamic shape、shape override、ragged tensor、reorder format、
-序列化图中出现的 paged/cache 复合元数据；随后增加 fusion、threading、vector
-schedule 和各操作族 cost model。剩余 reorder 工作仅指已交付 `F8_128x4` scale
-子集以外的 format/port。
+**工作内容**：将动态行为扩展到已交付 pointwise 子集之外；加入 ragged tensor、
+reorder format 和序列化图中出现的 paged/cache 复合元数据；随后增加 fusion、
+threading、vector schedule 和各操作族 cost model。剩余 reorder 工作仅指已交付
+`F8_128x4` scale 子集以外的 format/port。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能

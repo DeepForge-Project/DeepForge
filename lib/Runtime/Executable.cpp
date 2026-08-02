@@ -23,8 +23,10 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace deepforge::runtime {
 namespace {
@@ -69,6 +71,122 @@ bool writes(compiler::TensorAccess access) {
     return access != compiler::TensorAccess::kRead;
 }
 
+bool has_non_overlapping_layout(
+    std::span<std::int64_t const> dimensions,
+    std::span<std::int64_t const> strides) {
+    if (dimensions.size() != strides.size()) return false;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> axes;
+    axes.reserve(dimensions.size());
+    for (std::size_t index = 0; index < dimensions.size(); ++index) {
+        if (dimensions[index] <= 0 || strides[index] <= 0) return false;
+        if (dimensions[index] > 1) {
+            axes.emplace_back(static_cast<std::uint64_t>(strides[index]),
+                              static_cast<std::uint64_t>(dimensions[index]));
+        }
+    }
+    std::sort(axes.begin(), axes.end());
+    std::uint64_t occupied_span = 1;
+    for (auto const& [stride, extent] : axes) {
+        if (stride < occupied_span ||
+            extent - 1 >
+                (std::numeric_limits<std::uint64_t>::max() - occupied_span) /
+                    stride) {
+            return false;
+        }
+        occupied_span += (extent - 1) * stride;
+    }
+    return true;
+}
+
+struct ResolvedArgument {
+    std::vector<std::int64_t> dimensions;
+    std::vector<std::int64_t> strides;
+    std::uint64_t size_bytes = 0;
+};
+
+Status resolve_overrides(
+    compiler::GraphCompileMetadata const& metadata,
+    OverrideUids const& override_uids,
+    OverrideShapes const& override_shapes,
+    OverrideStrides const& override_strides,
+    std::vector<ResolvedArgument>& output) {
+    if (override_uids.size() != override_shapes.size() ||
+        override_uids.size() != override_strides.size()) {
+        return fail(ErrorCode::kInvalidValue, "runtime.override",
+                    "override UIDs, shapes, and strides must have equal counts");
+    }
+    if (!override_uids.empty() && !metadata.override_shape_enabled) {
+        return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                    "runtime.override",
+                    "artifact was not compiled with shape overrides enabled");
+    }
+
+    std::vector<ResolvedArgument> resolved;
+    resolved.reserve(metadata.arguments.size());
+    for (auto const& argument : metadata.arguments) {
+        resolved.push_back(
+            {argument.dimensions, argument.strides, argument.size_bytes});
+    }
+    std::set<std::int64_t> seen_overrides;
+    for (std::size_t override_index = 0;
+         override_index < override_uids.size(); ++override_index) {
+        auto const uid = override_uids[override_index];
+        if (!seen_overrides.insert(uid).second) {
+            return fail(ErrorCode::kInvalidValue, "runtime.override",
+                        "override UIDs must be unique");
+        }
+        auto argument_it = std::find_if(
+            metadata.arguments.begin(), metadata.arguments.end(),
+            [&](compiler::TensorArgumentMetadata const& argument) {
+                return argument.uid == uid;
+            });
+        if (argument_it == metadata.arguments.end()) {
+            return fail(ErrorCode::kInvalidVariantPack, "runtime.override",
+                        "override UID is not an external tensor argument");
+        }
+        auto const argument_index = static_cast<std::size_t>(
+            argument_it - metadata.arguments.begin());
+        auto const& dimensions = override_shapes[override_index];
+        auto const& strides = override_strides[override_index];
+        if (dimensions.size() != argument_it->dimensions.size() ||
+            strides.size() != argument_it->strides.size()) {
+            return fail(ErrorCode::kInvalidShape, argument_it->name,
+                        "override rank does not match the compiled tensor rank");
+        }
+        for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+            if (dimensions[axis] <= 0 ||
+                dimensions[axis] > argument_it->dimensions[axis]) {
+                return fail(
+                    ErrorCode::kInvalidShape, argument_it->name,
+                    "override dimensions must be positive and within compiled maxima");
+            }
+        }
+        if (!has_non_overlapping_layout(dimensions, strides)) {
+            return fail(ErrorCode::kInvalidLayout, argument_it->name,
+                        "override strides must define a positive non-overlapping layout");
+        }
+        std::uint64_t size_bytes = 0;
+        if (!import::tensor_storage_bytes(argument_it->data_type, dimensions,
+                                          strides, size_bytes) ||
+            size_bytes > argument_it->size_bytes) {
+            return fail(ErrorCode::kInvalidShape, argument_it->name,
+                        "override storage span exceeds the compiled tensor bound");
+        }
+        resolved[argument_index] = {dimensions, strides, size_bytes};
+    }
+    if (metadata.override_policy ==
+        compiler::ShapeOverridePolicy::kPointwiseExact) {
+        for (std::size_t index = 1; index < resolved.size(); ++index) {
+            if (resolved[index].dimensions != resolved.front().dimensions) {
+                return fail(ErrorCode::kInvalidShape, "runtime.override",
+                            "all pointwise tensor shapes must remain equal");
+            }
+        }
+    }
+    output = std::move(resolved);
+    return Status::ok();
+}
+
 Status validate_argument_table(
     compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata) {
@@ -88,6 +206,11 @@ Status validate_argument_table(
     if (metadata.arguments.size() != 3) {
         return fail(ErrorCode::kInvalidValue, "metadata.arguments",
                     "Conv adapter requires a function name and three arguments");
+    }
+    if (metadata.dynamic_shape_enabled || metadata.override_shape_enabled ||
+        metadata.override_policy != compiler::ShapeOverridePolicy::kNone) {
+        return fail(ErrorCode::kInvalidValue, "metadata.override",
+                    "Conv adapter does not support dynamic or override metadata");
     }
     for (auto const& argument : metadata.arguments) {
         if (argument.data_type != import::DataType::kFloat32 ||
@@ -275,6 +398,50 @@ std::int64_t Executable::get_workspace_size() const noexcept {
     return static_cast<std::int64_t>(impl_->workspace.size_bytes);
 }
 
+Status Executable::get_workspace_size(std::int64_t& workspace_size) const {
+    if (!impl_) {
+        return fail(ErrorCode::kInvalidArgument, "executable",
+                    "executable is empty");
+    }
+    auto const size = get_workspace_size();
+    if (size < 0) {
+        return fail(ErrorCode::kDimensionOverflow, "workspace",
+                    "workspace size does not fit int64");
+    }
+    workspace_size = size;
+    return Status::ok();
+}
+
+Status Executable::get_workspace_size(
+    FrontendHandle handle,
+    std::int64_t& workspace_size,
+    OverrideUids const& override_uids,
+    OverrideShapes const& override_shapes,
+    OverrideStrides const& override_strides) const {
+    (void)handle;
+    if (!impl_) {
+        return fail(ErrorCode::kInvalidArgument, "executable",
+                    "executable is empty");
+    }
+    std::vector<ResolvedArgument> resolved;
+    auto status = resolve_overrides(impl_->metadata, override_uids,
+                                    override_shapes, override_strides,
+                                    resolved);
+    if (status.is_bad()) return status;
+    return get_workspace_size(workspace_size);
+}
+
+std::int64_t Executable::get_workspace_size(
+    FrontendHandle handle,
+    OverrideUids const& override_uids,
+    OverrideShapes const& override_shapes,
+    OverrideStrides const& override_strides) const {
+    std::int64_t workspace_size = 0;
+    (void)get_workspace_size(handle, workspace_size, override_uids,
+                             override_shapes, override_strides);
+    return workspace_size;
+}
+
 CpuVariant Executable::selected_variant() const noexcept {
     if (!impl_) {
         return CpuVariant::kScalar;
@@ -302,14 +469,36 @@ bool Executable::supports_variant(CpuVariant variant) const noexcept {
 
 Status Executable::execute(FrontendHandle handle, VariantPack& uid_to_host_ptr,
                            void* workspace) const {
-    (void)handle;
+    return execute(handle, uid_to_host_ptr, workspace, {}, {}, {});
+}
+
+Status Executable::execute(
+    FrontendHandle handle,
+    VariantPack& uid_to_host_ptr,
+    void* workspace,
+    OverrideUids const& override_uids,
+    OverrideShapes const& override_shapes,
+    OverrideStrides const& override_strides) const {
     return execute_variant(selected_variant(), handle, uid_to_host_ptr,
-                           workspace);
+                           workspace, override_uids, override_shapes,
+                           override_strides);
 }
 
 Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
                                    VariantPack& uid_to_host_ptr,
                                    void* workspace) const {
+    return execute_variant(variant, handle, uid_to_host_ptr, workspace, {},
+                           {}, {});
+}
+
+Status Executable::execute_variant(
+    CpuVariant variant,
+    FrontendHandle handle,
+    VariantPack& uid_to_host_ptr,
+    void* workspace,
+    OverrideUids const& override_uids,
+    OverrideShapes const& override_shapes,
+    OverrideStrides const& override_strides) const {
     (void)handle;
     if (!impl_) {
         return fail(ErrorCode::kInvalidArgument, "executable",
@@ -328,6 +517,12 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
                     std::string("host CPU does not support: ") +
                         std::string(cpu_variant_name(variant)));
     }
+
+    std::vector<ResolvedArgument> resolved;
+    auto override_status = resolve_overrides(
+        impl_->metadata, override_uids, override_shapes, override_strides,
+        resolved);
+    if (override_status.is_bad()) return override_status;
 
     std::vector<void*> argument_pointers;
     argument_pointers.reserve(impl_->metadata.arguments.size());
@@ -348,12 +543,14 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
             return fail(ErrorCode::kInvalidVariantPack, argument.name,
                         "tensor pointer does not meet required alignment");
         }
-        if (argument.size_bytes > std::numeric_limits<std::size_t>::max()) {
+        auto const argument_index = argument_pointers.size();
+        auto const size_bytes = resolved[argument_index].size_bytes;
+        if (size_bytes > std::numeric_limits<std::size_t>::max()) {
             return fail(ErrorCode::kDimensionOverflow, argument.name,
                         "tensor byte range overflows size_t");
         }
         std::uintptr_t end = 0;
-        if (!checked_add(begin, static_cast<std::size_t>(argument.size_bytes),
+        if (!checked_add(begin, static_cast<std::size_t>(size_bytes),
                          end)) {
             return fail(ErrorCode::kDimensionOverflow, argument.name,
                         "tensor pointer range overflows uintptr_t");
@@ -422,9 +619,9 @@ Status Executable::execute_variant(CpuVariant variant, FrontendHandle handle,
         descriptors.reserve(impl_->metadata.arguments.size() + 1);
         for (std::size_t index = 0; index < impl_->metadata.arguments.size();
              ++index) {
-            auto const& argument = impl_->metadata.arguments[index];
             descriptors.emplace_back(argument_pointers[index],
-                                     argument.dimensions, argument.strides);
+                                     resolved[index].dimensions,
+                                     resolved[index].strides);
         }
         std::array<std::int64_t, 1> workspace_dimensions{
             static_cast<std::int64_t>(impl_->workspace.size_bytes)};

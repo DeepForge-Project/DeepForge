@@ -452,8 +452,12 @@ P0-P6 and post-MVP C0-C5 completed in this order:
 9. Started C6 with independently tested Frontend/CUTLASS `F8_128x4` physical
    E4M3/E8M0 scale decoding for block-scale conversion and E8M0 MXFP8
    forward/backward descales.
+10. Completed C6.2 runtime shape override for the exact-shape, external plain
+    f32 single-`POINTWISE` subset. Dynamic memref descriptors, Frontend-shaped
+    execute/workspace overloads, artifact v3 persistence, loaded execution,
+    and malformed/max-bound cases are tested.
 
-The remaining C6 functional work is dynamic/override shape, ragged/paged
+The remaining C6 functional work is broader dynamic behavior, ragged/paged
 metadata, reorder formats outside that scale subset, optimization, and release
 qualification. Benchmark-driven optimization remains owned by the
 Loop/Schedule layer: establish repeatable pinned-core measurements first, then

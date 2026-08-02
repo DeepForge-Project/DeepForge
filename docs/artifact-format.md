@@ -6,8 +6,9 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `2`；reader
-同时接受版本 `1` 的 Conv2D artifact，并为其重建 argument table。
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `3`；reader
+同时接受版本 `2` 的静态 metadata artifact 和版本 `1` 的 Conv2D artifact。版本 `1`
+会重建 argument table；版本 `1`、`2` 的 dynamic/override metadata 均默认为关闭。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -32,7 +33,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 2
+u32 format_version = 3
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -40,6 +41,10 @@ string llvm_version
 string cudnn_frontend_version
 string target_triple
 string public_function_name
+
+u32 dynamic_shape_enabled    # boolean
+u32 override_shape_enabled   # boolean
+u32 shape_override_policy    # 0 none, 1 exact pointwise
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -95,6 +100,11 @@ ranked-memref descriptor 和 workspace descriptor，再调用隐藏的 pointer-t
 wrapper。这个内部 adapter 不改变公开的 handle + UID variant-pack + workspace
 调用形状。reader 会拒绝未知 adapter kind，也会拒绝非空的 kind-1 metadata。
 
+版本 `3` 将执行 shape 意图与 argument 的编译最大 shape/byte span 分开记录。policy
+`1` 表示 object 为 exact-shape pointwise override 子集生成了 dynamic memref
+descriptor 和 runtime loop bound；runtime 在调用前仍会验证每个 override。过渡期
+Conv adapter 拒绝所有 dynamic/override metadata。
+
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
 为 `_mlir_ciface_<symbol>`。原始函数和 wrapper 都是 ELF `GLOBAL HIDDEN`，不会成为
@@ -109,7 +119,7 @@ metadata 和 workspace plan 交给对应 runtime adapter。包含 MLIR math lowe
 object 从当前进程解析标准 `libm` 符号。
 
 执行前会验证有序 argument table、UID、空指针、每个 tensor 的 alignment 和 byte
-range、workspace 64-byte 对齐及整数溢出。read/read alias 合法；任何涉及 write
+range、runtime override policy/bound、workspace 64-byte 对齐及整数溢出。read/read alias 合法；任何涉及 write
 argument 或 workspace 的重叠都会被拒绝。CPUID、FMA、OSXSAVE 和 XGETBV 决定
 AVX-512、AVX2 或 scalar 的安全选择；装载 object 本身不执行高 ISA 代码。
 
@@ -128,5 +138,5 @@ reader/loader 拒绝未知 format version、producer 版本、端序、不匹配
 数值契约、重复 UID、不一致 shape/padding、非法 workspace
 alignment/range/lifetime、错误的 argument table 或 adapter payload、variant
 symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum 错误。
-顶层编码发生变化时必须增加格式版本。版本 `1` 的字段顺序和语义保持冻结，仅用于
-读取；新编译结果写版本 `2`。
+顶层编码发生变化时必须增加格式版本。版本 `1`、`2` 的字段顺序和语义保持冻结，
+仅用于读取；新编译结果写版本 `3`。

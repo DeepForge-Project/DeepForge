@@ -7,8 +7,10 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `2`; the reader also
-accepts version `1` Conv2D artifacts and reconstructs their argument table.
+generated kernel. The current writer emits format version `3`; the reader also
+accepts version `2` static-metadata artifacts and version `1` Conv2D artifacts.
+For version `1`, it reconstructs the argument table; versions `1` and `2`
+default all dynamic and override metadata to disabled.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -38,7 +40,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 2
+u32 format_version = 3
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -46,6 +48,10 @@ string llvm_version
 string cudnn_frontend_version
 string target_triple
 string public_function_name
+
+u32 dynamic_shape_enabled    # boolean
+u32 override_shape_enabled   # boolean
+u32 shape_override_policy    # 0 none, 1 exact pointwise
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -103,6 +109,13 @@ then invokes a hidden pointer-table wrapper. This internal adapter does not
 change the public handle + UID variant-pack + workspace call. Readers reject
 unknown adapter kinds and nonempty kind-1 metadata.
 
+Version `3` records execution-shape intent separately from each argument's
+compiled maximum shape and byte span. Policy `1` means the object contains
+dynamic memref descriptors and runtime loop bounds for the exact-shape
+pointwise override subset. The runtime still validates every override before
+invocation. The transitional Conv adapter rejects all dynamic and override
+metadata.
+
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
 `<base>_avx2`, and `<base>_avx512`. The C-interface wrapper in each object is
@@ -120,7 +133,8 @@ the corresponding runtime adapter. Objects that contain lowered MLIR math
 operations resolve their standard `libm` symbols from the current process.
 
 Execution validates the ordered argument table, UIDs, null pointers, per-tensor
-alignment and byte ranges, 64-byte workspace alignment, and integer overflow.
+alignment and byte ranges, runtime override policy and bounds, 64-byte
+workspace alignment, and integer overflow.
 Read/read aliasing is legal; overlap involving a write argument or workspace is
 rejected. CPUID, FMA, OSXSAVE, and XGETBV determine safe AVX-512, AVX2, or
 scalar selection. Loading an object does not itself execute high-ISA code.
@@ -144,5 +158,5 @@ inconsistent shape or padding, invalid workspace alignment, ranges or
 lifetimes, invalid argument tables or adapter payloads, invalid variant symbols
 or features, duplicate variants, empty objects, truncation, trailing payload,
 and checksum mismatch. Changes to the top-level encoding must increment the
-format version. Version `1` field order and semantics remain frozen; it is
-read-only. New compilations write version `2`.
+format version. Version `1` and `2` field order and semantics remain frozen;
+both are read-only. New compilations write version `3`.

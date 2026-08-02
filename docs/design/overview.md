@@ -179,7 +179,7 @@ model。
 
 ## 7. Ownership 和 alias
 
-- X、W 只读，Y 只写。
+- 每个 external tensor 都携带 read、write 或 read-write access metadata。
 - 外部 buffer 和 workspace 不得重叠。
 - runtime 完成可计算的区间重叠检查后，私有 kernel 才可获得 readonly/noalias
   属性；接口没有携带分配长度，不能把它描述成可移植的越界检测器。
@@ -192,9 +192,10 @@ model。
 space、OpenMP、多算子 fusion、动态 shape、非 packed stride、NCHW physical
 layout、grouped/depthwise Conv、GPU backend。MVP 后 C2-C5 已独立加入正的任意
 stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能力子集。C6
-已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码；仍负责
-dynamic/override shape、ragged/其他 physical reorder metadata、paged/cache 复合
-语义、threading 和广泛 fusion。
+已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码，以及单个
+exact-shape external f32 `POINTWISE` node 的 runtime override。更广泛 dynamic
+行为、ragged/其他 physical reorder metadata、paged/cache 复合语义、threading 和
+广泛 fusion 仍待实现。
 
 延后不等于删除设计方向。每项在拥有明确语义、上游能力评估、正确性测试和性能
 基线后单独引入。

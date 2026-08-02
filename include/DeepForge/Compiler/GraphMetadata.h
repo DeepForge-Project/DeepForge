@@ -20,6 +20,11 @@ enum class TensorAccess : std::uint8_t {
     kReadWrite,
 };
 
+enum class ShapeOverridePolicy : std::uint8_t {
+    kNone = 0,
+    kPointwiseExact,
+};
+
 struct TensorArgumentMetadata {
     std::int64_t uid = 0;
     std::string name;
@@ -36,6 +41,9 @@ struct TensorArgumentMetadata {
 struct GraphCompileMetadata {
     std::string function_name;
     std::vector<TensorArgumentMetadata> arguments;
+    bool dynamic_shape_enabled = false;
+    bool override_shape_enabled = false;
+    ShapeOverridePolicy override_policy = ShapeOverridePolicy::kNone;
 
     bool operator==(GraphCompileMetadata const&) const = default;
 };

@@ -7,6 +7,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace deepforge::runtime {
 
@@ -14,6 +15,9 @@ struct ExecutableFactory;
 
 using FrontendHandle = void*;
 using VariantPack = std::unordered_map<std::int64_t, void*>;
+using OverrideUids = std::vector<std::int64_t>;
+using OverrideShapes = std::vector<std::vector<std::int64_t>>;
+using OverrideStrides = std::vector<std::vector<std::int64_t>>;
 
 enum class CpuVariant : std::uint8_t {
     kScalar = 0,
@@ -48,13 +52,37 @@ public:
     Executable(Executable const&) = delete;
     Executable& operator=(Executable const&) = delete;
 
+    [[nodiscard]] import::Status get_workspace_size(
+        std::int64_t& workspace_size) const;
+
+    [[nodiscard]] import::Status get_workspace_size(
+        FrontendHandle handle,
+        std::int64_t& workspace_size,
+        OverrideUids const& override_uids,
+        OverrideShapes const& override_shapes,
+        OverrideStrides const& override_strides) const;
+
     [[nodiscard]] std::int64_t get_workspace_size() const noexcept;
+
+    [[nodiscard]] std::int64_t get_workspace_size(
+        FrontendHandle handle,
+        OverrideUids const& override_uids,
+        OverrideShapes const& override_shapes,
+        OverrideStrides const& override_strides) const;
 
     // Select the highest safe CPU variant and execute it. The opaque handle is
     // accepted for Frontend-shaped source compatibility and is not inspected.
     [[nodiscard]] import::Status execute(FrontendHandle handle,
                                           VariantPack& uid_to_host_ptr,
                                           void* workspace) const;
+
+    [[nodiscard]] import::Status execute(
+        FrontendHandle handle,
+        VariantPack& uid_to_host_ptr,
+        void* workspace,
+        OverrideUids const& override_uids,
+        OverrideShapes const& override_shapes,
+        OverrideStrides const& override_strides) const;
 
     // Used by correctness tests and diagnostics to execute a specific compiled
     // variant without changing the public dispatch contract.
@@ -63,6 +91,15 @@ public:
         FrontendHandle handle,
         VariantPack& uid_to_host_ptr,
         void* workspace) const;
+
+    [[nodiscard]] import::Status execute_variant(
+        CpuVariant variant,
+        FrontendHandle handle,
+        VariantPack& uid_to_host_ptr,
+        void* workspace,
+        OverrideUids const& override_uids,
+        OverrideShapes const& override_shapes,
+        OverrideStrides const& override_strides) const;
 
     [[nodiscard]] bool supports_variant(CpuVariant variant) const noexcept;
     [[nodiscard]] CpuVariant selected_variant() const noexcept;

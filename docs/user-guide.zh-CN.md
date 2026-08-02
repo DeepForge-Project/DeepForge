@@ -14,8 +14,8 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证静态 CPU 子集 |
-| 通用 Tensor | 静态 rank 1-64 f32 data、显式 UID；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；一个 exact-shape f32 `POINTWISE` 子集支持 runtime override |
+| 通用 Tensor | rank 1-64 f32 data、显式 UID；除 pointwise override 子集外 shape 为静态；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；无 ragged metadata；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
 | Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
@@ -65,18 +65,19 @@ C5 特殊操作支持如下：
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | 静态 FP8 E4M3/E5M2 BHSD、GQA、scalar FLOAT scale/descale、两种 diagonal window、Stats/amax；无 padding、dropout、ALiBi |
 | `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | 静态 BHSD/GQA、32 元素 E8M0 block descale、f16/bf16/f32 输出或梯度、backward transpose-oriented 输入、Stats/amax；descale tensor 接受 `NONE` 或 Frontend `F8_128x4`，backward dS 使用文档声明的 f32 CPU reference approximation |
 
-Paged/cache attention、block mask、sink token、packed/ragged attention 和动态
-shape 延后。C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 已为
-文档指定的 block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder。
+Paged/cache attention、block mask、sink token 和 packed/ragged attention 延后。
+C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 已为文档指定的
+block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder，并实现下述
+pointwise override 子集。
 v1.24.0 标准 SDPA 的 bottom-right
 causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
 复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
-index。连接 tensor 类型同时受两端操作支持时，C2-C5 tag 可在同一个图中混合。
-不支持动态 shape、显式 alias、scalar pass-by-value、文档子集外的
-ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA device pointer、
-AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
+index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
+不支持 pointwise override 子集之外的动态执行、显式 alias、scalar pass-by-value、
+文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
+device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 CUDA Toolkit 和 cuDNN backend 不是依赖。项目只使用开源 `cudnn-frontend`
@@ -342,12 +343,45 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
+对序列化时设置 `is_override_shape_enabled=true` 的图，当前动态执行子集精确限定为
+一个 `POINTWISE` node，且输入输出都必须是编译 shape 相同的 external plain FLOAT
+tensor；不支持 broadcast、virtual tensor、ragged offset 或 reorder。编译 dimension
+和 byte span 是上界。workspace query 与 execute 使用 Frontend v1.24.0 相同的
+override array：
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes(
+    3, std::vector<std::int64_t>{runtime_m, runtime_n});
+deepforge::runtime::OverrideStrides override_strides(
+    3, std::vector<std::int64_t>{runtime_ld, 1});
+
+std::int64_t workspace_size = 0;
+status = result.executable->get_workspace_size(
+    nullptr, workspace_size, override_uids, override_shapes,
+    override_strides);
+if (status.is_good()) {
+    status = result.executable->execute(
+        nullptr, pack, workspace, override_uids, override_shapes,
+        override_strides);
+}
+```
+
+三个 override array 的数量必须相同，UID 必须唯一且属于 external argument。每个
+shape 必须保持 rank，dimension 为正且不超过序列化上界；stride 必须为正、满足当前
+支持的不重叠条件，storage span 不能超过编译 byte bound。最终所有 pointwise
+argument shape 必须仍相同，因此缩小 shape 时通常要覆盖全部 argument。空 override
+list 按编译最大 shape 执行。workspace query 执行相同校验，且当前子集的 workspace
+仍是静态上界。仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，
+该信息会写入 plan 和 `.dfo` metadata，但执行 descriptor 保持静态。
+
 运行时契约：
 
 - variant-pack 必须提供 metadata 中每个非 virtual argument UID 对应的 host
   pointer；额外 UID 被忽略。
-- 每个 argument 必须满足 metadata 记录的 alignment，并具有完整 tensor 容量；
-  API 不携带 buffer length，运行时无法证明实际分配大小。
+- 每个 argument 必须满足 metadata 记录的 alignment，并具有编译 span 容量；override
+  调用至少要具有该次 runtime span 容量。API 不携带 buffer length，运行时无法证明
+  实际分配大小。
 - 可写 argument 与 workspace 的有效地址区间不得重叠。
 - workspace 大小来自 `get_workspace_size()`，非零时必须 64-byte 对齐。
 - `FrontendHandle` 是为 Frontend 调用形状保留的 opaque `void*`，CPU runtime 不

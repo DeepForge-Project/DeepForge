@@ -203,7 +203,7 @@ benchmark-driven Optimize phase.
 
 ## 7. Ownership and Aliasing
 
-- X and W are read-only; Y is write-only.
+- Every external tensor carries read, write, or read-write access metadata.
 - External buffers and workspace must not overlap.
 - The runtime performs computable range-overlap checks before private kernels
   receive readonly/noalias attributes. Because the interface has no allocation
@@ -221,9 +221,9 @@ non-packed strides, physical NCHW layout, grouped or depthwise convolution, and
 a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
 the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
-documented block/MXFP8 ports; it still owns dynamic/override shape, ragged and
-other physical reorder metadata, paged/cache composites, threading, and broad
-fusion.
+documented block/MXFP8 ports and runtime override for one exact-shape external
+f32 `POINTWISE` node. Broader dynamic behavior, ragged and other physical
+reorder metadata, paged/cache composites, threading, and broad fusion remain.
 
 Deferral does not discard a direction. Each capability may be introduced
 independently after its semantics, upstream support, correctness tests, and

@@ -14,8 +14,8 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；一个 exact-shape f32 `POINTWISE` 子集支持 runtime override |
-| 通用 Tensor | rank 1-64 f32 data、显式 UID；除 pointwise override 子集外 shape 为静态；文档指定的 C4 metadata 可为 INT32/INT64；支持 virtual 中间值 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；一个 exact-shape f32 `POINTWISE` 子集支持 shape override array，MATMUL 支持 extent-override tensor 端口 |
+| 通用 Tensor | rank 1-64 f32 data、显式 UID；allocation 仍为静态；文档指定的 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；文档指定的标准 f32 SDPA tensor 可使用 ragged batch-prefix storage；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
 | Conv | rank 3-5 FPROP/DGRAD/WGRAD、group channel、正 stride/dilation、非负非对称 padding、两种 math mode |
@@ -32,7 +32,7 @@ DeepForge `0.1.0` 当前支持：
 | `CONCATENATE` | 编号输入、非负 axis、无 in-place mode |
 | `POINTWISE` | v1.24.0 全部 50 个 mode，尾维对齐的 NumPy broadcast |
 | `REDUCTION` | 全部 9 个 mode；输入输出 rank 相同，被归约维度为 1 |
-| `MATMUL` | 相同且 >= 2 的 rank、batch broadcast、无 M/N/K override、padding value 为 0 |
+| `MATMUL` | 相同且 >= 2 的 rank、batch broadcast、可选 per-batch INT32 M/N/K override，以及有限 f32 padding value |
 | `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`；支持 3 个 padding mode 且无 index 输出。`BILINEAR` 因 v1.24.0 序列化丢失 fraction denominator 而被拒绝 |
 
 C3 操作族如下：
@@ -60,7 +60,7 @@ C5 特殊操作支持如下：
 | Tags | 当前约束 |
 |---|---|
 | `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | 静态且可整除的 block、FLOAT compute；声明端口支持 f32/f16/bf16 value 和 FP8/FP4/INT4 storage；FP4 按低/高 nibble 打包；E4M3/E8M0 scale 输出/输入可使用 `F8_128x4` |
-| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、scalar FLOAT descale/output scale、rank >= 2 batch broadcast；C 可为 FP8/f32/f16/bf16，`Amax_C` 为 scalar FLOAT；无 M/N/K override |
+| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、scalar FLOAT descale/output scale、rank >= 2 batch broadcast；C 可为 FP8/f32/f16/bf16，`Amax_C` 为 scalar FLOAT；支持可选 per-batch INT32 M/N/K override |
 | `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`、`top_k` 为 0/1、Token `[1,T,K]`、Weight `[E,K,N]`、INT32 offset `[E,1,1]`，data 共享 f32/f16/bf16 类型 |
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | 静态 FP8 E4M3/E5M2 BHSD、GQA、scalar FLOAT scale/descale、两种 diagonal window、Stats/amax；无 padding、dropout、ALiBi |
 | `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | 静态 BHSD/GQA、32 元素 E8M0 block descale、f16/bf16/f32 输出或梯度、backward transpose-oriented 输入、Stats/amax；descale tensor 接受 `NONE` 或 Frontend `F8_128x4`，backward dS 使用文档声明的 f32 CPU reference approximation |
@@ -70,17 +70,18 @@ C5 特殊操作支持如下：
 paged，每个 INT32 page table 可为 plain storage 或使用独立 prefix 紧凑存储。Forward
 还接受序列化 UINT8 block mask；forward/backward 均接受 `SINK_TOKEN`，backward 可
 写 `DSINK_TOKEN`。Ragged 或 paged storage 要求 `padding_mask=true`、INT32
-`SEQ_LEN_Q`/`SEQ_LEN_KV` 以及运行时章节规定的 descriptor。Paged backward 仍延后。
+`SEQ_LEN_Q`/`SEQ_LEN_KV` 以及运行时章节规定的 descriptor。固定使用的 v1.24.0
+schema 没有 paged backward page-table 端口，因此该形式不属于输入契约。
 C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 也已为文档指定
 的 block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder，并实现
-下述 pointwise override 子集。
+下述两类 override 子集。
 v1.24.0 标准 SDPA 的 bottom-right
 causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
 复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
-不支持 pointwise override 子集之外的动态执行、显式 alias、scalar pass-by-value、
+不支持 pointwise 和 MATMUL override 子集之外的动态执行、显式 alias、scalar pass-by-value、
 文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
 device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
@@ -396,6 +397,17 @@ argument shape 必须仍相同，因此缩小 shape 时通常要覆盖全部 arg
 list 按编译最大 shape 执行。workspace query 执行相同校验，且当前子集的 workspace
 仍是静态上界。仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，
 该信息会写入 plan 和 `.dfo` metadata，但执行 descriptor 保持静态。
+
+MATMUL extent override 是独立的 serialized node input，不使用上面的 shape override
+array。`M_override`、`N_override`、`K_override` 都是可选 external plain INT32
+tensor，通过普通 UID variant pack 传入。它们的 rank 与 C 相同，末两个 dimension
+为 `[1,1]`，batch dimension 为 1 或对应的 C dimension。序列化 A/B/C dimension
+是 allocation 上界；每个 broadcast batch entry 的合法值满足
+`0 <= M <= C[-2]`、`0 <= N <= C[-1]`、
+`0 <= K <= A[-1] == B[-2]`，缺少某个端口时使用对应完整静态 extent。M/N 选择
+有效输出矩形，K 选择 reduction extent。标准 f32 MATMUL 在 M/N 外写入有限 f32
+`padding_value`，默认值为零；MATMUL_FP8 在 M/N 外写零，其 `Amax_C` 包含这些零值。
+该能力不扩展 execute 或 workspace ABI。
 
 标准 f32 SDPA 中，每个受支持的 ragged argument 都是 external plain rank-4 逻辑
 tensor，并指向一个独立 external INT32/INT64 `[B+1,1,1,1]` offset tensor。Forward

@@ -426,9 +426,14 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     cost model。它选择合法且 target-aware 的 K-output unroll factor，暴露选择结果，
     保留 baseline policy，在独立 accumulator 间复用 X load，并由决策、tail、数值、
     benchmark A/B、Release、ASan 和 UBSan gate 覆盖。
+14. 已完成：C6.6 为标准和 FP8 MATMUL 实现 producer 序列化的 INT32 M/N/K extent
+    override。Per-batch broadcast metadata、标准 MATMUL 有限 f32 padding、FP8 零
+    padding、artifact reload、错误 descriptor、Release、ASan 和 UBSan 均已覆盖，
+    且不改变公开 execute ABI。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为、paged backward 和上述 scale 子集以外
-的 reorder format。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
+剩余 C6 功能工作包括更广泛的 dynamic 行为和上述 scale 子集以外的 reorder
+format。固定使用的 v1.24.0 serializer 无法表达 paged backward，该能力仅作为未来
+schema 版本的兼容工作跟踪。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
 baseline policy 逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact
 契约。

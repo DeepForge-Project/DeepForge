@@ -319,6 +319,22 @@ Json matmul_fp8_graph() {
                           std::move(tensors));
 }
 
+Json matmul_fp8_override_graph() {
+    auto graph = matmul_fp8_graph();
+    graph["graph_uid"] = 5018;
+    graph["context"]["name"] = "matmul-fp8-overrides";
+    graph["tensors"]["28"] =
+        tensor("M_override", 28, {1, 1, 1}, "INT32");
+    graph["tensors"]["29"] =
+        tensor("N_override", 29, {1, 1, 1}, "INT32");
+    graph["tensors"]["30"] =
+        tensor("K_override", 30, {1, 1, 1}, "INT32");
+    graph["nodes"][0]["inputs"]["M_override"] = 28;
+    graph["nodes"][0]["inputs"]["N_override"] = 29;
+    graph["nodes"][0]["inputs"]["K_override"] = 30;
+    return graph;
+}
+
 Json moe_graph() {
     Json tensors = Json::object();
     tensors["31"] = tensor("Token", 31, {1, 4, 2}, "FLOAT");
@@ -802,6 +818,26 @@ void run_matmul_test(TestRunner& tests) {
     tests.check(close_vectors(c, {5.0F, 1.0F, 11.0F, 1.0F}) &&
                     close_vectors(amax, {11.0F}),
                 "FP8 matmul descales inputs and reports pre-output-scale amax");
+
+    deepforge::compiler::CompilationResult override_compilation;
+    status = compile_document(matmul_fp8_override_graph(),
+                              override_compilation);
+    tests.good(status, "compile FP8 matmul dimension overrides");
+    if (status.is_bad() || !override_compilation.executable) return;
+    std::vector<std::int32_t> m_override{1};
+    std::vector<std::int32_t> n_override{1};
+    std::vector<std::int32_t> k_override{1};
+    std::fill(c.begin(), c.end(), -99.0F);
+    std::fill(amax.begin(), amax.end(), -99.0F);
+    pack.emplace(28, m_override.data());
+    pack.emplace(29, n_override.data());
+    pack.emplace(30, k_override.data());
+    status = override_compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.good(status, "execute FP8 matmul dimension overrides");
+    tests.check(close_vectors(c, {1.0F, 0.0F, 0.0F, 0.0F}) &&
+                    close_vectors(amax, {1.0F}),
+                "FP8 M/N/K overrides zero inactive outputs and products");
 }
 
 void run_moe_test(TestRunner& tests) {

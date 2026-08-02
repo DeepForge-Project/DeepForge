@@ -1,4 +1,5 @@
 #include "FoundationalGraph.h"
+#include "MatmulGraph.h"
 #include "Numeric.h"
 #include "SequenceGraph.h"
 #include "SpecializedGraph.h"
@@ -785,16 +786,15 @@ Status validate_matmul(GenericOperationDesc const& operation,
                        SerializedGraph const& graph,
                        std::size_t node_index) {
     auto const path = "nodes[" + std::to_string(node_index) + "]";
+    auto const override_count =
+        static_cast<std::size_t>(operation.inputs.contains("M_override")) +
+        static_cast<std::size_t>(operation.inputs.contains("N_override")) +
+        static_cast<std::size_t>(operation.inputs.contains("K_override"));
     if (!operation.inputs.contains("A") || !operation.inputs.contains("B") ||
+        operation.inputs.size() != 2 + override_count ||
         operation.outputs.size() != 1 || !operation.outputs.contains("C")) {
         return fail(ErrorCode::kInvalidValue, path,
                     "MATMUL requires A, B, and C");
-    }
-    for (auto override_name : {"M_override", "N_override", "K_override"}) {
-        if (operation.inputs.contains(override_name)) {
-            return unsupported(path,
-                               "MATMUL dimension overrides are deferred to C6");
-        }
     }
     auto const* a = graph.find_tensor(operation.inputs.at("A"));
     auto const* b = graph.find_tensor(operation.inputs.at("B"));
@@ -812,14 +812,12 @@ Status validate_matmul(GenericOperationDesc const& operation,
         return fail(ErrorCode::kInvalidValue, path,
                     "MATMUL attributes are not executable f32 semantics");
     }
-    if (padding_value && !std::isfinite(*padding_value)) {
+    if (padding_value &&
+        (!std::isfinite(*padding_value) ||
+         std::fabs(*padding_value) >
+             static_cast<double>(std::numeric_limits<float>::max()))) {
         return fail(ErrorCode::kInvalidValue, path,
-                    "MATMUL padding value must be finite");
-    }
-    if (padding_value && *padding_value != 0.0) {
-        return unsupported(
-            path,
-            "nonzero MATMUL padding is deferred with dimension overrides to C6");
+                    "MATMUL padding value must fit finite f32");
     }
     if (a->dim.size() < 2 || a->dim.size() != b->dim.size() ||
         a->dim.size() != c->dim.size()) {
@@ -845,7 +843,8 @@ Status validate_matmul(GenericOperationDesc const& operation,
                         "MATMUL C batch dimensions do not match broadcast");
         }
     }
-    return Status::ok();
+    MatmulOverrides overrides;
+    return decode_matmul_overrides(operation, graph, *c, path, overrides);
 }
 
 Status validate_resample(GenericOperationDesc const& operation,
@@ -1196,12 +1195,14 @@ Status analyze_graph(SerializedGraph const& graph,
             if (!is_specialized_operation(node.tag) &&
                 tensor->data_type != import::DataType::kFloat32 &&
                 !is_sequence_metadata_input(node.tag, port,
-                                            tensor->data_type)) {
+                                            tensor->data_type) &&
+                !is_matmul_override_input(node.tag, port,
+                                          tensor->data_type)) {
                 return fail(ErrorCode::kUnsupportedDataType,
                             "nodes[" + std::to_string(node_index) +
                                 "].inputs." + port,
                             "non-FLOAT tensors are limited to documented "
-                            "sequence metadata ports");
+                            "metadata ports");
             }
         }
         for (auto const& [port, reference] : operation->outputs) {
@@ -2334,6 +2335,13 @@ Status emit_matmul(
     auto const& b = graph.tensors.at(b_uid);
     auto const& c = graph.tensors.at(c_uid);
     auto const rank = c.dim.size();
+    MatmulOverrides overrides;
+    auto status = decode_matmul_overrides(operation, graph, c, "MATMUL",
+                                          overrides);
+    if (status.is_bad()) return status;
+    std::optional<double> padding_value;
+    (void)read_optional_number_attribute(operation, "padding_value",
+                                         padding_value);
     return emit_flat_loop(
         builder, location, c.dim, "MATMUL",
         [&](::mlir::OpBuilder& body_builder,
@@ -2376,16 +2384,38 @@ Status emit_matmul(
                     auto b_value = ::mlir::memref::LoadOp::create(
                         reduction_builder, reduction_location, values.at(b_uid),
                         b_indices);
-                    auto product = ::mlir::arith::MulFOp::create(
+                    ::mlir::Value product = ::mlir::arith::MulFOp::create(
                         reduction_builder, reduction_location, a_value,
                         b_value);
+                    auto k_active = matmul_override_index_is_active(
+                        reduction_builder, reduction_location, overrides.k,
+                        reduction_indices.front(), c_indices, values);
+                    product = ::mlir::arith::SelectOp::create(
+                        reduction_builder, reduction_location, k_active,
+                        product,
+                        float_constant(reduction_builder, reduction_location,
+                                       0.0F));
                     return {::mlir::arith::AddFOp::create(
                         reduction_builder, reduction_location,
                         iter_args.front(), product)};
                 });
-            ::mlir::memref::StoreOp::create(
-                body_builder, body_location, sum.results.front(),
-                values.at(c_uid), c_indices);
+            auto m_active = matmul_override_index_is_active(
+                body_builder, body_location, overrides.m,
+                c_indices[rank - 2], c_indices, values);
+            auto n_active = matmul_override_index_is_active(
+                body_builder, body_location, overrides.n,
+                c_indices[rank - 1], c_indices, values);
+            auto output_active = ::mlir::arith::AndIOp::create(
+                body_builder, body_location, m_active, n_active);
+            auto result = ::mlir::arith::SelectOp::create(
+                body_builder, body_location, output_active,
+                sum.results.front(),
+                float_constant(
+                    body_builder, body_location,
+                    static_cast<float>(padding_value.value_or(0.0))));
+            ::mlir::memref::StoreOp::create(body_builder, body_location,
+                                             result, values.at(c_uid),
+                                             c_indices);
         });
 }
 

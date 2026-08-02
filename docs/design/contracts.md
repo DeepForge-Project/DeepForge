@@ -139,20 +139,28 @@ arithmetic 计算；任何超出 `int64_t`/`size_t` 可表示范围的输入返�
 
 ### 3.1 MVP 后 C2 扩展
 
-C2 在不放宽 Conv 契约的前提下增加第二种可执行图：只由 `RESHAPE`、
+C2 在不放宽 Conv 契约的前提下增加第二种静态分配的可执行 f32 图：只由 `RESHAPE`、
 `TRANSPOSE`、`SLICE`、`CONCATENATE`、`POINTWISE`、`REDUCTION`、
-`MATMUL` 和 `RESAMPLE` 构成的静态 f32 DAG。精确 mode、shape、layout、
+`MATMUL` 和 `RESAMPLE` 构成。精确 mode、shape、layout、
 attribute 和 alias 约束以
 [schema capability 清单](../cudnn-graph-schema-inventory.md#5-capability-含义)中
 已验证行的声明为准。
 
-C2 tensor 必须具有正的静态维度、正且不重叠的 stride、显式 UID、`NONE`
-reorder，并且不是 pass-by-value 或 ragged tensor。virtual tensor 使用静态规划的
-workspace。`VIEW_ONLY` reshape、in-place concatenate、同 UID
-输入输出、MATMUL 维度 override 或非零 padding、RESAMPLE index 输出仍不支持。
+C2 data tensor 必须具有正的静态 allocation dimension、正且不重叠的 stride、显式
+UID、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。virtual tensor 使用
+静态规划的 workspace。`VIEW_ONLY` reshape、in-place concatenate、同 UID
+输入输出和 RESAMPLE index 输出仍不支持。
 RESAMPLE `BILINEAR` 也会被拒绝，因为 v1.24.0 序列化 fraction 表示省略了恢复
 分数缩放语义所需的 denominator。第 4 节公开执行接口保持不变，差异只存在于
 runtime 隐藏的 invocation adapter。
+
+标准 f32 `MATMUL` 可带可选 `M_override`、`N_override`、`K_override` input。每个
+端口都是 external plain INT32 tensor，rank 与 C 相同，末两个 dimension 为
+`[1,1]`，batch dimension 为 1 或对应的 C dimension。每个 broadcast batch entry
+的调用者前置条件为 `0 <= M <= C[-2]`、`0 <= N <= C[-1]` 和
+`0 <= K <= A[-1] == B[-2]`；缺少的 input 使用静态上界。M/N 控制有效输出矩形，K
+控制 reduction extent，其余输出由有限 f32 `padding_value` 填充，默认值为零。这些
+metadata tensor 使用普通 UID-map argument，不改变公开执行 ABI。
 
 ### 3.2 MVP 后 C3 扩展
 
@@ -289,6 +297,9 @@ loop bound。runtime descriptor 将解析后的值传给进程内对象和 artif
 workspace query 与 execute 使用同一套校验。Artifact format `3` 至 `5` 都记录两个
 context flag 和 policy；v1/v2 reader 默认全部关闭。
 
+该 graph-level override-array 机制与 3.1 节 serialized MATMUL extent-override
+tensor 端口相互独立。
+
 ### 3.7 C6 标准 f32 SDPA Metadata 扩展
 
 该扩展只适用于静态标准 f32 `SDPA`/`SDPA_BWD`，不适用于 FP8/MXFP8 attention 或
@@ -319,7 +330,8 @@ INT32/INT64 `[B+1,1,1,1]` element prefix。每个紧凑 batch segment 至少要�
 ID 替换安全地址和零值，因此不会越界读取 container，但结果不属于语义契约。
 
 Ragged Q/O 可与 paged K/V 组合；单个 K 或 V container 不能同时 paged 和 ragged。
-Paged backward 执行仍延后。
+固定使用的 cuDNN Frontend v1.24.0 backward serializer 没有 K/V page-table 端口，
+因此 accepted input schema 无法表达 paged backward。
 
 Forward `Block_mask` 必须是 external plain UINT8 tensor，精确 dimension 为
 `[B,Hq,ceil(Sq/128),ceil(ceil(Skv/128)/8)]`。每个 bit 启用一个 128x128 query/key

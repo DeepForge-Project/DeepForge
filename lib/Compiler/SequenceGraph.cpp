@@ -607,8 +607,8 @@ Status decode_attention(OperationTag tag,
         if (has_input(operation, "Page_table_K") ||
             has_input(operation, "Page_table_V")) {
             return unsupported(path,
-                               "paged SDPA backward is deferred to a later "
-                               "C6 attention increment");
+                               "cuDNN Frontend v1.24.0 does not expose paged "
+                               "SDPA backward page-table ports");
         }
     } else {
         if (!read_optional_integer_attribute(operation, "max_seq_len_kv",

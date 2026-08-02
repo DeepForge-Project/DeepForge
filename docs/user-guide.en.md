@@ -15,8 +15,8 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; one exact-shape f32 `POINTWISE` subset supports runtime override |
-| Generic tensors | Rank 1-64 f32 data with explicit UID; shapes are otherwise static; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; one exact-shape f32 `POINTWISE` subset supports shape override arrays, and MATMUL supports extent-override tensor ports |
+| Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
@@ -33,7 +33,7 @@ The foundational operation subset is:
 | `CONCATENATE` | Numbered inputs, non-negative axis, no in-place mode |
 | `POINTWISE` | All 50 v1.24.0 modes with trailing-dimension NumPy broadcasting |
 | `REDUCTION` | All 9 modes; same input/output rank and reduced extents equal to one |
-| `MATMUL` | Equal rank >= 2, broadcast batch dimensions, no M/N/K override, zero padding value |
+| `MATMUL` | Equal rank >= 2, broadcast batch dimensions, optional per-batch INT32 M/N/K overrides, and finite f32 padding value |
 | `RESAMPLE` | Three pooling modes plus integer `NEAREST`; three padding modes and no index output. `BILINEAR` is rejected because v1.24.0 drops fraction denominators during serialization |
 
 The C3 operation families are:
@@ -61,7 +61,7 @@ C5 specialized operation support is:
 | Tags | Current constraints |
 |---|---|
 | `BLOCK_SCALE_QUANTIZE`, `BLOCK_SCALE_DEQUANTIZE` | Static divisible blocks; FLOAT compute; f32/f16/bf16 values and FP8/FP4/INT4 storage on the declared ports; FP4 uses packed low/high nibbles; E4M3/E8M0 scale output/input may use `F8_128x4` |
-| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, scalar FLOAT descales/output scale, rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, scalar FLOAT `Amax_C`; no M/N/K override |
+| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, scalar FLOAT descales/output scale, rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, scalar FLOAT `Amax_C`, and optional per-batch INT32 M/N/K overrides |
 | `MOE_GROUPED_MATMUL`, `MOE_GROUPED_MATMUL_BWD` | `mode=NONE`, `top_k` 0 or 1, Token `[1,T,K]`, Weight `[E,K,N]`, INT32 offsets `[E,1,1]`, and one shared f32/f16/bf16 data type |
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | Static FP8 E4M3/E5M2 BHSD with GQA, scalar FLOAT scales/descales, top-left or bottom-right windows, Stats and amax outputs; no padding, dropout, or ALiBi |
 | `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; descale tensors accept `NONE` or Frontend `F8_128x4`, and backward dS uses the documented f32 CPU reference approximation |
@@ -73,18 +73,19 @@ plain or compacted with its own prefix. Forward additionally accepts the
 serialized UINT8 block mask, while forward/backward accept `SINK_TOKEN` and
 backward may write `DSINK_TOKEN`. Ragged or paged storage requires
 `padding_mask=true`, INT32 `SEQ_LEN_Q`/`SEQ_LEN_KV`, and the exact descriptors
-documented in the runtime section. Paged backward remains deferred. C5 FP8
+documented in the runtime section. The pinned v1.24.0 schema exposes no paged
+backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the pointwise override subset below.
+block-scale and MXFP8 ports and the two override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
 
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
-supported by both operations. Dynamic execution outside the pointwise override
-subset, explicit aliasing, scalar pass-by-value, ragged/reordered tensors
+supported by both operations. Dynamic execution outside the pointwise and
+MATMUL override subsets, explicit aliasing, scalar pass-by-value, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
 16 MiB. The exact per-tag matrix is in the
@@ -417,6 +418,19 @@ argument. An empty list executes the compiled maximum shape. The workspace
 query validates the same rules and is statically bounded for this subset.
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static.
+
+MATMUL extent overrides are separate serialized node inputs and do not use the
+shape-override arrays above. `M_override`, `N_override`, and `K_override` are
+optional external plain INT32 tensors passed through the normal UID variant
+pack. Each has the same rank as C, trailing dimensions `[1,1]`, and batch
+dimensions that are either one or equal to C. Serialized A/B/C dimensions are
+the allocation maxima. For each broadcasted batch entry, valid values satisfy
+`0 <= M <= C[-2]`, `0 <= N <= C[-1]`, and
+`0 <= K <= A[-1] == B[-2]`; an absent port selects its full static extent. M/N
+select the valid output rectangle and K selects the reduction extent. Standard
+f32 MATMUL writes its finite f32 `padding_value` outside M/N, defaulting to
+zero. MATMUL_FP8 writes zero outside M/N, and its `Amax_C` includes those zero
+values. No execute or workspace ABI extension is required.
 
 For standard f32 SDPA, each supported ragged argument is an external plain
 rank-4 logical tensor and names a separate external INT32 or INT64 offset tensor

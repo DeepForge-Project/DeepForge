@@ -232,7 +232,7 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中，五个独立验收增量已完成。第一个为 block-scale conversion 的
+**状态**：进行中，六个独立验收增量已完成。第一个为 block-scale conversion 的
 E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 `F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
 `POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
@@ -249,11 +249,16 @@ mask、精确分配、错误 metadata、reload 和 sanitizer 构成该增量的�
 第五个为原有优化的静态 packed f32 Conv 路径加入首个生效的 Loop/Schedule cost
 model。它选择 target-aware K-output unroll，保留 baseline 回退，暴露 schedule 名称，
 并通过决策、tail、数值、绑核 A/B、Release、ASan 和 UBSan 检查。通用 C2-C6 graph
-仍使用 reference schedule。
+仍使用 reference schedule。第六个为标准和 FP8 MATMUL 实现 producer 序列化的
+per-batch INT32 M/N/K extent tensor，包括 broadcast metadata、标准 MATMUL 有限
+padding、FP8 零 padding、artifact reload、错误 descriptor、Release、ASan 和 UBSan
+覆盖。
 
-**工作内容**：将动态行为扩展到已交付 pointwise 子集之外；加入 Frontend
-serialization 暴露的 paged backward；加入已交付 scale 子集外的 reorder format；
-随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
+**工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；加入已交付
+scale 子集外的 reorder format；随后独立评估 fusion、threading、其他 vector
+schedule 和各操作族 cost model。固定使用的 v1.24.0 serializer 没有 paged backward
+page-table 端口，因此该能力属于未来 schema 版本的兼容工作，不是当前契约下的实现
+任务。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能

@@ -2,6 +2,7 @@ add_library(deepforge_compiler STATIC
     Artifact.cpp
     Compiler.cpp
     FoundationalGraph.cpp
+    MatmulGraph.cpp
     Numeric.cpp
     NormalizationGraph.cpp
     Schedule.cpp

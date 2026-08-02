@@ -223,11 +223,14 @@ a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
 the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
 documented block/MXFP8 ports and runtime override for one exact-shape external
-f32 `POINTWISE` node. Standard f32 SDPA now supports ragged forward data/row
+f32 `POINTWISE` node. Standard and FP8 MATMUL also accept producer-serialized
+per-batch INT32 M/N/K extent tensors while retaining static allocation maxima.
+Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
 tables, forward block masks, and forward/backward sink tokens. Broader dynamic
-behavior, paged backward, other physical reorder metadata, threading, and broad
-fusion remain.
+behavior, other physical reorder metadata, threading, and broad fusion remain.
+Paged backward cannot be represented by the pinned v1.24.0 serializer and is
+therefore future schema-version compatibility work.
 
 Deferral does not discard a direction. Each capability may be introduced
 independently after its semantics, upstream support, correctness tests, and

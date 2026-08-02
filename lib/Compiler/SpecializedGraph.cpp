@@ -1,5 +1,6 @@
 #include "SpecializedGraph.h"
 
+#include "MatmulGraph.h"
 #include "Numeric.h"
 #include "SpecializedAttention.h"
 
@@ -410,13 +411,12 @@ Status validate_matmul_fp8(GenericOperationDesc const& operation,
                            std::string const& path) {
     auto status = require_float_compute(operation, path);
     if (status.is_bad()) return status;
-    for (auto port : {"M_override", "N_override", "K_override"}) {
-        if (operation.inputs.contains(port)) {
-            return unsupported(path + ".inputs." + port,
-                               "runtime matmul overrides are implemented in C6");
-        }
-    }
-    if (operation.inputs.size() != 5 || operation.outputs.size() != 2) {
+    auto const override_count =
+        static_cast<std::size_t>(operation.inputs.contains("M_override")) +
+        static_cast<std::size_t>(operation.inputs.contains("N_override")) +
+        static_cast<std::size_t>(operation.inputs.contains("K_override"));
+    if (operation.inputs.size() != 5 + override_count ||
+        operation.outputs.size() != 2) {
         return fail(ErrorCode::kInvalidValue, path,
                     "MATMUL_FP8 requires A, B, two descales, Scale_C, C, "
                     "and Amax_C");
@@ -491,7 +491,8 @@ Status validate_matmul_fp8(GenericOperationDesc const& operation,
                         "batch dimensions are not broadcast-compatible");
         }
     }
-    return Status::ok();
+    MatmulOverrides overrides;
+    return decode_matmul_overrides(operation, graph, *c, path, overrides);
 }
 
 Status validate_moe_forward(GenericOperationDesc const& operation,
@@ -911,6 +912,7 @@ struct MatmulFp8Values {
     ::mlir::Value descale_a;
     ::mlir::Value descale_b;
     ::mlir::Value scale_c;
+    MatmulOverrides overrides;
 };
 
 MatmulFp8Values prepare_matmul_fp8(
@@ -938,6 +940,8 @@ MatmulFp8Values prepare_matmul_fp8(
     result.descale_a = scalar("Descale_A");
     result.descale_b = scalar("Descale_B");
     result.scale_c = scalar("Scale_C");
+    (void)decode_matmul_overrides(operation, graph, *result.c,
+                                  "MATMUL_FP8", result.overrides);
     return result;
 }
 
@@ -975,15 +979,34 @@ MatmulFp8Values prepare_matmul_fp8(
             auto b = numeric::load_as_f32(
                 reduction_builder, reduction_location,
                 values.at(matmul.b_uid), *matmul.b, b_indices);
+            ::mlir::Value product = ::mlir::arith::MulFOp::create(
+                reduction_builder, reduction_location, a, b);
+            auto k_active = matmul_override_index_is_active(
+                reduction_builder, reduction_location, matmul.overrides.k,
+                k, output_indices, values);
+            product = ::mlir::arith::SelectOp::create(
+                reduction_builder, reduction_location, k_active, product,
+                float_constant(reduction_builder, reduction_location,
+                               0.0F));
             return ::mlir::arith::AddFOp::create(
                 reduction_builder, reduction_location, accumulator,
-                ::mlir::arith::MulFOp::create(
-                    reduction_builder, reduction_location, a, b));
+                product);
         });
     result = ::mlir::arith::MulFOp::create(builder, location, result,
                                             matmul.descale_a);
-    return ::mlir::arith::MulFOp::create(builder, location, result,
-                                          matmul.descale_b);
+    result = ::mlir::arith::MulFOp::create(builder, location, result,
+                                            matmul.descale_b);
+    auto m_active = matmul_override_index_is_active(
+        builder, location, matmul.overrides.m,
+        output_indices[rank - 2], output_indices, values);
+    auto n_active = matmul_override_index_is_active(
+        builder, location, matmul.overrides.n,
+        output_indices[rank - 1], output_indices, values);
+    auto output_active = ::mlir::arith::AndIOp::create(
+        builder, location, m_active, n_active);
+    return ::mlir::arith::SelectOp::create(
+        builder, location, output_active, result,
+        float_constant(builder, location, 0.0F));
 }
 
 Status emit_matmul_fp8(

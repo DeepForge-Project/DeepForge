@@ -138,14 +138,23 @@ non-broadcasting, plain f32 `POINTWISE` node: serialized dimensions are maxima,
 and the Frontend-shaped override arrays supply positive runtime dimensions and
 strides within the compiled storage bounds. The standalone dynamic-shape
 context flag is preserved as plan metadata but does not by itself make another
-operation dynamic. Static f32 SDPA supports external ragged forward data and
+operation dynamic. Standard f32 `MATMUL`, plus `MATMUL_FP8`, independently
+accept optional producer-serialized external plain INT32 `M_override`,
+`N_override`, and `K_override` tensors. Their rank matches C, their two matrix
+dimensions are one, and each batch dimension is either one or the corresponding
+C dimension. The values select per-batch output and reduction extents within
+the serialized static maxima. Standard MATMUL fills the inactive M/N region
+with its finite f32 `padding_value`; MATMUL_FP8 fills it with zero. Static f32
+SDPA supports external ragged forward data and
 row outputs, and ragged backward data and gradients, using validated
 element-prefix offsets. Forward also supports independently paged K/V caches,
 including compact INT32 page tables with independent prefixes, compressed
 UINT8 block masks, and per-query-head sink logits; backward can return the sink
 gradient. These storage forms require padding and explicit sequence lengths.
-Explicit aliasing, scalar pass-by-value, paged backward attention, other tensor
-reordering, distributed peer statistics, and optional features on the
+Paged backward page-table ports are not present in the pinned v1.24.0
+serialization schema and are therefore outside the current input contract.
+Explicit aliasing, scalar pass-by-value, other tensor reordering, distributed
+peer statistics, and optional features on the
 specialized FP8/MXFP8 attention paths are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
@@ -362,7 +371,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, exact-pointwise runtime shape override, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
+| C6 | In progress: `F8_128x4`, exact-pointwise shape override, MATMUL M/N/K extent overrides, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
 | Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

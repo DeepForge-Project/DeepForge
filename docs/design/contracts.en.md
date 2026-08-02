@@ -158,20 +158,30 @@ wrap in a later MLIR index or pointer computation.
 ### 3.1 Post-MVP C2 Extension
 
 C2 adds a second executable graph form without weakening the Conv contract: a
-static f32 DAG composed only of `RESHAPE`, `TRANSPOSE`, `SLICE`,
+statically allocated f32 DAG composed only of `RESHAPE`, `TRANSPOSE`, `SLICE`,
 `CONCATENATE`, `POINTWISE`, `REDUCTION`, `MATMUL`, and `RESAMPLE`. Its exact
 mode, shape, layout, attribute, and alias restrictions are the validated rows
 in the [schema capability inventory](../cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
-All C2 tensors have positive static dimensions and positive non-overlapping
-strides, explicit UIDs, `NONE` reordering, and no pass-by-value or ragged
-metadata. Virtual tensors are assigned to static workspace. `VIEW_ONLY`
-reshape, in-place concatenate, same-UID
-input/output, MATMUL dimension override or nonzero padding, and RESAMPLE index
-outputs remain unsupported. RESAMPLE `BILINEAR` is also rejected because the
+All C2 data tensors have positive static allocation dimensions and positive
+non-overlapping strides, explicit UIDs, `NONE` reordering, and no pass-by-value
+or ragged metadata. Virtual tensors are assigned to static workspace.
+`VIEW_ONLY` reshape, in-place concatenate, same-UID input/output, and RESAMPLE
+index outputs remain unsupported. RESAMPLE `BILINEAR` is also rejected because the
 v1.24.0 serialized fraction representation omits the denominator needed to
 reconstruct fractional scale semantics. The public execution interface in
 section 4 is unchanged; only the runtime's hidden invocation adapter differs.
+
+Standard f32 `MATMUL` may have optional `M_override`, `N_override`, and
+`K_override` inputs. Each is an external plain INT32 tensor with the same rank
+as C, trailing dimensions `[1,1]`, and batch dimensions equal to one or the
+corresponding C dimension. A broadcast batch entry is a caller precondition in
+the ranges `0 <= M <= C[-2]`, `0 <= N <= C[-1]`, and
+`0 <= K <= A[-1] == B[-2]`; an absent input selects the static maximum. M/N
+control the valid output rectangle and K controls the reduction extent. The
+remaining output is filled with a finite f32 `padding_value`, whose default is
+zero. These metadata tensors use ordinary UID-map arguments and do not alter
+the public execution ABI.
 
 ### 3.2 Post-MVP C3 Extension
 
@@ -335,6 +345,9 @@ query performs the same validation as execution. Artifact formats `3` through
 `5` record both context flags and policy; the v1/v2 readers default them to
 disabled.
 
+This graph-level override-array mechanism is independent of the serialized
+MATMUL extent-override tensor ports specified in section 3.1.
+
 ### 3.7 C6 Standard f32 SDPA Metadata Extension
 
 This extension is limited to static standard-f32 `SDPA`/`SDPA_BWD`; it does not
@@ -370,7 +383,9 @@ an invalid ID, so it cannot cause an out-of-bounds container access, but the
 result is outside the semantic contract.
 
 Ragged Q/O may be combined with paged K/V. An individual K or V container
-cannot be both paged and ragged. Paged backward execution remains deferred.
+cannot be both paged and ragged. The pinned cuDNN Frontend v1.24.0 backward
+serializer exposes no K/V page-table ports, so paged backward cannot be
+represented by the accepted input schema.
 
 Forward `Block_mask` is an external plain UINT8 tensor with exact dimensions
 `[B,Hq,ceil(Sq/128),ceil(ceil(Skv/128)/8)]`. Each bit enables one 128-by-128

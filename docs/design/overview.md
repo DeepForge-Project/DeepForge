@@ -194,11 +194,14 @@ space、OpenMP、多算子 fusion、动态 shape、非 packed stride、NCHW phys
 layout、grouped/depthwise Conv、GPU backend。MVP 后 C2-C5 已独立加入正的任意
 stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能力子集。C6
 已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码，以及单个
-exact-shape external f32 `POINTWISE` node 的 runtime override。标准 f32 SDPA 已
+exact-shape external f32 `POINTWISE` node 的 runtime override。标准和 FP8 MATMUL
+还支持 producer 序列化的 per-batch INT32 M/N/K extent tensor，同时保持静态
+allocation 上界。标准 f32 SDPA 已
 支持 ragged forward data/row output 和 backward data/gradient、带紧凑 page table
 的独立 paged K/V、forward block mask 及 forward/backward sink token。更广泛
-dynamic 行为、paged backward、其他 physical reorder metadata、threading 和广泛
-fusion 仍待实现。
+dynamic 行为、其他 physical reorder metadata、threading 和广泛 fusion 仍待实现。
+固定使用的 v1.24.0 serializer 无法表达 paged backward，因此它属于未来 schema
+版本兼容工作。
 
 延后不等于删除设计方向。每项在拥有明确语义、上游能力评估、正确性测试和性能
 基线后单独引入。

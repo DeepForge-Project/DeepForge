@@ -250,7 +250,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Five independently validated increments are complete.
+**Status:** in progress. Six independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -273,12 +273,17 @@ The fifth adds the first active Loop/Schedule cost model to the original
 optimized static packed f32 Conv path. It selects target-aware K-output unroll,
 retains baseline fallback, exposes schedule names, and passes decision, tail,
 numeric, pinned-core A/B, Release, ASan, and UBSan checks. Generic C2-C6 graphs
-remain on their reference schedule.
+remain on their reference schedule. The sixth implements producer-serialized
+per-batch INT32 M/N/K extent tensors for standard and FP8 MATMUL, including
+broadcast metadata, finite standard-MATMUL padding, zero FP8 padding, artifact
+reload, malformed descriptors, Release, ASan, and UBSan coverage.
 
-**Work:** expand dynamic behavior beyond the delivered pointwise subset; add
-paged backward where Frontend serialization exposes it; add reorder formats
-outside the delivered scale subset; then evaluate fusion, threading, additional
-vector schedules, and family-specific cost models independently.
+**Work:** expand dynamic behavior beyond the delivered pointwise and MATMUL
+subsets; add reorder formats outside the delivered scale subset; then evaluate
+fusion, threading, additional vector schedules, and family-specific cost models
+independently. The pinned v1.24.0 serializer exposes no paged-backward
+page-table ports, so that capability is compatibility work for a future schema
+version rather than an implementation task under the current contract.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within

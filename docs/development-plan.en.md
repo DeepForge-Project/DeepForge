@@ -473,9 +473,15 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     factors, exposes the decision, retains a baseline policy, reuses X loads
     across independent accumulators, and is covered by decision, tail, numeric,
     benchmark A/B, Release, ASan, and UBSan gates.
+14. Completed C6.6 producer-serialized INT32 M/N/K extent overrides for standard
+    and FP8 MATMUL. Per-batch broadcast metadata, finite f32 standard padding,
+    zero FP8 padding, artifact reload, malformed descriptors, Release, ASan,
+    and UBSan are covered without changing the public execute ABI.
 
-The remaining C6 functional work is broader dynamic behavior, paged backward,
-and reorder formats outside that scale subset. Further benchmark-driven
+The remaining C6 functional work is broader dynamic behavior and reorder
+formats outside that scale subset. Paged backward is not representable by the
+pinned v1.24.0 serializer and is tracked only as future schema-version
+compatibility work. Further benchmark-driven
 optimization remains owned by the Loop/Schedule layer: evaluate outer tiling,
 padding fusion, and multithreading independently against the preserved
 baseline policy.

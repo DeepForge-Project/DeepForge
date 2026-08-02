@@ -86,9 +86,10 @@ Json tensor(std::string name,
             std::int64_t uid,
             std::vector<std::int64_t> dimensions,
             std::vector<std::int64_t> strides,
-            bool is_virtual = false) {
+            bool is_virtual = false,
+            std::string data_type = "FLOAT") {
     return Json{{"name", std::move(name)},
-                {"data_type", "FLOAT"},
+                {"data_type", std::move(data_type)},
                 {"dim", std::move(dimensions)},
                 {"stride", std::move(strides)},
                 {"is_virtual", is_virtual},
@@ -236,6 +237,32 @@ Json matmul_graph() {
                     {"elu_alpha", nullptr},
                     {"softplus_beta", nullptr}};
     return graph_document(2103, "matmul_bias", Json::array({matmul, add}),
+                          std::move(tensors));
+}
+
+Json matmul_override_graph() {
+    Json tensors = Json::object();
+    tensors["306"] = tensor("OverrideA", 306, {2, 3, 4}, {12, 4, 1});
+    tensors["307"] = tensor("OverrideB", 307, {1, 4, 3}, {12, 3, 1});
+    tensors["308"] =
+        tensor("M_override", 308, {2, 1, 1}, {1, 1, 1}, false, "INT32");
+    tensors["309"] =
+        tensor("N_override", 309, {1, 1, 1}, {1, 1, 1}, false, "INT32");
+    tensors["310"] =
+        tensor("K_override", 310, {2, 1, 1}, {1, 1, 1}, false, "INT32");
+    tensors["311"] = tensor("OverrideC", 311, {2, 3, 3}, {9, 3, 1});
+    Json matmul =
+        Json{{"tag", "MATMUL"},
+             {"name", "batched_override_matmul"},
+             {"inputs", Json::object({{"A", 306},
+                                      {"B", 307},
+                                      {"M_override", 308},
+                                      {"N_override", 309},
+                                      {"K_override", 310}})},
+             {"outputs", Json::object({{"C", 311}})},
+             {"compute_data_type", "FLOAT"},
+             {"padding_value", -7.0}};
+    return graph_document(2106, "matmul_overrides", Json::array({matmul}),
                           std::move(tensors));
 }
 
@@ -677,6 +704,86 @@ int main() {
                     "matmul virtual output uses workspace");
     }
 
+    deepforge::import::SerializedGraph override_matmul;
+    status = parse_graph(matmul_override_graph(), override_matmul);
+    tests.good(status, "parse batched matmul dimension overrides");
+    deepforge::compiler::CompilationResult override_matmul_compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(
+            override_matmul, options, override_matmul_compilation);
+    }
+    tests.good(status, "compile batched matmul dimension overrides");
+    auto const int32_override_count = std::count_if(
+        override_matmul_compilation.metadata.arguments.begin(),
+        override_matmul_compilation.metadata.arguments.end(),
+        [](auto const& argument) {
+            return argument.uid >= 308 && argument.uid <= 310 &&
+                   argument.data_type ==
+                       deepforge::import::DataType::kInt32 &&
+                   argument.access ==
+                       deepforge::compiler::TensorAccess::kRead;
+        });
+    tests.check(int32_override_count == 3,
+                "matmul override parameters retain INT32 artifact metadata");
+    if (override_matmul_compilation.executable) {
+        std::vector<float> override_a{
+            1.0F,  2.0F,  3.0F,  4.0F, 5.0F, 6.0F,
+            7.0F,  8.0F,  9.0F, 10.0F, 11.0F, 12.0F,
+            1.0F, -1.0F,  2.0F,  0.0F, 0.0F, 3.0F,
+           -2.0F,  1.0F,  4.0F,  1.0F,  0.0F, -1.0F};
+        std::vector<float> override_b{1.0F,  2.0F,  3.0F, 4.0F,
+                                      5.0F,  6.0F,  7.0F, 8.0F,
+                                      9.0F, 10.0F, 11.0F, 12.0F};
+        std::vector<std::int32_t> m_override{2, 3};
+        std::vector<std::int32_t> n_override{1};
+        std::vector<std::int32_t> k_override{2, 4};
+        std::vector<float> output(18, -99.0F);
+        deepforge::runtime::VariantPack pack{{306, override_a.data()},
+                                             {307, override_b.data()},
+                                             {308, m_override.data()},
+                                             {309, n_override.data()},
+                                             {310, k_override.data()},
+                                             {311, output.data()}};
+        status = override_matmul_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+        tests.good(status, "execute batched matmul dimension overrides");
+        constexpr std::array<float, 18> expected{
+            9.0F, -7.0F, -7.0F, 29.0F, -7.0F, -7.0F,
+           -7.0F, -7.0F, -7.0F, 11.0F, -7.0F, -7.0F,
+            8.0F, -7.0F, -7.0F, -2.0F, -7.0F, -7.0F};
+        tests.check(std::equal(output.begin(), output.end(), expected.begin(),
+                               [](float lhs, float rhs) {
+                                   return close(lhs, rhs);
+                               }),
+                    "M/N/K overrides and nonzero padding match reference");
+
+        std::vector<std::uint8_t> override_artifact;
+        status = deepforge::compiler::serialize_artifact(
+            override_matmul_compilation, override_artifact);
+        tests.good(status, "serialize matmul override artifact");
+        std::unique_ptr<deepforge::runtime::Executable> override_loaded;
+        deepforge::compiler::ArtifactInfo override_info;
+        if (status.is_good()) {
+            status = deepforge::compiler::load_artifact_executable(
+                override_artifact, override_loaded, &override_info);
+        }
+        tests.good(status, "load matmul override artifact");
+        tests.check(override_info.metadata ==
+                        override_matmul_compilation.metadata,
+                    "matmul override artifact preserves parameter metadata");
+        if (override_loaded) {
+            std::fill(output.begin(), output.end(), -99.0F);
+            status = override_loaded->execute(nullptr, pack, nullptr);
+            tests.good(status, "execute loaded matmul override artifact");
+            tests.check(std::equal(
+                            output.begin(), output.end(), expected.begin(),
+                            [](float lhs, float rhs) {
+                                return close(lhs, rhs);
+                            }),
+                        "loaded matmul override artifact matches reference");
+        }
+    }
+
     deepforge::import::SerializedGraph resample;
     status = parse_graph(resample_graph(), resample);
     tests.good(status, "parse supported integer resample modes");
@@ -745,9 +852,13 @@ int main() {
     auto nonzero_padding = matmul_graph();
     nonzero_padding["nodes"][0]["padding_value"] = 1.0;
     status = compile_document(nonzero_padding);
-    tests.check(
-        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
-        "nonzero matmul padding is rejected until override semantics exist");
+    tests.good(status, "nonzero matmul padding is accepted");
+
+    auto oversized_padding = matmul_graph();
+    oversized_padding["nodes"][0]["padding_value"] = 1.0e300;
+    status = compile_document(oversized_padding);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "matmul padding must fit finite f32");
 
     auto dimension_override = matmul_graph();
     dimension_override["tensors"]["306"] =
@@ -755,8 +866,17 @@ int main() {
     dimension_override["nodes"][0]["inputs"]["M_override"] = 306;
     status = compile_document(dimension_override);
     tests.check(
-        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
-        "matmul dimension override is rejected before codegen");
+        status.code() == deepforge::import::ErrorCode::kUnsupportedDataType,
+        "matmul dimension override rejects non-INT32 elements");
+
+    auto invalid_override_shape = matmul_override_graph();
+    invalid_override_shape["tensors"]["308"]["dim"] =
+        Json::array({2, 2, 1});
+    invalid_override_shape["tensors"]["308"]["stride"] =
+        Json::array({2, 1, 1});
+    status = compile_document(invalid_override_shape);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "matmul override matrix dimensions must be singleton");
 
     auto index_output = resample_graph();
     index_output["tensors"]["422"] =

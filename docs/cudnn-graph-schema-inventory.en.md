@@ -165,7 +165,7 @@ execution subset:
 | `CONCATENATE` | Static indexed inputs and non-negative axis; no `in_place_index` |
 | `POINTWISE` | All 50 modes, f32 outputs, trailing-dimension NumPy broadcasting |
 | `REDUCTION` | All 9 modes, rank-preserving output with reduced extents set to one |
-| `MATMUL` | Equal rank of at least two, broadcast batch dimensions, no dimension override, zero padding value |
+| `MATMUL` | Equal rank of at least two, broadcast batch dimensions, optional per-batch INT32 M/N/K overrides, finite f32 padding value |
 | `RESAMPLE` | Three pooling modes plus integer `NEAREST`, with three padding modes and no index output; `BILINEAR` is rejected because v1.24.0 serialization omits fraction denominators |
 | `ADA_LAYER_NORM` | Training or inference, full-rank broadcast parameters, batch-preserving statistics |
 | `ADA_LAYER_NORM_BPROP` | Saved mean/inverse standard deviation, explicit all-ones epsilon tensor, optional bias gradient |
@@ -188,7 +188,7 @@ execution subset:
 | `SDPA_BWD` | Data and optional bias gradients for the same attention subset using serialized `O` and log-sum-exp `Stats` |
 | `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute; FP4 E2M1, FP8 E4M3/E5M2, or INT4 X; f32/f16/bf16/FP8 E4M3/E8M0 scale; trailing static block dimensions; f32/f16/bf16 Y; E4M3/E8M0 scale may use `F8_128x4` |
 | `BLOCK_SCALE_QUANTIZE` | FLOAT compute; f32/f16/bf16 X; one divisible static block axis; FP4 E2M1 or FP8 E4M3/E5M2 Y and the corresponding E4M3/E8M0 scale; FP8 scale output may use `F8_128x4` |
-| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, FLOAT scalar controls and amax, static rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, no M/N/K override |
+| `MATMUL_FP8` | FP8 E4M3/E5M2 A/B, FLOAT scalar controls and amax, static rank >= 2 batch broadcasting, FP8/f32/f16/bf16 C, optional per-batch INT32 M/N/K overrides |
 | `MOE_GROUPED_MATMUL` | `mode=NONE`, `top_k` 0 or 1, `[1,T,K]` tokens, `[E,K,N]` weights, INT32 `[E,1,1]` first-token offsets, shared f32/f16/bf16 data type |
 | `MOE_GROUPED_MATMUL_BWD` | Per-expert weight gradient for the same static `mode=NONE` tensor and offset layout |
 | `SDPA_FP8_FWD` | Static FP8 E4M3/E5M2 BHSD/GQA, scalar FLOAT scale controls, both diagonal alignments and bounded windows, optional row outputs, amax; no padding, dropout, or ALiBi |
@@ -199,10 +199,11 @@ execution subset:
 All validated generic rows require static, positive, explicitly UID-assigned
 tensors and f32 graph context types, positive non-overlapping strides, `NONE`
 reordering, and no pass-by-value metadata. Ragged metadata is legal only for
-the explicit standard-f32 SDPA subset below. Data tensors are f32;
-C4 additionally permits INT32 sequence lengths and scalar INT64 RNG seed and
-offset tensors on their documented ports. Virtual intermediates use planned
-workspace. Convolution grouping is inferred from `X.C / W.C`; output channels
+the explicit standard-f32 SDPA subset below. Data tensors are f32. C4 permits
+INT32 sequence lengths and scalar INT64 RNG seed/offset tensors, while MATMUL
+and MATMUL_FP8 permit INT32 extent-override tensors on their documented ports.
+Virtual intermediates use planned workspace. Convolution grouping is inferred
+from `X.C / W.C`; output channels
 must be divisible by that group count.
 
 The nine C5 specialized rows use FLOAT accumulation and software conversion on
@@ -258,8 +259,9 @@ forms require padding and both sequence lengths; page IDs must be valid
 container block indices. Ragged Q/O may be combined with paged K/V. Forward
 also supports the exact compressed UINT8 128-by-128 `Block_mask`. External f32
 `SINK_TOKEN` `[1,Hq,1,1]` is supported by forward/backward and backward may
-return matching `DSINK_TOKEN`. Paged backward and the C5-specialized optional
-features above remain deferred.
+return matching `DSINK_TOKEN`. The pinned v1.24.0 backward serializer exposes
+no K/V page-table ports, so paged backward is not representable by this input
+schema. The C5-specialized optional features above remain deferred.
 
 The CPU Bernoulli stream is stable and bit-identical across DeepForge CPU
 variants for the same seed and offset. It is an implementation-defined CPU
@@ -273,7 +275,12 @@ node whose arguments are external plain f32 tensors with equal compiled
 dimensions. Those dimensions are maxima; runtime dimensions must be positive
 and no larger, runtime strides must satisfy the supported positive non-overlap
 condition, and each storage span must fit its compiled bound. The dynamic flag
-alone is persisted without changing static descriptor semantics. Explicit
+alone is persisted without changing static descriptor semantics. Independently,
+MATMUL and MATMUL_FP8 accept optional external plain INT32 M/N/K inputs whose
+rank matches C, whose trailing dimensions are `[1,1]`, and whose batch
+dimensions broadcast to C. Values select the output and reduction extents
+within static maxima; standard MATMUL uses a finite f32 padding value outside
+M/N and MATMUL_FP8 uses zero. Explicit
 aliasing, other dynamic operations, ragged tensors outside the documented
 standard-f32 SDPA subset, and physical reorder handling outside the documented
 `F8_128x4` scale subset are deferred. New artifacts use format v5 for ragged

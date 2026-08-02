@@ -110,13 +110,19 @@ tensor。支持 virtual workspace 中间值和正且不重叠的 strided layout�
 并支持单个、无 broadcast、全部参数为 external plain f32 的 `POINTWISE` runtime
 shape override。序列化 dimension 是上界，Frontend-shaped override array 提供不超过
 编译 storage bound 的正 runtime dimension/stride。单独的 dynamic-shape context flag
-会被保存在 plan metadata 中，但不会让其他 operation 自动变为动态。静态 f32 SDPA
+会被保存在 plan metadata 中，但不会让其他 operation 自动变为动态。标准 f32
+`MATMUL` 与 `MATMUL_FP8` 还可分别接收 producer 序列化的 external plain INT32
+`M_override`、`N_override`、`K_override` tensor：rank 与 C 相同，末两个 matrix
+dimension 为 1，每个 batch dimension 为 1 或对应的 C dimension。各 batch 的值在
+序列化静态上界内选择输出与 reduction extent；标准 MATMUL 用有限 f32
+`padding_value` 填充 M/N 无效区，MATMUL_FP8 填零。静态 f32 SDPA
 支持采用已校验 element-prefix offset 的 external ragged forward data/row output 和
 backward data/gradient。Forward 还支持独立 paged K/V cache、带独立 prefix 的紧凑
 INT32 page table、压缩 UINT8 block mask 和每个 query head 的 sink logit；backward
 可输出 sink gradient。这些 storage 形式都要求 padding 和显式 sequence length。
-显式 alias、scalar pass-by-value、paged backward、其他 tensor reorder、分布式 peer
-statistics 和 FP8/MXFP8 特殊 attention 路径的可选特性暂不可执行。
+固定使用的 v1.24.0 serialization schema 没有 paged backward page-table 端口，因此
+该形式不属于当前输入契约。显式 alias、scalar pass-by-value、其他 tensor reorder、
+分布式 peer statistics 和 FP8/MXFP8 特殊 attention 路径的可选特性暂不可执行。
 
 ## 架构
 
@@ -303,7 +309,7 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：`F8_128x4`、exact-pointwise runtime shape override、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
+| C6 | 进行中：`F8_128x4`、exact-pointwise shape override、MATMUL M/N/K extent override、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
 | Optimize | 进行中：target-aware K-output unroll 已完成；外层 tiling、padding fusion、并行化继续由 benchmark 驱动 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

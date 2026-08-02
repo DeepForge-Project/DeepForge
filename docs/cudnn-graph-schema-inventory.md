@@ -155,7 +155,7 @@ Pointwise mode 的输入元数被严格验证：
 | `CONCATENATE` | 静态编号输入和非负 axis；不支持 `in_place_index` |
 | `POINTWISE` | 全部 50 个 mode、f32 输出、尾维对齐的 NumPy broadcast |
 | `REDUCTION` | 全部 9 个 mode，输出保持 rank，被归约维度为 1 |
-| `MATMUL` | 相同且至少为 2 的 rank、batch broadcast、无维度 override、padding value 为 0 |
+| `MATMUL` | 相同且至少为 2 的 rank、batch broadcast、可选 per-batch INT32 M/N/K override、有限 f32 padding value |
 | `RESAMPLE` | 3 个 pooling mode 加整数 `NEAREST`，支持 3 个 padding mode 且无 index 输出；`BILINEAR` 因 v1.24.0 序列化遗漏 fraction denominator 而被拒绝 |
 | `ADA_LAYER_NORM` | training/inference、同 rank broadcast 参数、保留 batch 的统计量 |
 | `ADA_LAYER_NORM_BPROP` | 使用保存的 mean/inverse standard deviation、显式全 1 shape epsilon tensor、可选 bias gradient |
@@ -178,7 +178,7 @@ Pointwise mode 的输入元数被严格验证：
 | `SDPA_BWD` | 同一 attention 子集的 data/可选 bias gradient，读取序列化 `O` 和 log-sum-exp `Stats` |
 | `BLOCK_SCALE_DEQUANTIZE` | FLOAT compute；X 为 FP4 E2M1、FP8 E4M3/E5M2 或 INT4；scale 为 f32/f16/bf16/FP8 E4M3/E8M0；尾部静态 block dimension；Y 为 f32/f16/bf16；E4M3/E8M0 scale 可使用 `F8_128x4` |
 | `BLOCK_SCALE_QUANTIZE` | FLOAT compute；X 为 f32/f16/bf16；单个可整除静态 block axis；Y 为 FP4 E2M1 或 FP8 E4M3/E5M2，并输出对应 E4M3/E8M0 scale；FP8 scale 输出可使用 `F8_128x4` |
-| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、FLOAT scalar control/amax、静态 rank >= 2 batch broadcast；C 为 FP8/f32/f16/bf16；无 M/N/K override |
+| `MATMUL_FP8` | A/B 为 FP8 E4M3/E5M2、FLOAT scalar control/amax、静态 rank >= 2 batch broadcast；C 为 FP8/f32/f16/bf16；支持可选 per-batch INT32 M/N/K override |
 | `MOE_GROUPED_MATMUL` | `mode=NONE`、`top_k` 为 0/1、token `[1,T,K]`、weight `[E,K,N]`、INT32 first-token offset `[E,1,1]`，共享 f32/f16/bf16 data type |
 | `MOE_GROUPED_MATMUL_BWD` | 同一静态 `mode=NONE` tensor/offset layout 的 per-expert weight gradient |
 | `SDPA_FP8_FWD` | 静态 FP8 E4M3/E5M2 BHSD/GQA、scalar FLOAT scale control、两种 diagonal alignment/window、可选 row output 和 amax；无 padding、dropout、ALiBi |
@@ -188,9 +188,9 @@ Pointwise mode 的输入元数被严格验证：
 
 全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
 stride、`NONE` reorder，并且不是 pass-by-value tensor。Ragged metadata 仅在下述
-标准 f32 SDPA 显式子集中合法。data tensor 为 f32；C4 额外允许在文档指定端口使用
-INT32 sequence length 和 scalar INT64 RNG
-seed/offset。virtual 中间值使用规划的 workspace。Convolution group 数由
+标准 f32 SDPA 显式子集中合法。data tensor 为 f32；C4 在文档指定端口允许 INT32
+sequence length 和 scalar INT64 RNG seed/offset，MATMUL/MATMUL_FP8 则允许 INT32
+extent-override tensor。virtual 中间值使用规划的 workspace。Convolution group 数由
 `X.C / W.C` 推导，输出 channel 必须可被 group 数整除。
 
 9 个 C5 特殊行使用 FLOAT accumulation 和 CPU 软件 conversion。FP8 E4M3/E5M2
@@ -237,8 +237,9 @@ INT32 `[B,1,page_slots,1]` table 可为 plain storage 或由独立 element prefi
 要求 padding 和两个 sequence length，page ID 必须是合法 container block index；
 ragged Q/O 可与 paged K/V 组合。Forward 还支持精确压缩的 UINT8 128x128
 `Block_mask`。Forward/backward 均支持 external f32 `[1,Hq,1,1]` `SINK_TOKEN`，
-backward 可返回相同 shape 的 `DSINK_TOKEN`。Paged backward 和上述 C5 特殊可选
-能力仍延后。
+backward 可返回相同 shape 的 `DSINK_TOKEN`。固定使用的 v1.24.0 backward
+serializer 没有 K/V page-table 端口，因此该 input schema 无法表达 paged backward。
+上述 C5 特殊可选能力仍延后。
 
 相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
 bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
@@ -250,7 +251,10 @@ Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index �
 tensor。编译 dimension 是上界；runtime dimension 必须为正且不超过该上界，
 runtime stride 必须满足当前支持的正且不重叠条件，每个 storage span 必须位于编译
 bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 descriptor 语义。
-显式 alias、其他动态 operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
+MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们的 rank 与 C
+相同，末两个 dimension 为 `[1,1]`，batch dimension 可 broadcast 到 C。各值在静态
+上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
+value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
 `F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v5
 记录 ragged storage reference 和逻辑 sequence divisor；v1-v4 继续可读，其中 v4
 divisor 默认为 1。

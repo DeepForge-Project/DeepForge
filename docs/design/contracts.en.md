@@ -325,35 +325,60 @@ ABI is unchanged.
 
 `is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
 persisted independently. The dynamic flag alone is plan metadata and does not
-alter a static kernel descriptor. Enabling override requires a nonempty ordered
-DAG containing only `POINTWISE` nodes. Every used tensor must be non-ragged,
-non-reordered, non-pass-by-value FLOAT with the same compiled dimensions, so
-broadcasting is excluded. External arguments consist of read-only inputs and
-one write-only output; intermediate tensors may be virtual.
+alter a static kernel descriptor, and override execution does not require that
+flag to be set. Enabling override selects one of two explicit policies.
+
+The exact-pointwise policy accepts a nonempty ordered DAG containing only
+`POINTWISE` nodes. Every used tensor is non-ragged, non-reordered,
+non-pass-by-value FLOAT with the same compiled dimensions, so broadcasting is
+excluded. External arguments consist of read-only inputs and one write-only
+output; intermediate tensors may be virtual.
+
+The MATMUL policy accepts exactly one standard-f32 `MATMUL`. A, B, and C are
+external plain strided tensors of equal rank at least two; A/B are read-only and
+C is write-only. Virtual, pass-by-value, ragged, reordered, or additional
+tensors are rejected, as are composed graphs and simultaneous serialized
+`M_override`/`N_override`/`K_override` ports. Metadata records three distinct
+role UIDs in A, B, C order.
 
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
 external argument UIDs. Each supplied shape preserves rank, has positive
 dimensions no larger than its compiled maxima, and uses positive strides that
 satisfy the supported non-overlap condition. Its computed storage span must
-not exceed the compiled byte bound. After applying partial overrides, every
-external argument must still have exactly the same dimensions. Consequently, a
-shrinking call normally overrides all external arguments; an empty list
-executes the compiled maximum shape. Virtual UIDs are not public arguments and
-cannot be overridden.
+not exceed the compiled byte bound. An empty list executes the compiled maximum
+shape, and a partial list is legal only if the final descriptors still satisfy
+the selected policy.
+
+For pointwise, every final external shape remains exactly equal; a shrinking
+call therefore normally overrides all external arguments. Virtual UIDs are not
+public arguments and cannot be overridden. For MATMUL, final descriptors obey
+`A[-2] == C[-2]`, `A[-1] == B[-2]`, and `B[-1] == C[-1]`. On every batch axis,
+A and B extents are equal or one and C equals their maximum. This permits a
+partial override such as changing one input batch extent to one while preserving
+the relation.
 
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
-loop bounds only for this policy. Runtime descriptors carry the resolved values
-to both in-process and artifact-loaded objects. Each virtual intermediate uses
-the common runtime dimensions and an internal packed view over workspace sized
-for its serialized maximum descriptor. Alias checks use the resolved external
-byte spans. Workspace remains statically bounded, and the override workspace
-query performs the same validation as execution. Artifact formats `3` through
-`5` record both context flags and policy; the v1/v2 readers default them to
-disabled.
+loop bounds under either policy. Runtime descriptors carry the resolved values
+to in-process and artifact-loaded objects. Pointwise virtual intermediates use
+the common runtime dimensions and internal packed views over workspace sized
+for serialized maxima. MATMUL loops use runtime C extents, runtime K, and
+runtime singleton-batch selection. Alias checks use resolved external byte
+spans. Workspace remains statically bounded, and workspace query performs the
+same validation as execution.
 
-This graph-level override-array mechanism is independent of the serialized
-MATMUL extent-override tensor ports specified in section 3.1.
+Artifact formats `3` through `5` record both context flags and pointwise policy
+`1`; v6 adds MATMUL policy `2` and its ordered role UIDs. The v1/v2 readers
+default override metadata to disabled, and v1-v5 readers default role UIDs to
+empty. The pinned Frontend sample can execute shapes larger than its fake cache
+shape, but DeepForge deliberately requires every runtime dimension and byte
+span to fit the serialized maxima: the public UID-map ABI carries pointers, not
+allocation lengths, so larger descriptors cannot be validated safely.
+
+MATMUL descriptor overrides change A/B/C runtime descriptors. They are distinct
+from the serialized INT32 MATMUL extent-override tensor ports in section 3.1,
+which select active regions inside static descriptors. The two mechanisms cannot
+be combined in one graph.
 
 ### 3.7 C6 Standard f32 SDPA Metadata Extension
 
@@ -406,10 +431,11 @@ output. Backward may emit external plain `DSINK_TOKEN` with the same shape; it
 is the gradient reduced over valid batch/query rows and requires the matching
 sink input.
 
-Artifact format `5` persists the ragged storage policy, offset/sequence UIDs,
+Artifact format `5` introduced the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
-one; compact page tables use the corresponding cache block size. The reader
-continues to accept v1-v4, with v4 divisors defaulted to one.
+one; compact page tables use the corresponding cache block size. Format v6
+retains those fields, and the reader accepts v1-v5 with v4 divisors defaulted
+to one.
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value Extension
 
@@ -450,7 +476,7 @@ and unequal values are rejected before lowering.
 The value is graph-owned. The compiler emits a private constant `memref.global`
 in each target object, binds its view internally, and omits the UID from public
 argument metadata. Execution neither requires nor honors a caller pointer for
-that UID. Artifact format v5 needs no new section because all three existing
+that UID. This feature needs no dedicated artifact section because all three
 objects already carry the constant; reload reproduces the same behavior. The
 distinct `has_compile_time_constant` source fields are not serialized by the
 pinned v1.24.0 tensor serializer and remain outside this input contract.

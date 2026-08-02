@@ -116,11 +116,12 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
 - 基于读写属性而不是 Conv 固定名称的 overlap 检查；
 - `.dfo` format v2，保存通用 tensor/argument table 和各 CPU variant symbol；C6
   后续为 dynamic policy metadata 将 writer 升到 v3，为 ragged storage reference
-  升到 v4，再为 packed logical-sequence divisor 升到 v5，并保持旧版本读取兼容。
+  升到 v4，为 packed logical-sequence divisor 升到 v5，再为有序 MATMUL override
+  role 升到 v6，并保持旧版本读取兼容。
 
-兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override 和
-format-v4 ragged-storage artifact；当前新编译 graph 写 format v5。未知 artifact
-version 仍然直接报错，不能静默解释。
+兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override、
+format-v4 ragged-storage 和 format-v5 ragged-sequence artifact；当前新编译 graph 写
+format v6。未知 artifact version 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
 
@@ -232,7 +233,7 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中，七个独立验收增量已完成。第一个为 block-scale conversion 的
+**状态**：进行中，十个独立验收增量已完成。第一个为 block-scale conversion 的
 E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 `F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
 `POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
@@ -265,9 +266,15 @@ control、FP8 MATMUL control、错误 metadata、Release、ASan 和 UBSan 构成
 中间值使用序列化最大值限定的 workspace 内动态 shape packed view，不进入公开
 override array。多节点执行、artifact reload、错误 graph/UID、Release、ASan 和
 UBSan 构成验收集。
+第十个实现固定 producer 的 MATMUL descriptor-override array，只支持单个标准 f32
+operation 和 external plain A/B/C tensor。Runtime shape/stride 受序列化 allocation
+上界约束，完整或 partial override 后都必须保持 M/N/K 与 batch-broadcast 关系。
+Artifact v6 记录有序 role UID；执行、reload、错误关系/图、Release、ASan 和 UBSan
+构成验收集。
 
-**工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；随后独立评估
-fusion、threading、其他 vector schedule 和各操作族 cost model。
+**工作内容**：将动态行为扩展到已交付 exact-pointwise、单个标准 f32 MATMUL
+descriptor-override 和 MATMUL extent-override 子集之外；随后独立评估 fusion、
+threading、其他 vector schedule 和各操作族 cost model。
 除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
 `INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成
 fixture，而不是推测实现。固定使用的
@@ -344,7 +351,7 @@ fixture 字段和公开 execute signature 直接对照固定版本的开源 Fron
    矩阵。
 3. **Shape 顺序**：先支持任意 rank 的静态 shape；dynamic、ragged、reorder 和
    paged metadata 延后到 C6。
-4. **Artifact 兼容**：在 generic、dynamic-policy、ragged 和 packed-sequence-divisor
-   metadata 兼容迁移后，保留 `.dfo` v1-v4 reader，新编译结果写 v5。
+4. **Artifact 兼容**：在 generic、dynamic-policy、ragged、packed-sequence-divisor
+   和 MATMUL-role metadata 兼容迁移后，保留 `.dfo` v1-v5 reader，新编译结果写 v6。
 5. **外部验证**：CPU CI 保持自包含，未来使用可选 GPU runner 做 producer 和差分
    发布验证。

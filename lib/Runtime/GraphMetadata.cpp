@@ -37,6 +37,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
     switch (policy) {
         case ShapeOverridePolicy::kNone:
         case ShapeOverridePolicy::kPointwiseExact:
+        case ShapeOverridePolicy::kMatmul:
             return true;
     }
     return false;
@@ -80,6 +81,31 @@ bool ragged_storage_bytes(TensorArgumentMetadata const& argument,
         return false;
     }
     output = (elements * bits + 7) / 8;
+    return true;
+}
+
+bool valid_matmul_dimensions(TensorArgumentMetadata const& a,
+                             TensorArgumentMetadata const& b,
+                             TensorArgumentMetadata const& c) {
+    if (a.dimensions.size() < 2 ||
+        a.dimensions.size() != b.dimensions.size() ||
+        a.dimensions.size() != c.dimensions.size()) {
+        return false;
+    }
+    auto const rank = a.dimensions.size();
+    if (a.dimensions[rank - 1] != b.dimensions[rank - 2] ||
+        a.dimensions[rank - 2] != c.dimensions[rank - 2] ||
+        b.dimensions[rank - 1] != c.dimensions[rank - 1]) {
+        return false;
+    }
+    for (std::size_t axis = 0; axis + 2 < rank; ++axis) {
+        auto const a_extent = a.dimensions[axis];
+        auto const b_extent = b.dimensions[axis];
+        if ((a_extent != b_extent && a_extent != 1 && b_extent != 1) ||
+            c.dimensions[axis] != std::max(a_extent, b_extent)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -162,6 +188,44 @@ import::Status validate_graph_compile_metadata(
         (metadata.arguments.size() < 2 || override_write_count != 1)) {
         return fail(
             "exact-pointwise override metadata requires inputs and one output");
+    }
+    if (metadata.override_policy != ShapeOverridePolicy::kMatmul &&
+        !metadata.override_role_uids.empty()) {
+        return fail("override role UIDs require the MATMUL policy");
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kMatmul) {
+        if (metadata.arguments.size() != 3 ||
+            metadata.override_role_uids.size() != 3 ||
+            std::set<std::int64_t>(metadata.override_role_uids.begin(),
+                                   metadata.override_role_uids.end())
+                    .size() != 3) {
+            return fail(
+                "MATMUL override metadata requires distinct A/B/C role UIDs");
+        }
+        auto find_role = [&](std::size_t role) {
+            return std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == metadata.override_role_uids[role];
+                });
+        };
+        auto const a = find_role(0);
+        auto const b = find_role(1);
+        auto const c = find_role(2);
+        if (a == metadata.arguments.end() || b == metadata.arguments.end() ||
+            c == metadata.arguments.end() ||
+            a->data_type != import::DataType::kFloat32 ||
+            b->data_type != import::DataType::kFloat32 ||
+            c->data_type != import::DataType::kFloat32 ||
+            a->access != TensorAccess::kRead ||
+            b->access != TensorAccess::kRead ||
+            c->access != TensorAccess::kWrite ||
+            a->storage_policy != TensorStoragePolicy::kStrided ||
+            b->storage_policy != TensorStoragePolicy::kStrided ||
+            c->storage_policy != TensorStoragePolicy::kStrided ||
+            !valid_matmul_dimensions(*a, *b, *c)) {
+            return fail("MATMUL override roles or maximum shapes are invalid");
+        }
     }
     for (auto const& argument : metadata.arguments) {
         if (argument.storage_policy !=

@@ -327,6 +327,27 @@ Json matmul_override_graph() {
                           std::move(tensors));
 }
 
+Json runtime_shape_override_matmul_graph() {
+    Json tensors = Json::object();
+    tensors["312"] =
+        tensor("DynamicA", 312, {2, 4, 5}, {20, 5, 1});
+    tensors["313"] =
+        tensor("DynamicB", 313, {2, 5, 3}, {15, 1, 5});
+    tensors["314"] =
+        tensor("DynamicC", 314, {2, 4, 3}, {12, 3, 1});
+    Json matmul =
+        Json{{"tag", "MATMUL"},
+             {"name", "runtime_shape_override_matmul"},
+             {"inputs", Json::object({{"A", 312}, {"B", 313}})},
+             {"outputs", Json::object({{"C", 314}})},
+             {"compute_data_type", "FLOAT"},
+             {"padding_value", 0.0}};
+    auto graph = graph_document(2109, "runtime_shape_override_matmul",
+                                Json::array({matmul}), std::move(tensors));
+    graph["context"]["is_override_shape_enabled"] = true;
+    return graph;
+}
+
 Json resample_node(std::string mode,
                    std::string padding,
                    std::int64_t output_uid,
@@ -1009,6 +1030,168 @@ int main() {
                         "loaded matmul override artifact matches reference");
         }
     }
+
+    deepforge::import::SerializedGraph dynamic_matmul;
+    status = parse_graph(runtime_shape_override_matmul_graph(), dynamic_matmul);
+    tests.good(status, "parse runtime shape-override MATMUL");
+    deepforge::compiler::CompilationResult dynamic_matmul_compilation;
+    if (status.is_good()) {
+        auto dynamic_matmul_options = options;
+        dynamic_matmul_options.capture_mlir = true;
+        status = deepforge::compiler::compile_graph(
+            dynamic_matmul, dynamic_matmul_options,
+            dynamic_matmul_compilation);
+    }
+    tests.good(status, "compile runtime shape-override MATMUL");
+    if (dynamic_matmul_compilation.executable) {
+        tests.check(dynamic_matmul_compilation.metadata.override_policy ==
+                        deepforge::compiler::ShapeOverridePolicy::kMatmul,
+                    "dynamic MATMUL records its override policy");
+        tests.check(
+            !dynamic_matmul_compilation.metadata.dynamic_shape_enabled &&
+                dynamic_matmul_compilation.metadata.override_shape_enabled,
+            "MATMUL override execution does not require the independent dynamic flag");
+        tests.check(dynamic_matmul_compilation.metadata.override_role_uids ==
+                        std::vector<std::int64_t>({312, 313, 314}),
+                    "dynamic MATMUL records ordered A/B/C role UIDs");
+        tests.check(dynamic_matmul_compilation.imported_mlir.find(
+                        "memref.dim") != std::string::npos,
+                    "dynamic MATMUL emits runtime extents");
+
+        std::vector<float> dynamic_a(40, -77.0F);
+        std::vector<float> dynamic_b(30, -88.0F);
+        std::vector<float> dynamic_c(24, -99.0F);
+        for (std::size_t batch = 0; batch < 2; ++batch) {
+            for (std::size_t row = 0; row < 2; ++row) {
+                for (std::size_t k = 0; k < 4; ++k) {
+                    dynamic_a[batch * 10 + row * 4 + k] =
+                        static_cast<float>(1 + batch * 8 + row * 4 + k);
+                }
+            }
+        }
+        for (std::size_t k = 0; k < 4; ++k) {
+            for (std::size_t column = 0; column < 2; ++column) {
+                dynamic_b[k + column * 4] =
+                    static_cast<float>(1 + k + column);
+            }
+        }
+        deepforge::runtime::VariantPack dynamic_matmul_pack{
+            {312, dynamic_a.data()},
+            {313, dynamic_b.data()},
+            {314, dynamic_c.data()}};
+        deepforge::runtime::OverrideUids dynamic_matmul_uids{312, 313, 314};
+        deepforge::runtime::OverrideShapes dynamic_matmul_shapes{
+            {2, 2, 4}, {1, 4, 2}, {2, 2, 2}};
+        deepforge::runtime::OverrideStrides dynamic_matmul_strides{
+            {10, 4, 1}, {8, 1, 4}, {6, 3, 1}};
+        status = dynamic_matmul_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_matmul_pack, nullptr, dynamic_matmul_uids,
+            dynamic_matmul_shapes, dynamic_matmul_strides);
+        tests.good(status, "execute runtime shape-override MATMUL");
+        bool dynamic_matmul_matches = true;
+        for (std::size_t batch = 0; batch < 2; ++batch) {
+            for (std::size_t row = 0; row < 2; ++row) {
+                for (std::size_t column = 0; column < 2; ++column) {
+                    float expected = 0.0F;
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        expected += dynamic_a[batch * 10 + row * 4 + k] *
+                                    dynamic_b[k + column * 4];
+                    }
+                    dynamic_matmul_matches =
+                        dynamic_matmul_matches &&
+                        close(dynamic_c[batch * 6 + row * 3 + column],
+                              expected);
+                }
+            }
+        }
+        dynamic_matmul_matches = dynamic_matmul_matches &&
+                                 dynamic_c[2] == -99.0F &&
+                                 dynamic_c[5] == -99.0F &&
+                                 dynamic_c[8] == -99.0F;
+        tests.check(
+            dynamic_matmul_matches,
+            "dynamic MATMUL honors runtime K, batch broadcast, and strides");
+
+        std::vector<std::uint8_t> dynamic_matmul_artifact;
+        status = deepforge::compiler::serialize_artifact(
+            dynamic_matmul_compilation, dynamic_matmul_artifact);
+        tests.good(status, "serialize runtime shape-override MATMUL artifact");
+        std::unique_ptr<deepforge::runtime::Executable> dynamic_matmul_loaded;
+        deepforge::compiler::ArtifactInfo dynamic_matmul_info;
+        if (status.is_good()) {
+            status = deepforge::compiler::load_artifact_executable(
+                dynamic_matmul_artifact, dynamic_matmul_loaded,
+                &dynamic_matmul_info);
+        }
+        tests.good(status, "load runtime shape-override MATMUL artifact");
+        tests.check(
+            dynamic_matmul_info.format_version ==
+                    deepforge::compiler::kArtifactFormatVersion &&
+                dynamic_matmul_info.metadata.override_role_uids ==
+                    std::vector<std::int64_t>({312, 313, 314}),
+            "artifact v6 preserves MATMUL role UIDs");
+        if (dynamic_matmul_loaded) {
+            std::fill(dynamic_c.begin(), dynamic_c.end(), -99.0F);
+            status = dynamic_matmul_loaded->execute(
+                nullptr, dynamic_matmul_pack, nullptr, dynamic_matmul_uids,
+                dynamic_matmul_shapes, dynamic_matmul_strides);
+            tests.good(status,
+                       "execute loaded runtime shape-override MATMUL artifact");
+            tests.check(dynamic_c[0] == 30.0F && dynamic_c[10] == 208.0F &&
+                            dynamic_c[11] == -99.0F,
+                        "loaded dynamic MATMUL preserves role semantics");
+        }
+
+        auto invalid_k_shapes = dynamic_matmul_shapes;
+        invalid_k_shapes[1] = {1, 3, 2};
+        status = dynamic_matmul_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_matmul_pack, nullptr, dynamic_matmul_uids,
+            invalid_k_shapes, dynamic_matmul_strides);
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "dynamic MATMUL rejects inconsistent K extents");
+        auto invalid_batch_shapes = dynamic_matmul_shapes;
+        invalid_batch_shapes[2][0] = 1;
+        status = dynamic_matmul_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_matmul_pack, nullptr, dynamic_matmul_uids,
+            invalid_batch_shapes, dynamic_matmul_strides);
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "dynamic MATMUL rejects an incorrect output batch extent");
+        status = dynamic_matmul_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_matmul_pack, nullptr, {312}, {{2, 2, 4}}, {{10, 4, 1}});
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "partial MATMUL overrides must preserve all shape relations");
+        std::int64_t partial_workspace_size = -1;
+        status = dynamic_matmul_compilation.executable->get_workspace_size(
+            nullptr, partial_workspace_size, {313}, {{1, 5, 3}},
+            {{15, 1, 5}});
+        tests.good(status,
+                   "partial MATMUL override may introduce a valid batch broadcast");
+        tests.check(partial_workspace_size == 0,
+                    "partial MATMUL override preserves the static workspace bound");
+    }
+
+    auto dynamic_matmul_virtual = runtime_shape_override_matmul_graph();
+    dynamic_matmul_virtual["tensors"]["314"]["is_virtual"] = true;
+    status = compile_document(dynamic_matmul_virtual);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "runtime MATMUL shape override rejects virtual arguments");
+    auto mixed_matmul_override = matmul_override_graph();
+    mixed_matmul_override["context"]["is_override_shape_enabled"] = true;
+    status = compile_document(mixed_matmul_override);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "shape arrays cannot mix with MATMUL extent-override tensors");
+    auto composed_dynamic_matmul = matmul_graph();
+    composed_dynamic_matmul["context"]["is_override_shape_enabled"] = true;
+    status = compile_document(composed_dynamic_matmul);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "runtime MATMUL override rejects composed graphs in C6.10");
 
     deepforge::import::SerializedGraph resample;
     status = parse_graph(resample_graph(), resample);

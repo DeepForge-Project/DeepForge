@@ -441,7 +441,7 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     全部六种精确 `{index,value}` variant，并要求 tensor payload 与根级
     `pass_by_values` 一一对应且 bit-preserving 一致。编译器生成 private read-only
     global，从公开 metadata 排除 graph-owned UID，并通过现有 target object 持久化
-    value，不引入 artifact v6。Pointwise 不可覆盖性、artifact reload、normalization
+    value，且该增量不改变 artifact format。Pointwise 不可覆盖性、artifact reload、normalization
     epsilon、INT64 RNG seed/offset、FP8 MATMUL control、错误 metadata、Release、ASan
     和 UBSan 覆盖该增量。
 17. 已完成：C6.9 多节点 exact-shape pointwise override。无 broadcast 的 plain-f32
@@ -449,9 +449,16 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     view 使用按序列化最大值分配的 workspace，virtual UID 不进入公开 override ABI。
     Dynamic 执行、artifact reload、错误 graph/UID、Release、ASan 和 UBSan 覆盖该
     增量，且不改变 artifact version。
+18. 已完成：C6.10 有界 MATMUL descriptor override。单个标准 f32 `MATMUL` 接受
+    Frontend A/B/C UID、shape、stride array，且三个 tensor 必须是 external plain。
+    Runtime 校验序列化 dimension/byte-span 上界、M/N/K 关系、batch broadcast 和合法
+    partial override；动态执行使用 runtime C/K extent 与 singleton-batch 选择。
+    Artifact v6 记录有序 A/B/C role UID，同时保持 v1-v5 可读。Reload、错误关系/图、
+    Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace ABI 不变。
 
-剩余 C6 功能工作是该 exact-shape pointwise 子集之外的 dynamic 行为。除 enum 转换
-外，固定 v1.24.0 中的 `F16x16` 只有 attribute round-trip 覆盖，可执行 `INT8x32`
+剩余 C6 功能工作是已交付 exact-pointwise 与单个标准 f32 MATMUL descriptor-override
+子集之外的 dynamic 行为。除 enum 转换外，固定 v1.24.0 中的 `F16x16` 只有
+attribute round-trip 覆盖，可执行 `INT8x32`
 helper 只存在于 legacy backend/filter 路径；两者都没有可达的现代 serialized Graph
 port 加物理映射。它们是等待 producer 契约和生成 fixture 的兼容 gate，不应在本项目
 内推测布局。固定使用的

@@ -176,8 +176,14 @@ std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
     auto offset = metadata_numbers_offset(bytes);
     if (version == deepforge::compiler::kShapeOverrideArtifactFormatVersion ||
         version == deepforge::compiler::kRaggedArtifactFormatVersion ||
+        version ==
+            deepforge::compiler::kRaggedSequenceArtifactFormatVersion ||
         version == deepforge::compiler::kArtifactFormatVersion) {
         offset += 3 * 4;
+    }
+    if (version == deepforge::compiler::kArtifactFormatVersion) {
+        auto const role_count = read_u32(bytes, offset);
+        offset += static_cast<std::size_t>(role_count) * 8;
     }
     return offset;
 }
@@ -192,10 +198,14 @@ std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
         offset = skip_string(bytes, offset, "adapter argument");
         offset += 4 + 4;
         if (version == deepforge::compiler::kRaggedArtifactFormatVersion ||
+            version ==
+                deepforge::compiler::kRaggedSequenceArtifactFormatVersion ||
             version == deepforge::compiler::kArtifactFormatVersion) {
             offset += 4 + 8 + 8;
         }
-        if (version == deepforge::compiler::kArtifactFormatVersion) {
+        if (version ==
+                deepforge::compiler::kRaggedSequenceArtifactFormatVersion ||
+            version == deepforge::compiler::kArtifactFormatVersion) {
             offset += 8;
         }
         offset += 8 + 8;
@@ -252,40 +262,59 @@ std::size_t first_argument_ragged_sequence_divisor_offset(
     return first_argument_storage_policy_offset(bytes) + 4 + 8 + 8;
 }
 
+std::vector<std::uint8_t> make_ragged_sequence_v5(
+    std::span<std::uint8_t const> current) {
+    auto const roles_begin = metadata_numbers_offset(current) + 3 * 4;
+    auto const table = argument_table_offset(current);
+    std::vector<std::uint8_t> version_five(
+        current.begin(),
+        current.begin() + static_cast<std::ptrdiff_t>(roles_begin));
+    version_five.insert(
+        version_five.end(),
+        current.begin() + static_cast<std::ptrdiff_t>(table),
+        current.end() - 8);
+    version_five.resize(version_five.size() + 8);
+    write_u32(version_five, 8,
+              deepforge::compiler::kRaggedSequenceArtifactFormatVersion);
+    refresh_checksum(version_five);
+    return version_five;
+}
+
 std::vector<std::uint8_t> make_ragged_v4(
     std::span<std::uint8_t const> current) {
-    auto const table = argument_table_offset(current);
+    auto version_five = make_ragged_sequence_v5(current);
+    auto const table = argument_table_offset(version_five);
     auto count_offset = table;
-    auto const count = read_u32(current, count_offset);
+    auto const count = read_u32(version_five, count_offset);
     std::vector<std::uint8_t> version_four(
-        current.begin(),
-        current.begin() + static_cast<std::ptrdiff_t>(table + 4));
+        version_five.begin(),
+        version_five.begin() + static_cast<std::ptrdiff_t>(table + 4));
     auto offset = count_offset;
     for (std::uint32_t index = 0; index < count; ++index) {
         auto const entry_begin = offset;
         offset += 8;
-        offset = skip_string(current, offset,
+        offset = skip_string(version_five, offset,
                              "v4 conversion argument " +
                                  std::to_string(index));
         offset += 4 + 4 + 4 + 8 + 8;
         version_four.insert(
             version_four.end(),
-            current.begin() + static_cast<std::ptrdiff_t>(entry_begin),
-            current.begin() + static_cast<std::ptrdiff_t>(offset));
+            version_five.begin() + static_cast<std::ptrdiff_t>(entry_begin),
+            version_five.begin() + static_cast<std::ptrdiff_t>(offset));
         offset += 8;
         auto const tail_begin = offset;
         offset += 8 + 8;
-        auto const rank = read_u32(current, offset);
+        auto const rank = read_u32(version_five, offset);
         offset += static_cast<std::size_t>(rank) * 16;
         version_four.insert(
             version_four.end(),
-            current.begin() + static_cast<std::ptrdiff_t>(tail_begin),
-            current.begin() + static_cast<std::ptrdiff_t>(offset));
+            version_five.begin() + static_cast<std::ptrdiff_t>(tail_begin),
+            version_five.begin() + static_cast<std::ptrdiff_t>(offset));
     }
     version_four.insert(
         version_four.end(),
-        current.begin() + static_cast<std::ptrdiff_t>(offset),
-        current.end() - 8);
+        version_five.begin() + static_cast<std::ptrdiff_t>(offset),
+        version_five.end() - 8);
     version_four.resize(version_four.size() + 8);
     write_u32(version_four, 8,
               deepforge::compiler::kRaggedArtifactFormatVersion);
@@ -474,7 +503,7 @@ int main(int argc, char** argv) {
                    "parse serialized artifact");
         tests.check(parsed.format_version ==
                         deepforge::compiler::kArtifactFormatVersion,
-                    "writer emits artifact format v5");
+                    "writer emits artifact format v6");
         tests.check(parsed.adapter_kind ==
                         deepforge::compiler::ArtifactAdapterKind::
                             kConv2DRankedMemref,
@@ -499,6 +528,26 @@ int main(int argc, char** argv) {
                                 compilation.variants[index].object,
                         "artifact variant section round-trips");
         }
+
+        auto ragged_sequence_v5 = make_ragged_sequence_v5(first);
+        deepforge::compiler::ArtifactInfo ragged_sequence_v5_info;
+        tests.good(deepforge::compiler::parse_artifact(
+                       ragged_sequence_v5, ragged_sequence_v5_info),
+                   "parse ragged-sequence format-v5 artifact");
+        tests.check(
+            ragged_sequence_v5_info.format_version ==
+                    deepforge::compiler::
+                        kRaggedSequenceArtifactFormatVersion &&
+                ragged_sequence_v5_info.metadata == compilation.metadata,
+            "format-v5 reader defaults override role UIDs to empty");
+        auto v5_matmul_policy = ragged_sequence_v5;
+        auto const v5_flags = metadata_numbers_offset(v5_matmul_policy);
+        write_u32(v5_matmul_policy, v5_flags + 4, 1);
+        write_u32(v5_matmul_policy, v5_flags + 8, 2);
+        refresh_checksum(v5_matmul_policy);
+        status = deepforge::compiler::parse_artifact(v5_matmul_policy, parsed);
+        tests.parse_error(status,
+                          "format-v5 rejects the format-v6 MATMUL policy");
 
         auto ragged_v4 = make_ragged_v4(first);
         deepforge::compiler::ArtifactInfo ragged_v4_info;
@@ -718,6 +767,15 @@ int main(int argc, char** argv) {
                                                       parsed);
         tests.parse_error(status,
                           "checksummed unknown override policy is rejected");
+        auto excessive_override_roles = first;
+        write_u32(excessive_override_roles,
+                  metadata_numbers_offset(excessive_override_roles) + 12,
+                  std::numeric_limits<std::uint32_t>::max());
+        refresh_checksum(excessive_override_roles);
+        status = deepforge::compiler::parse_artifact(excessive_override_roles,
+                                                      parsed);
+        tests.parse_error(status,
+                          "checksummed excessive override role count is rejected");
         auto dynamic_conv_adapter = first;
         auto const dynamic_flags = metadata_numbers_offset(dynamic_conv_adapter);
         write_u32(dynamic_conv_adapter, dynamic_flags, 1);
@@ -855,6 +913,24 @@ int main(int argc, char** argv) {
                         deepforge::import::ErrorCode::kInvalidValue,
                     "writer rejects inconsistent override metadata");
         compilation.metadata.override_shape_enabled = saved_override_flag;
+        auto const saved_override_policy = compilation.metadata.override_policy;
+        auto const saved_override_roles =
+            compilation.metadata.override_role_uids;
+        compilation.metadata.override_shape_enabled = true;
+        compilation.metadata.override_policy =
+            deepforge::compiler::ShapeOverridePolicy::kMatmul;
+        compilation.metadata.override_role_uids = {
+            compilation.metadata.arguments[0].uid,
+            compilation.metadata.arguments[0].uid,
+            compilation.metadata.arguments[2].uid};
+        status = deepforge::compiler::serialize_artifact(compilation,
+                                                         invalid_output);
+        tests.check(status.code() ==
+                        deepforge::import::ErrorCode::kInvalidValue,
+                    "writer rejects duplicate MATMUL override role UIDs");
+        compilation.metadata.override_shape_enabled = saved_override_flag;
+        compilation.metadata.override_policy = saved_override_policy;
+        compilation.metadata.override_role_uids = saved_override_roles;
         auto const saved_metadata = compilation.metadata;
         compilation.metadata.x_shape[0] =
             std::numeric_limits<std::int64_t>::max();

@@ -1073,8 +1073,67 @@ Status validate_operation(OperationTag tag,
     }
 }
 
-Status validate_shape_override_subset(SerializedGraph const& graph) {
+Status validate_shape_override_subset(
+    SerializedGraph const& graph,
+    ShapeOverridePolicy& policy,
+    std::vector<std::int64_t>& role_uids) {
+    policy = ShapeOverridePolicy::kNone;
+    role_uids.clear();
     if (!graph.context.is_override_shape_enabled.value_or(false)) {
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kMatmul) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        if (operation == nullptr || !operation->inputs.contains("A") ||
+            !operation->inputs.contains("B") ||
+            !operation->outputs.contains("C")) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "MATMUL attributes are malformed");
+        }
+        if (operation->inputs.contains("M_override") ||
+            operation->inputs.contains("N_override") ||
+            operation->inputs.contains("K_override")) {
+            return unsupported(
+                "nodes[0]",
+                "shape-override arrays cannot be combined with MATMUL extent-override tensors");
+        }
+        std::vector<std::int64_t> matmul_roles;
+        matmul_roles.reserve(3);
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime MATMUL overrides require external plain f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            matmul_roles.push_back(uid);
+            return Status::ok();
+        };
+        auto status = check_role(operation->inputs.at("A"),
+                                 "nodes[0].inputs.A");
+        if (status.is_bad()) return status;
+        status = check_role(operation->inputs.at("B"),
+                            "nodes[0].inputs.B");
+        if (status.is_bad()) return status;
+        status = check_role(operation->outputs.at("C"),
+                            "nodes[0].outputs.C");
+        if (status.is_bad()) return status;
+        policy = ShapeOverridePolicy::kMatmul;
+        role_uids = std::move(matmul_roles);
         return Status::ok();
     }
     std::optional<std::vector<std::int64_t>> maximum_dimensions;
@@ -1126,6 +1185,7 @@ Status validate_shape_override_subset(SerializedGraph const& graph) {
             if (status.is_bad()) return status;
         }
     }
+    policy = ShapeOverridePolicy::kPointwiseExact;
     return Status::ok();
 }
 
@@ -1144,7 +1204,10 @@ Status analyze_graph(SerializedGraph const& graph,
         return unsupported("tensors",
                            "name-keyed execution is deferred until its public ABI is defined");
     }
-    auto status = validate_shape_override_subset(graph);
+    ShapeOverridePolicy override_policy = ShapeOverridePolicy::kNone;
+    std::vector<std::int64_t> override_role_uids;
+    auto status = validate_shape_override_subset(
+        graph, override_policy, override_role_uids);
     if (status.is_bad()) return status;
     auto const has_specialized_operation = std::any_of(
         graph.nodes.begin(), graph.nodes.end(), [](import::NodeDesc const& node) {
@@ -1464,9 +1527,8 @@ Status analyze_graph(SerializedGraph const& graph,
         graph.context.is_dynamic_shape_enabled.value_or(false);
     candidate.override_shape_enabled =
         graph.context.is_override_shape_enabled.value_or(false);
-    candidate.override_policy = candidate.override_shape_enabled
-                                    ? ShapeOverridePolicy::kPointwiseExact
-                                    : ShapeOverridePolicy::kNone;
+    candidate.override_policy = override_policy;
+    candidate.override_role_uids = std::move(override_role_uids);
     for (auto const& [uid, info] : usage) {
         auto const tensor_it = graph.tensors.find(uid);
         if (tensor_it == graph.tensors.end()) {
@@ -2519,15 +2581,41 @@ Status emit_matmul(
     std::optional<double> padding_value;
     (void)read_optional_number_attribute(operation, "padding_value",
                                          padding_value);
-    return emit_flat_loop(
-        builder, location, c.dim, "MATMUL",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& c_indices) {
-            auto a_indices = c_indices;
-            auto b_indices = c_indices;
-            for (std::size_t dimension = 0; dimension + 2 < rank;
-                 ++dimension) {
+    auto const dynamic =
+        graph.context.is_override_shape_enabled.value_or(false);
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& c_indices) {
+        auto a_indices = c_indices;
+        auto b_indices = c_indices;
+        for (std::size_t dimension = 0; dimension + 2 < rank;
+             ++dimension) {
+            if (dynamic) {
+                auto const one =
+                    index_constant(body_builder, body_location, 1);
+                auto a_extent = ::mlir::memref::DimOp::create(
+                    body_builder, body_location, values.at(a_uid),
+                    index_constant(body_builder, body_location,
+                                   static_cast<std::int64_t>(dimension)));
+                auto b_extent = ::mlir::memref::DimOp::create(
+                    body_builder, body_location, values.at(b_uid),
+                    index_constant(body_builder, body_location,
+                                   static_cast<std::int64_t>(dimension)));
+                a_indices[dimension] = ::mlir::arith::SelectOp::create(
+                    body_builder, body_location,
+                    ::mlir::arith::CmpIOp::create(
+                        body_builder, body_location,
+                        ::mlir::arith::CmpIPredicate::eq, a_extent, one),
+                    index_constant(body_builder, body_location, 0),
+                    c_indices[dimension]);
+                b_indices[dimension] = ::mlir::arith::SelectOp::create(
+                    body_builder, body_location,
+                    ::mlir::arith::CmpIOp::create(
+                        body_builder, body_location,
+                        ::mlir::arith::CmpIPredicate::eq, b_extent, one),
+                    index_constant(body_builder, body_location, 0),
+                    c_indices[dimension]);
+            } else {
                 if (a.dim[dimension] == 1) {
                     a_indices[dimension] =
                         index_constant(body_builder, body_location, 0);
@@ -2537,63 +2625,70 @@ Status emit_matmul(
                         index_constant(body_builder, body_location, 0);
                 }
             }
-            a_indices[rank - 2] = c_indices[rank - 2];
-            b_indices[rank - 1] = c_indices[rank - 1];
-            auto zero_index = index_constant(body_builder, body_location, 0);
-            auto upper = index_constant(body_builder, body_location,
-                                        a.dim[rank - 1]);
-            auto one_index = index_constant(body_builder, body_location, 1);
-            auto sum = ::mlir::scf::buildLoopNest(
+        }
+        a_indices[rank - 2] = c_indices[rank - 2];
+        b_indices[rank - 1] = c_indices[rank - 1];
+        auto zero_index = index_constant(body_builder, body_location, 0);
+        ::mlir::Value upper;
+        if (dynamic) {
+            upper = ::mlir::memref::DimOp::create(
+                body_builder, body_location, values.at(a_uid),
+                index_constant(body_builder, body_location,
+                               static_cast<std::int64_t>(rank - 1)));
+        } else {
+            upper = index_constant(body_builder, body_location,
+                                   a.dim[rank - 1]);
+        }
+        auto one_index = index_constant(body_builder, body_location, 1);
+        auto sum = ::mlir::scf::buildLoopNest(
+            body_builder, body_location, ::mlir::ValueRange{zero_index},
+            ::mlir::ValueRange{upper}, ::mlir::ValueRange{one_index},
+            ::mlir::ValueRange{
+                float_constant(body_builder, body_location, 0.0F)},
+            [&](::mlir::OpBuilder& reduction_builder,
+                ::mlir::Location reduction_location,
+                ::mlir::ValueRange reduction_indices,
+                ::mlir::ValueRange iter_args) -> ::mlir::scf::ValueVector {
+                a_indices[rank - 1] = reduction_indices.front();
+                b_indices[rank - 2] = reduction_indices.front();
+                auto a_value = ::mlir::memref::LoadOp::create(
+                    reduction_builder, reduction_location, values.at(a_uid),
+                    a_indices);
+                auto b_value = ::mlir::memref::LoadOp::create(
+                    reduction_builder, reduction_location, values.at(b_uid),
+                    b_indices);
+                ::mlir::Value product = ::mlir::arith::MulFOp::create(
+                    reduction_builder, reduction_location, a_value, b_value);
+                auto k_active = matmul_override_index_is_active(
+                    reduction_builder, reduction_location, overrides.k,
+                    reduction_indices.front(), c_indices, values);
+                product = ::mlir::arith::SelectOp::create(
+                    reduction_builder, reduction_location, k_active, product,
+                    float_constant(reduction_builder, reduction_location,
+                                   0.0F));
+                return {::mlir::arith::AddFOp::create(
+                    reduction_builder, reduction_location, iter_args.front(),
+                    product)};
+            });
+        auto m_active = matmul_override_index_is_active(
+            body_builder, body_location, overrides.m, c_indices[rank - 2],
+            c_indices, values);
+        auto n_active = matmul_override_index_is_active(
+            body_builder, body_location, overrides.n, c_indices[rank - 1],
+            c_indices, values);
+        auto output_active = ::mlir::arith::AndIOp::create(
+            body_builder, body_location, m_active, n_active);
+        auto result = ::mlir::arith::SelectOp::create(
+            body_builder, body_location, output_active, sum.results.front(),
+            float_constant(
                 body_builder, body_location,
-                ::mlir::ValueRange{zero_index}, ::mlir::ValueRange{upper},
-                ::mlir::ValueRange{one_index},
-                ::mlir::ValueRange{
-                    float_constant(body_builder, body_location, 0.0F)},
-                [&](::mlir::OpBuilder& reduction_builder,
-                    ::mlir::Location reduction_location,
-                    ::mlir::ValueRange reduction_indices,
-                    ::mlir::ValueRange iter_args) -> ::mlir::scf::ValueVector {
-                    a_indices[rank - 1] = reduction_indices.front();
-                    b_indices[rank - 2] = reduction_indices.front();
-                    auto a_value = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location, values.at(a_uid),
-                        a_indices);
-                    auto b_value = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location, values.at(b_uid),
-                        b_indices);
-                    ::mlir::Value product = ::mlir::arith::MulFOp::create(
-                        reduction_builder, reduction_location, a_value,
-                        b_value);
-                    auto k_active = matmul_override_index_is_active(
-                        reduction_builder, reduction_location, overrides.k,
-                        reduction_indices.front(), c_indices, values);
-                    product = ::mlir::arith::SelectOp::create(
-                        reduction_builder, reduction_location, k_active,
-                        product,
-                        float_constant(reduction_builder, reduction_location,
-                                       0.0F));
-                    return {::mlir::arith::AddFOp::create(
-                        reduction_builder, reduction_location,
-                        iter_args.front(), product)};
-                });
-            auto m_active = matmul_override_index_is_active(
-                body_builder, body_location, overrides.m,
-                c_indices[rank - 2], c_indices, values);
-            auto n_active = matmul_override_index_is_active(
-                body_builder, body_location, overrides.n,
-                c_indices[rank - 1], c_indices, values);
-            auto output_active = ::mlir::arith::AndIOp::create(
-                body_builder, body_location, m_active, n_active);
-            auto result = ::mlir::arith::SelectOp::create(
-                body_builder, body_location, output_active,
-                sum.results.front(),
-                float_constant(
-                    body_builder, body_location,
-                    static_cast<float>(padding_value.value_or(0.0))));
-            ::mlir::memref::StoreOp::create(body_builder, body_location,
-                                             result, values.at(c_uid),
-                                             c_indices);
-        });
+                static_cast<float>(padding_value.value_or(0.0))));
+        ::mlir::memref::StoreOp::create(body_builder, body_location, result,
+                                         values.at(c_uid), c_indices);
+    };
+    return dynamic ? emit_dynamic_loop(builder, location, values.at(c_uid),
+                                       rank, body)
+                   : emit_flat_loop(builder, location, c.dim, "MATMUL", body);
 }
 
 struct ResampleCoordinates {

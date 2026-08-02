@@ -302,11 +302,14 @@ Runtime shape override is executable for a non-broadcasting, `POINTWISE`-only
 ordered DAG whose used tensors are plain f32 with equal compiled dimensions.
 External arguments are read-only inputs plus one write-only output; virtual
 intermediates receive the common runtime shape through statically bounded packed
-workspace views. Compiled dimensions are maxima; runtime dimensions must be
-positive and no larger, runtime strides must satisfy the supported positive
-non-overlap condition, and each external storage span must fit its compiled
-bound. The dynamic flag alone is persisted without changing static descriptor
-semantics. Independently,
+workspace views. It is also executable for one standard-f32 `MATMUL` whose A/B/C
+are external plain tensors of equal rank at least two. Its final descriptors
+must preserve M/N/K relations and batch broadcasting; composed graphs, virtual
+tensors, and simultaneous M/N/K extent ports are rejected. Compiled dimensions
+are maxima; runtime dimensions must be positive and no larger, runtime strides
+must satisfy the supported positive non-overlap condition, and each external
+storage span must fit its compiled bound. The dynamic flag alone is persisted
+without changing static descriptor semantics. Independently,
 MATMUL and MATMUL_FP8 accept optional external plain INT32 M/N/K inputs whose
 rank matches C, whose trailing dimensions are `[1,1]`, and whose batch
 dimensions broadcast to C. Values select the output and reduction extents
@@ -314,9 +317,9 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v5 for ragged
-storage references and logical-sequence divisors; v1-v4 remain readable, with
-v4 divisors defaulted to one.
+New artifacts use format v6 for ordered MATMUL override roles while retaining
+the v4 ragged references and v5 logical-sequence divisors; v1-v5 remain
+readable, with v4 divisors defaulted to one and pre-v6 role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

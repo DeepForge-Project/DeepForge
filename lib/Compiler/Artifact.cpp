@@ -602,6 +602,12 @@ Status serialize_artifact(CompilationResult const& compilation,
     append_u32(bytes, compilation.metadata.override_shape_enabled ? 1U : 0U);
     append_u32(bytes,
                static_cast<std::uint32_t>(compilation.metadata.override_policy));
+    append_u32(
+        bytes,
+        static_cast<std::uint32_t>(compilation.metadata.override_role_uids.size()));
+    for (auto uid : compilation.metadata.override_role_uids) {
+        append_i64(bytes, uid);
+    }
 
     if (compilation.metadata.arguments.size() >
         std::numeric_limits<std::uint32_t>::max()) {
@@ -705,6 +711,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version != kStaticMetadataArtifactFormatVersion &&
         version != kShapeOverrideArtifactFormatVersion &&
         version != kRaggedArtifactFormatVersion &&
+        version != kRaggedSequenceArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -732,6 +739,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     }
     if (version == kShapeOverrideArtifactFormatVersion ||
         version == kRaggedArtifactFormatVersion ||
+        version == kRaggedSequenceArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -739,15 +747,33 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         if (!reader.read_u32(dynamic_shape_enabled) ||
             !reader.read_u32(override_shape_enabled) ||
             !reader.read_u32(override_policy) || dynamic_shape_enabled > 1 ||
-            override_shape_enabled > 1 ||
-            override_policy > static_cast<std::uint32_t>(
-                                  ShapeOverridePolicy::kPointwiseExact)) {
+            override_shape_enabled > 1) {
+            return parse_failure("dynamic shape metadata is malformed");
+        }
+        auto const maximum_policy =
+            version == kArtifactFormatVersion
+                ? ShapeOverridePolicy::kMatmul
+                : ShapeOverridePolicy::kPointwiseExact;
+        if (override_policy >
+            static_cast<std::uint32_t>(maximum_policy)) {
             return parse_failure("dynamic shape metadata is malformed");
         }
         result.metadata.dynamic_shape_enabled = dynamic_shape_enabled != 0;
         result.metadata.override_shape_enabled = override_shape_enabled != 0;
         result.metadata.override_policy =
             static_cast<ShapeOverridePolicy>(override_policy);
+        if (version == kArtifactFormatVersion) {
+            std::uint32_t role_count = 0;
+            if (!reader.read_u32(role_count) || role_count > 64) {
+                return parse_failure("override role metadata is malformed");
+            }
+            result.metadata.override_role_uids.resize(role_count);
+            for (auto& uid : result.metadata.override_role_uids) {
+                if (!reader.read_i64(uid)) {
+                    return parse_failure("override role metadata is truncated");
+                }
+            }
+        }
     }
     if (version != kLegacyArtifactFormatVersion) {
         std::uint32_t argument_count = 0;
@@ -768,6 +794,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                 return parse_failure("argument table entry is malformed");
             }
             if ((version == kRaggedArtifactFormatVersion ||
+                 version == kRaggedSequenceArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
@@ -777,7 +804,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                                           kRaggedBatchPrefix))) {
                 return parse_failure("argument storage policy is malformed");
             }
-            if (version == kArtifactFormatVersion &&
+            if ((version == kRaggedSequenceArtifactFormatVersion ||
+                 version == kArtifactFormatVersion) &&
                 (!reader.read_i64(argument.ragged_sequence_divisor) ||
                  argument.ragged_sequence_divisor <= 0)) {
                 return parse_failure("ragged sequence divisor is malformed");

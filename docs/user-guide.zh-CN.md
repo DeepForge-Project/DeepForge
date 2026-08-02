@@ -14,7 +14,7 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG 子集支持 shape override array，MATMUL 支持 extent-override tensor 端口 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG 与单个标准 f32 `MATMUL` 支持 shape override array，MATMUL 另有独立 extent-override tensor 端口 |
 | 通用 Tensor | rank 1-64 f32 data、显式 UID；allocation 仍为静态；文档指定的 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；文档指定的标准 f32 SDPA tensor 可使用 ragged batch-prefix storage；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
@@ -397,7 +397,7 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
-对序列化时设置 `is_override_shape_enabled=true` 的图，动态执行子集限定为只包含
+设置 `is_override_shape_enabled=true` 后，exact-pointwise policy 接受只包含
 `POINTWISE` node 的有序 DAG。全部已用 tensor 必须是编译最大 shape 相同的 plain
 FLOAT；不支持 broadcast、pass-by-value、ragged offset 或 reorder。输入和唯一 external
 输出通过公开 UID map 提供，中间值可为 virtual 并使用编译器规划的 workspace。
@@ -423,24 +423,49 @@ if (status.is_good()) {
 
 三个 override array 的数量必须相同，UID 必须唯一且属于 external argument。每个
 shape 必须保持 rank，dimension 为正且不超过序列化上界；stride 必须为正、满足当前
-支持的不重叠条件，storage span 不能超过编译 byte bound。最终所有 pointwise
-external argument shape 必须仍相同，因此缩小 shape 时通常要覆盖全部 external
-argument。Virtual UID 不出现在 override array 中；其 runtime shape 从相等的 external
-shape 传播，packed view 保持在按序列化最大 shape 分配的 workspace 内。空 override
-list 按编译最大 shape 执行。workspace query 执行相同校验并返回静态最大 workspace
-上界。仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，
-该信息会写入 plan 和 `.dfo` metadata，但执行 descriptor 保持静态。
+支持的不重叠条件，storage span 不能超过编译 byte bound。空 list 按编译最大
+descriptor 执行；partial list 只有在最终全部 descriptor 仍满足所选 operation policy
+时才接受。workspace query 执行相同校验并返回静态最大 workspace 上界。
 
-MATMUL extent override 是独立的 serialized node input，不使用上面的 shape override
-array。`M_override`、`N_override`、`K_override` 都是可选 external plain INT32
-tensor，通过普通 UID variant pack 传入。它们的 rank 与 C 相同，末两个 dimension
-为 `[1,1]`，batch dimension 为 1 或对应的 C dimension。序列化 A/B/C dimension
-是 allocation 上界；每个 broadcast batch entry 的合法值满足
-`0 <= M <= C[-2]`、`0 <= N <= C[-1]`、
+Pointwise 要求最终全部 external shape 相同，因此缩小时通常要覆盖全部 external
+argument。Virtual UID 不出现在 override array 中；其 runtime shape 从相等的 external
+shape 传播，packed view 保持在按序列化最大 shape 分配的 workspace 内。
+
+单个标准 f32 `MATMUL` 可改为 override 三个 external plain A、B、C descriptor。
+它不能与其他 node 组合，也不能使用 virtual、pass-by-value、ragged、reordered 或
+M/N/K extent-override tensor。Rank 3 的典型调用为：
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, c_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {a_batch, runtime_m, runtime_k},
+    {b_batch, runtime_k, runtime_n},
+    {std::max(a_batch, b_batch), runtime_m, runtime_n}};
+deepforge::runtime::OverrideStrides override_strides{
+    a_runtime_strides, b_runtime_strides, c_runtime_strides};
+```
+
+三个 tensor 的 rank 相同且至少为 2。最终 descriptor 必须满足
+`A[-2] == C[-2]`、`A[-1] == B[-2]` 和 `B[-1] == C[-1]`。每个 batch axis
+上 A/B 必须相同或其中一个为 1，C 等于两者最大值；partial override 保持这些关系
+即可合法。虽然上游 sample 可从 fake cache shape 增长，DeepForge 仍要求 dimension
+和 byte span 位于序列化上界内，因为 UID-map ABI 只有 pointer，没有 allocation
+length 可用于校验更大的 descriptor。
+
+仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，该信息会写入 plan
+和 `.dfo` metadata，但执行 descriptor 保持静态。反过来，Frontend MATMUL producer
+使用该 policy 时只需设置 override flag。
+
+MATMUL extent override 是另一套机制。`M_override`、`N_override`、`K_override` 是
+可选 external plain INT32 serialized node input，通过普通 UID variant pack 传入。
+它们的 rank 与 C 相同，末两个 dimension 为 `[1,1]`，batch dimension 为 1 或对应
+C dimension。序列化 A/B/C descriptor 仍是静态 allocation 上界；每个 broadcast
+batch entry 的合法值满足 `0 <= M <= C[-2]`、`0 <= N <= C[-1]`、
 `0 <= K <= A[-1] == B[-2]`，缺少某个端口时使用对应完整静态 extent。M/N 选择
 有效输出矩形，K 选择 reduction extent。标准 f32 MATMUL 在 M/N 外写入有限 f32
 `padding_value`，默认值为零；MATMUL_FP8 在 M/N 外写零，其 `Amax_C` 包含这些零值。
-该能力不扩展 execute 或 workspace ABI。
+Extent tensor 不改变 descriptor 或 execute ABI，也不能与 MATMUL descriptor override
+array 组合。
 
 标准 f32 SDPA 中，每个受支持的 ragged argument 都是 external plain rank-4 逻辑
 tensor，并指向一个独立 external INT32/INT64 `[B+1,1,1,1]` offset tensor。Forward

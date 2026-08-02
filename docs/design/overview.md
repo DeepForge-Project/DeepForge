@@ -194,16 +194,19 @@ space、OpenMP、多算子 fusion、动态 shape、非 packed stride、NCHW phys
 layout、grouped/depthwise Conv、GPU backend。MVP 后 C2-C5 已独立加入正的任意
 stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能力子集。C6
 已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码，以及带 virtual
-中间值的 exact-shape f32 纯 `POINTWISE` DAG runtime override。标准和 FP8 MATMUL
-还支持 producer 序列化的 per-batch INT32 M/N/K extent tensor，同时保持静态
-allocation 上界。Runtime scalar pass-by-value input 以 external、仅作为 input、全 1
+中间值的 exact-shape f32 纯 `POINTWISE` DAG runtime override。单个标准 f32
+MATMUL 也支持 external plain A/B/C 的有界 Frontend descriptor-override array，并在
+runtime 校验 M/N/K 和 batch broadcast。标准和 FP8 MATMUL 另行支持 producer
+序列化的 per-batch INT32 M/N/K extent tensor，同时保持静态 allocation 上界。
+Runtime scalar pass-by-value input 以 external、仅作为 input、全 1
 dimension tensor 的形式执行，host pointer 由普通 UID 提供。内嵌/fused
 pass-by-value payload 使用相同 descriptor 子集，并在根级 `pass_by_values` 中镜像
 精确 typed Frontend variant；它被 lowering 为 graph-owned private global，从公开
 argument 中移除，并持久化在现有 artifact object 中。标准 f32 SDPA 已
 支持 ragged forward data/row output 和 backward data/gradient、带紧凑 page table
-的独立 paged K/V、forward block mask 及 forward/backward sink token。该 pointwise
-子集之外的 dynamic 行为、threading 和广泛 fusion 仍待实现。`INT8x32`/`F16x16`
+的独立 paged K/V、forward block mask 及 forward/backward sink token。已交付的
+pointwise 和 MATMUL descriptor-override 子集之外的 dynamic 行为、threading 和
+广泛 fusion 仍待实现。`INT8x32`/`F16x16`
 需等待现代 serialized Graph producer 同时定义可达端口和物理映射，当前保持不可执行。
 固定使用的 v1.24.0 serializer 无法表达 paged backward，因此它属于未来 schema
 版本兼容工作。

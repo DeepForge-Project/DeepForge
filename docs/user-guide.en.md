@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; an exact-shape f32 `POINTWISE`-only DAG subset supports shape override arrays, and MATMUL supports extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs and one standard-f32 `MATMUL` support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -422,13 +422,13 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
-For a graph serialized with `is_override_shape_enabled=true`, the executable
-dynamic subset is an ordered DAG containing only `POINTWISE` nodes. Every used
-tensor is plain FLOAT with the same compiled maximum shape; broadcasting,
-pass-by-value, ragged offsets, and reordering are excluded. Inputs and the one
-external output use the public UID map. Intermediate values may be virtual and
-use compiler-planned workspace. Supply the same Frontend v1.24.0 override
-arrays to workspace query and execution:
+With `is_override_shape_enabled=true`, the exact-pointwise policy accepts an
+ordered DAG containing only `POINTWISE` nodes. Every used tensor is plain FLOAT
+with the same compiled maximum shape; broadcasting, pass-by-value, ragged
+offsets, and reordering are excluded. Inputs and the one external output use
+the public UID map. Intermediate values may be virtual and use compiler-planned
+workspace. Supply the same Frontend v1.24.0 override arrays to workspace query
+and execution:
 
 ```cpp
 deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, y_uid};
@@ -449,30 +449,57 @@ if (status.is_good()) {
 ```
 
 The three override arrays must have equal counts and unique external UIDs.
-Each shape must preserve rank, use positive dimensions no larger than the
-serialized maxima, and pair with positive, supported non-overlapping strides
-whose storage span fits the compiled byte bound. All final pointwise argument
-shapes must remain equal; a shrinking call therefore normally overrides every
-external argument. Virtual UIDs never appear in the override arrays. Their
-runtime shapes are propagated from the equal external shape and their packed
-views stay within workspace allocated for the serialized maxima. An empty list
-executes the compiled maximum shape. The workspace query validates the same
-rules and returns that static maximum workspace bound.
-`is_dynamic_shape_enabled=true` without the override flag is persisted in the
-plan and `.dfo` metadata but leaves execution descriptors static.
+Each supplied shape preserves rank, has positive dimensions no larger than its
+serialized maxima, and pairs with positive, supported non-overlapping strides
+whose storage span fits the compiled byte bound. An empty list executes the
+compiled maximum descriptors. A partial list is accepted only when all final
+descriptors still satisfy the selected operation policy. Workspace query runs
+the same checks as execution and returns the static maximum workspace bound.
 
-MATMUL extent overrides are separate serialized node inputs and do not use the
-shape-override arrays above. `M_override`, `N_override`, and `K_override` are
-optional external plain INT32 tensors passed through the normal UID variant
-pack. Each has the same rank as C, trailing dimensions `[1,1]`, and batch
-dimensions that are either one or equal to C. Serialized A/B/C dimensions are
-the allocation maxima. For each broadcasted batch entry, valid values satisfy
-`0 <= M <= C[-2]`, `0 <= N <= C[-1]`, and
-`0 <= K <= A[-1] == B[-2]`; an absent port selects its full static extent. M/N
-select the valid output rectangle and K selects the reduction extent. Standard
-f32 MATMUL writes its finite f32 `padding_value` outside M/N, defaulting to
-zero. MATMUL_FP8 writes zero outside M/N, and its `Amax_C` includes those zero
-values. No execute or workspace ABI extension is required.
+For pointwise, all final external shapes must remain equal, so shrinking
+normally overrides every external argument. Virtual UIDs never appear in the
+arrays; their runtime shape is propagated from the equal external shape and
+their packed views remain inside workspace allocated for serialized maxima.
+
+One standard-f32 `MATMUL` can instead override its three external plain A, B,
+and C descriptors. It cannot be composed with another node and cannot use
+virtual, pass-by-value, ragged, reordered, or M/N/K extent-override tensors.
+For rank three, a typical call is:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, c_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {a_batch, runtime_m, runtime_k},
+    {b_batch, runtime_k, runtime_n},
+    {std::max(a_batch, b_batch), runtime_m, runtime_n}};
+deepforge::runtime::OverrideStrides override_strides{
+    a_runtime_strides, b_runtime_strides, c_runtime_strides};
+```
+
+All three tensors have equal rank at least two. The final descriptors must obey
+`A[-2] == C[-2]`, `A[-1] == B[-2]`, and `B[-1] == C[-1]`. For every batch
+axis, A and B are equal or one and C equals their maximum. Partial overrides
+are legal when these relations remain true. DeepForge requires dimensions and
+byte spans to fit the serialized maxima even though the upstream sample can
+grow beyond a fake cache shape: the UID-map ABI has pointers but no allocation
+lengths with which to validate a larger descriptor.
+
+`is_dynamic_shape_enabled=true` without the override flag is persisted in the
+plan and `.dfo` metadata but leaves execution descriptors static. Conversely,
+the Frontend MATMUL producer only needs the override flag for this policy.
+
+MATMUL extent overrides are a separate mechanism. `M_override`, `N_override`,
+and `K_override` are optional external plain INT32 serialized node inputs passed
+through the normal UID variant pack. Each has the same rank as C, trailing
+dimensions `[1,1]`, and batch dimensions that are either one or equal to C.
+Serialized A/B/C descriptors remain static allocation maxima. For each
+broadcasted batch entry, valid values satisfy `0 <= M <= C[-2]`,
+`0 <= N <= C[-1]`, and `0 <= K <= A[-1] == B[-2]`; an absent port selects its
+full static extent. M/N select the valid output rectangle and K selects the
+reduction extent. Standard f32 MATMUL writes its finite f32 `padding_value`
+outside M/N, defaulting to zero. MATMUL_FP8 writes zero outside M/N, and its
+`Amax_C` includes those zero values. Extent tensors do not change descriptors or
+the execute ABI and cannot be combined with MATMUL descriptor override arrays.
 
 For standard f32 SDPA, each supported ragged argument is an external plain
 rank-4 logical tensor and names a separate external INT32 or INT64 offset tensor

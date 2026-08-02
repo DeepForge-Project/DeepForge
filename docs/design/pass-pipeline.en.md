@@ -267,12 +267,12 @@ reused.
 ## 9. Failure Strategy
 
 Compile-time errors include schema or version mismatch, dynamic behavior
-outside the exact-pointwise override policy, invalid layout or data type,
+outside the declared pointwise and MATMUL override policies, invalid layout or data type,
 unknown nodes, unsupported access, an unplannable workspace, illegal
 vectorization, and final dialect residue.
 
 Runtime fallback applies only to CPU features: AVX-512 to AVX2 to scalar. It
-does not hide input-contract failures. Only a graph compiled with the C6
+does not hide input-contract failures. Only a graph compiled with a declared C6
 override policy may supply validated runtime dimensions and strides.
 
 ## 10. Command-Line Form

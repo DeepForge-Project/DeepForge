@@ -280,30 +280,50 @@ coordinate；公开 execute 和 workspace ABI 不变。
 ### 3.6 C6 Runtime Shape Override 扩展
 
 `is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
-dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor。启用 override
-要求图是非空且只包含 `POINTWISE` node 的有序 DAG；全部已用 tensor 必须是编译
-dimension 相同的非 ragged、非 reordered、非 pass-by-value FLOAT，因此不支持
-broadcast。External argument 由只读 input 和唯一只写 output 组成，中间 tensor 可为
-virtual。
+dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor；override 执行
+也不要求同时设置该 flag。启用 override 后只能选择以下两个明确 policy 之一。
+
+Exact-pointwise policy 接受非空且只包含 `POINTWISE` node 的有序 DAG。全部已用
+tensor 必须是编译 dimension 相同的非 ragged、非 reordered、非 pass-by-value FLOAT，
+因此不支持 broadcast。External argument 由只读 input 和唯一只写 output 组成，中间
+tensor 可为 virtual。
+
+MATMUL policy 只接受单个标准 f32 `MATMUL`。A、B、C 必须是相同且至少为 2 的
+rank 的 external plain strided tensor；A/B 只读，C 只写。Virtual、pass-by-value、
+ragged、reordered 或额外 tensor 均被拒绝，也不能使用组合图或同时提供序列化
+`M_override`/`N_override`/`K_override` 端口。Metadata 按 A、B、C 顺序记录三个
+不同的 role UID。
 
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
 override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
 rank，dimension 为正且不超过编译上界；stride 为正并满足当前支持的不重叠条件，
-计算所得 storage span 不能超过编译 byte bound。应用 partial override 后，所有
-external argument dimension 必须仍完全相同。因此缩小 shape 时通常要覆盖全部
-external argument；空 list 按编译最大 shape 执行。Virtual UID 不是公开 argument，
-不能被调用者 override。
+计算所得 storage span 不能超过编译 byte bound。空 list 按编译最大 shape 执行；
+partial list 只有在最终 descriptor 仍满足所选 policy 时才合法。
 
-编译器仅对该 policy 生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
-loop bound。runtime descriptor 将解析后的值传给进程内对象和 artifact-loaded
-对象。每个 virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
-规划的 workspace 上建立内部 packed view。Alias 检查使用本次解析出的 external byte
-span。workspace 保持静态上界，override workspace query 与 execute 使用同一套校验。
-Artifact format `3` 至 `5` 都记录两个 context flag 和 policy；v1/v2 reader 默认全部
-关闭。
+Pointwise 要求最终全部 external shape 完全相同，因此缩小 shape 时通常要覆盖全部
+external argument。Virtual UID 不是公开 argument，不能被调用者 override。MATMUL
+最终 descriptor 必须满足 `A[-2] == C[-2]`、`A[-1] == B[-2]` 和
+`B[-1] == C[-1]`；每个 batch axis 上 A/B extent 必须相同或其中一个为 1，C 等于
+两者最大值。因此允许只把一个 input 的 batch extent 改为 1 等仍保持关系的 partial
+override。
 
-该 graph-level override-array 机制与 3.1 节 serialized MATMUL extent-override
-tensor 端口相互独立。
+编译器为两个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
+loop bound。Runtime descriptor 将解析结果传给进程内对象和 artifact-loaded 对象。
+Pointwise virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
+规划的 workspace 上建立内部 packed view；MATMUL loop 使用 runtime C extent、
+runtime K 和 runtime singleton-batch 选择。Alias 检查使用本次解析出的 external byte
+span。Workspace 保持静态上界，workspace query 与 execute 使用同一套校验。
+
+Artifact format `3` 至 `5` 记录两个 context flag 和 pointwise policy `1`；v6 增加
+MATMUL policy `2` 及其有序 role UID。v1/v2 reader 默认关闭 override metadata，
+v1-v5 reader 默认 role UID 为空。固定 Frontend sample 可执行大于 fake cache shape
+的 descriptor，但 DeepForge 明确要求每个 runtime dimension 和 byte span 都位于
+序列化上界内：公开 UID-map ABI 只携带 pointer，没有 allocation length，因而无法
+安全校验更大的 descriptor。
+
+MATMUL descriptor override 改变 A/B/C runtime descriptor。它与 3.1 节使用普通
+INT32 tensor 在静态 descriptor 内选择有效区域的 serialized MATMUL extent override
+是两套机制，不能在同一个图中组合。
 
 ### 3.7 C6 标准 f32 SDPA Metadata 扩展
 
@@ -348,9 +368,10 @@ tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，
 但不参与 V 加权输出。Backward 可输出相同 shape 的 external plain `DSINK_TOKEN`；
 它是在有效 batch/query row 上归约的 gradient，并要求对应 sink input 存在。
 
-Artifact format `5` 持久化 ragged storage policy、offset/sequence UID 和正的逻辑
-sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用对应
-cache block size。Reader 继续接受 v1-v4，其中 v4 divisor 默认为 1。
+Artifact format `5` 首次持久化 ragged storage policy、offset/sequence UID 和正的
+逻辑 sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用
+对应 cache block size。Format v6 保留这些字段，reader 接受 v1-v5，其中 v4 divisor
+默认为 1。
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value 扩展
 
@@ -385,8 +406,8 @@ value 不同都会在 lowering 前被拒绝。
 
 该 value 归 graph 所有。编译器在每个 target object 中生成 private constant
 `memref.global` 并在内部绑定 view，同时从公开 argument metadata 移除其 UID。执行
-时既不需要也不采用调用者对该 UID 提供的 pointer。Artifact format v5 无需增加
-section，因为现有三个 object 已携带 constant，reload 后行为不变。独立的
+时既不需要也不采用调用者对该 UID 提供的 pointer。该能力无需专用 artifact
+section，因为三个 object 已携带 constant，reload 后行为不变。独立的
 `has_compile_time_constant` 源码字段未被固定版本 v1.24.0 tensor serializer 输出，
 因此不属于当前输入契约。
 

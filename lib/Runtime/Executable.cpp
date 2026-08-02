@@ -182,6 +182,45 @@ Status resolve_overrides(
                             "all pointwise tensor shapes must remain equal");
             }
         }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kMatmul) {
+        std::array<ResolvedArgument const*, 3> roles{};
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == metadata.override_role_uids[role];
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "MATMUL override role UID is unresolved");
+            }
+            roles[role] = &resolved[static_cast<std::size_t>(
+                argument - metadata.arguments.begin())];
+        }
+        auto const& a = roles[0]->dimensions;
+        auto const& b = roles[1]->dimensions;
+        auto const& c = roles[2]->dimensions;
+        if (a.size() < 2 || a.size() != b.size() || a.size() != c.size()) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "MATMUL override ranks must match and be at least two");
+        }
+        auto const rank = a.size();
+        if (a[rank - 1] != b[rank - 2] ||
+            a[rank - 2] != c[rank - 2] ||
+            b[rank - 1] != c[rank - 1]) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "MATMUL override M/N/K dimensions are inconsistent");
+        }
+        for (std::size_t axis = 0; axis + 2 < rank; ++axis) {
+            if ((a[axis] != b[axis] && a[axis] != 1 && b[axis] != 1) ||
+                c[axis] != std::max(a[axis], b[axis])) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "MATMUL override batch dimensions are not broadcast compatible");
+            }
+        }
     }
     output = std::move(resolved);
     return Status::ok();

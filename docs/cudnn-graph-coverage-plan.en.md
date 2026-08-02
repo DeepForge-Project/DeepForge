@@ -123,13 +123,14 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
 - overlap checks based on read/write access rather than Conv-specific names;
 - `.dfo` format version 2 containing a generic tensor/argument table and
   per-variant symbols. C6 later advanced the writer to version 3 for dynamic
-  policy metadata, version 4 for ragged storage references, and version 5 for
-  packed logical-sequence divisors while retaining prior-version read
-  compatibility.
+  policy metadata, version 4 for ragged storage references, version 5 for
+  packed logical-sequence divisors, and version 6 for ordered MATMUL override
+  roles while retaining prior-version read compatibility.
 
-The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic, and
-format-v3 shape-override and format-v4 ragged-storage artifacts. Current
-compilations write format v5. Unknown artifact versions remain hard errors.
+The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic,
+format-v3 shape-override, format-v4 ragged-storage, and format-v5
+ragged-sequence artifacts. Current compilations write format v6. Unknown
+artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
 
@@ -250,7 +251,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Seven independently validated increments are complete.
+**Status:** in progress. Ten independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -293,8 +294,15 @@ DAG. Virtual intermediates use dynamically shaped packed views inside a
 workspace bounded by serialized maxima; they do not enter the public override
 arrays. Multi-node execution, artifact reload, malformed graph/UID cases,
 Release, ASan, and UBSan form its acceptance set.
+The tenth implements the pinned producer's MATMUL descriptor-override arrays
+for one standard-f32 operation with external plain A/B/C tensors. Runtime
+shapes and strides are bounded by serialized allocations and must preserve
+M/N/K and batch-broadcast relations, including after partial overrides.
+Artifact v6 records ordered role UIDs. Execution, reload, malformed relation
+and graph cases, Release, ASan, and UBSan form its acceptance set.
 
-**Work:** expand dynamic behavior beyond the delivered pointwise and MATMUL
+**Work:** expand dynamic behavior beyond the delivered exact-pointwise,
+single standard-f32 MATMUL descriptor-override, and MATMUL extent-override
 subsets; then evaluate fusion, threading, additional vector schedules, and
 family-specific cost models
 independently. Beyond enum conversion, `F16x16` has no executable producer
@@ -385,8 +393,8 @@ The project owner accepted these defaults on 2026-07-31:
    legal data-type matrix in C5.
 3. **Shape order:** support arbitrary-rank static shapes first; defer dynamic,
    ragged, reorder, and paged metadata to C6.
-4. **Artifact compatibility:** retain readers for `.dfo` v1-v4 and write v5 for
-   new compilations after the compatible generic, dynamic-policy, ragged, and
-   packed-sequence-divisor metadata migrations.
+4. **Artifact compatibility:** retain readers for `.dfo` v1-v5 and write v6 for
+   new compilations after the compatible generic, dynamic-policy, ragged,
+   packed-sequence-divisor, and MATMUL-role metadata migrations.
 5. **External validation:** keep CPU CI self-contained and eventually use an
    optional GPU runner for producer/differential release checks.

@@ -488,7 +488,7 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     one-to-one bit-preserving match between tensor payloads and root
     `pass_by_values`. The compiler emits private read-only globals, excludes
     graph-owned UIDs from public metadata, and persists values in the existing
-    target objects without artifact v6. Pointwise non-overrideability, artifact
+    target objects without changing the artifact format in that increment. Pointwise non-overrideability, artifact
     reload, normalization epsilon, INT64 RNG seed/offset, FP8 MATMUL controls,
     malformed metadata, Release, ASan, and UBSan cover the increment.
 17. Completed C6.9 multi-node exact-shape pointwise override. A non-broadcasting
@@ -497,9 +497,18 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     serialized maxima; virtual UIDs remain absent from the public override ABI.
     Dynamic execution, artifact reload, malformed graph/UID cases, Release,
     ASan, and UBSan cover the increment without an artifact-version change.
+18. Completed C6.10 bounded MATMUL descriptor override. One standard-f32
+    `MATMUL` accepts the Frontend A/B/C UID, shape, and stride arrays for
+    external plain tensors. Runtime validation enforces serialized dimension
+    and byte-span maxima, M/N/K relations, batch broadcasting, and valid partial
+    overrides. Dynamic execution uses runtime C/K extents and singleton-batch
+    selection. Artifact v6 records ordered A/B/C role UIDs while v1-v5 remain
+    readable. Reload, malformed relation/graph cases, Release, ASan, and UBSan
+    cover the increment without changing the public execute/workspace ABI.
 
-The remaining C6 functional work is dynamic behavior outside that exact-shape
-pointwise subset. Beyond enum conversion, `F16x16` has only attribute round-trip
+The remaining C6 functional work is dynamic behavior outside the delivered
+exact-pointwise and single standard-f32 MATMUL descriptor-override subsets.
+Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to
 the legacy backend/filter path; neither has a reachable modern serialized-Graph
 port plus physical mapping. They are

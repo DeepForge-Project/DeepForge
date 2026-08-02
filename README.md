@@ -8,7 +8,7 @@ subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
 **Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
-the first eight C6 increments are implemented. The end-to-end path
+the first ten C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
@@ -133,12 +133,14 @@ the nine specialized tags. C4 sequence metadata uses INT32 lengths and scalar
 INT64 seed/offset tensors. Virtual workspace intermediates and positive
 non-overlapping strided layouts are supported. C6 additionally decodes the
 Frontend `F8_128x4` physical layout on documented FP8 block-scale and E8M0
-MXFP8 scale ports. Runtime shape override is executable for one external,
-non-broadcasting, plain f32 `POINTWISE` node: serialized dimensions are maxima,
-and the Frontend-shaped override arrays supply positive runtime dimensions and
-strides within the compiled storage bounds. The standalone dynamic-shape
+MXFP8 scale ports. Runtime shape override is executable for an exact-shape,
+non-broadcasting, plain f32 `POINTWISE`-only DAG with virtual intermediates, and
+for one standard-f32 `MATMUL` with external plain A/B/C tensors. Serialized
+dimensions are maxima; Frontend-shaped override arrays supply positive runtime
+dimensions and strides within compiled storage bounds. MATMUL overrides also
+preserve M/N/K relations and batch broadcasting. The standalone dynamic-shape
 context flag is preserved as plan metadata but does not by itself make another
-operation dynamic. Standard f32 `MATMUL`, plus `MATMUL_FP8`, independently
+operation dynamic. Standard f32 `MATMUL`, plus `MATMUL_FP8`, separately
 accept optional producer-serialized external plain INT32 `M_override`,
 `N_override`, and `K_override` tensors. Their rank matches C, their two matrix
 dimensions are one, and each batch dimension is either one or the corresponding
@@ -381,7 +383,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, multi-node exact-pointwise DAG shape override, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; dynamic behavior outside that pointwise subset remains |
+| C6 | In progress: `F8_128x4`, multi-node exact-pointwise and single standard-f32 MATMUL descriptor overrides, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; dynamic behavior outside those delivered subsets remains |
 | Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

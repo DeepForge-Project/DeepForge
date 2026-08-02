@@ -23,6 +23,7 @@ enum class TensorAccess : std::uint8_t {
 enum class ShapeOverridePolicy : std::uint8_t {
     kNone = 0,
     kPointwiseExact,
+    kMatmul,
 };
 
 enum class TensorStoragePolicy : std::uint8_t {
@@ -53,6 +54,7 @@ struct GraphCompileMetadata {
     bool dynamic_shape_enabled = false;
     bool override_shape_enabled = false;
     ShapeOverridePolicy override_policy = ShapeOverridePolicy::kNone;
+    std::vector<std::int64_t> override_role_uids;
 
     bool operator==(GraphCompileMetadata const&) const = default;
 };

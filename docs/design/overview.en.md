@@ -223,8 +223,11 @@ a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
 the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
 documented block/MXFP8 ports and runtime override for an exact-shape f32
-`POINTWISE`-only DAG with virtual intermediates. Standard and FP8 MATMUL also accept producer-serialized
-per-batch INT32 M/N/K extent tensors while retaining static allocation maxima.
+`POINTWISE`-only DAG with virtual intermediates. One standard-f32 MATMUL also
+accepts bounded Frontend descriptor-override arrays for external plain A/B/C,
+with runtime M/N/K and batch-broadcast validation. Standard and FP8 MATMUL
+separately accept producer-serialized per-batch INT32 M/N/K extent tensors while
+retaining static allocation maxima.
 Runtime scalar pass-by-value inputs are accepted as external, input-only,
 all-one tensors whose host pointer is supplied by ordinary UID. Embedded/fused
 pass-by-value payloads use the same descriptor subset with an exact typed
@@ -234,7 +237,8 @@ artifact objects.
 Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
 tables, forward block masks, and forward/backward sink tokens. Dynamic behavior
-outside that pointwise subset, threading, and broad fusion remain. `INT8x32`
+outside the delivered pointwise and MATMUL descriptor-override subsets,
+threading, and broad fusion remain. `INT8x32`
 and `F16x16` stay non-executable until a modern serialized-Graph producer defines
 both a reachable port and physical mapping.
 Paged backward cannot be represented by the pinned v1.24.0 serializer and is

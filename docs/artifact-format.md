@@ -6,12 +6,13 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `5`；reader
-同时接受版本 `4` 的 ragged-storage artifact、版本 `3` 的 shape-override artifact、
-版本 `2` 的静态 metadata artifact 和版本 `1` 的 Conv2D artifact。版本 `1` 会重建
-argument table；版本 `1`、`2` 的 dynamic/override metadata 均默认为关闭，版本 `1`
-至 `3` 的 tensor storage 默认使用普通 strided addressing，版本 `4` 的全部 ragged
-sequence divisor 默认为 1。
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `6`；reader
+同时接受版本 `5` 的 ragged-sequence artifact、版本 `4` 的 ragged-storage artifact、
+版本 `3` 的 shape-override artifact、版本 `2` 的静态 metadata artifact 和版本 `1`
+的 Conv2D artifact。版本 `1` 会重建 argument table；版本 `1`、`2` 的
+dynamic/override metadata 均默认为关闭，版本 `1` 至 `3` 的 tensor storage 默认使用
+普通 strided addressing，版本 `4` 的全部 ragged sequence divisor 默认为 1，版本
+`1` 至 `5` 的 override role UID 默认为空。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -36,7 +37,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 5
+u32 format_version = 6
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -47,7 +48,9 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 exact pointwise
+u32 shape_override_policy    # 0 none, 1 exact pointwise, 2 MATMUL
+u32 override_role_count      # policy 2 为 3，其他 policy 为 0
+i64 override_role_uids[override_role_count] # 顺序为 A、B、C
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -110,8 +113,8 @@ wrapper。这个内部 adapter 不改变公开的 handle + UID variant-pack + wo
 Runtime pass-by-value scalar 不增加 argument-table flag。编译后它与 external 单元素
 只读 argument 具有相同 CPU 调用语义：调用者按 UID 提供地址，因此现有 format 可
 精确 reload。内嵌/fused scalar 也不增加 argument-table flag，因为其 UID 会被完全
-移除。Private constant global 作为数据保存在每个现有 target object 中，因此 format
-v5 无需新增 metadata section 即可 reload graph-owned value。Reader 不得从其他普通
+移除。Private constant global 作为数据保存在每个 target object 中，因此当前 format
+无需专用 metadata section 即可 reload graph-owned value。Reader 不得从其他普通
 单元素 argument 推断任一 pass-by-value 形式。
 
 版本 `3` 将执行 shape 意图与 argument 的编译最大 shape/byte span 分开记录。policy
@@ -131,6 +134,11 @@ span。引用无法解析或 metadata 不一致时，不会调用 native code。
 paged-attention page table 记录对应 K/V cache block size，因此 runtime 逻辑 sequence
 length `S` 在该 batch segment 中需要 `ceil(S/divisor)` 个 table entry。Divisor 必须
 为正，且不能令编译逻辑 sequence bound 溢出。版本 `4` artifact 按 divisor 1 解释。
+
+版本 `6` 增加有序 override-role UID list。Policy `2` 只适用于单个标准 f32 MATMUL，
+并严格按 A、B、C 顺序保存三个不同 UID。Artifact reload 后，runtime 使用这些角色
+校验完整或部分 descriptor override 的 M/N/K 关系及 batch broadcast。其他 policy
+要求 role list 为空；版本 `1` 至 `5` 不能编码 policy `2`，读取时 role list 为空。
 
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
@@ -166,5 +174,5 @@ reader/loader 拒绝未知 format version、producer 版本、端序、不匹配
 数值契约、重复 UID、不一致 shape/padding、非法 workspace
 alignment/range/lifetime、错误的 argument table 或 adapter payload、variant
 symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum 错误。
-顶层编码发生变化时必须增加格式版本。版本 `1`、`2`、`3`、`4` 的字段顺序和语义
-保持冻结，仅用于读取；新编译结果写版本 `5`。
+顶层编码发生变化时必须增加格式版本。版本 `1` 至 `5` 的字段顺序和语义保持冻结，
+仅用于读取；新编译结果写版本 `6`。

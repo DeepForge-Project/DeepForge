@@ -187,6 +187,120 @@ Status resolve_overrides(
     return Status::ok();
 }
 
+std::int64_t load_signed_element(void const* pointer,
+                                 import::DataType data_type,
+                                 std::uint64_t element) {
+    if (data_type == import::DataType::kInt32) {
+        std::int32_t value = 0;
+        std::memcpy(&value,
+                    static_cast<std::uint8_t const*>(pointer) +
+                        element * sizeof(value),
+                    sizeof(value));
+        return value;
+    }
+    std::int64_t value = 0;
+    std::memcpy(&value,
+                static_cast<std::uint8_t const*>(pointer) +
+                    element * sizeof(value),
+                sizeof(value));
+    return value;
+}
+
+Status resolve_ragged_size(
+    compiler::GraphCompileMetadata const& metadata,
+    compiler::TensorArgumentMetadata const& argument,
+    VariantPack const& pointers,
+    std::uint64_t& size_bytes) {
+    auto const find_argument = [&](std::int64_t uid) {
+        return std::find_if(
+            metadata.arguments.begin(), metadata.arguments.end(),
+            [&](compiler::TensorArgumentMetadata const& candidate) {
+                return candidate.uid == uid;
+            });
+    };
+    auto const offset = find_argument(argument.ragged_offset_uid);
+    auto const sequence = find_argument(argument.ragged_sequence_uid);
+    if (offset == metadata.arguments.end() ||
+        sequence == metadata.arguments.end()) {
+        return fail(ErrorCode::kInvalidValue, argument.name,
+                    "ragged metadata references are unresolved");
+    }
+    auto const offset_pointer = pointers.at(offset->uid);
+    auto const sequence_pointer = pointers.at(sequence->uid);
+    auto const batches = argument.dimensions[0];
+    auto const maximum_sequence = argument.dimensions[2];
+    auto read_offset = [&](std::int64_t batch) {
+        return load_signed_element(
+            offset_pointer, offset->data_type,
+            static_cast<std::uint64_t>(batch) *
+                static_cast<std::uint64_t>(offset->strides[0]));
+    };
+    auto read_sequence = [&](std::int64_t batch) {
+        return load_signed_element(
+            sequence_pointer, sequence->data_type,
+            static_cast<std::uint64_t>(batch) *
+                static_cast<std::uint64_t>(sequence->strides[0]));
+    };
+
+    if (read_offset(0) != 0) {
+        return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                    "ragged offsets must start at zero");
+    }
+    auto const element_bytes =
+        (import::data_type_storage_bits(argument.data_type) + 7) / 8;
+    auto const maximum_elements = argument.size_bytes / element_bytes;
+    for (std::int64_t batch = 0; batch < batches; ++batch) {
+        auto const start = read_offset(batch);
+        auto const end = read_offset(batch + 1);
+        auto const sequence_length = read_sequence(batch);
+        if (start < 0 || end < start ||
+            static_cast<std::uint64_t>(end) > maximum_elements) {
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "ragged offsets must be monotonic and within the "
+                        "compiled storage bound");
+        }
+        if (sequence_length < 0 || sequence_length > maximum_sequence) {
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "runtime sequence length exceeds the ragged logical "
+                        "bound");
+        }
+        std::uint64_t required_span = 0;
+        if (sequence_length != 0) {
+            required_span = 1;
+            for (std::size_t axis = 1; axis < argument.dimensions.size();
+                 ++axis) {
+                auto const extent = static_cast<std::uint64_t>(
+                    (axis == 2 ? sequence_length
+                               : argument.dimensions[axis]) -
+                    1);
+                auto const stride =
+                    static_cast<std::uint64_t>(argument.strides[axis]);
+                if (extent >
+                    (std::numeric_limits<std::uint64_t>::max() -
+                     required_span) /
+                        stride) {
+                    return fail(ErrorCode::kDimensionOverflow, argument.name,
+                                "runtime ragged span overflows uint64");
+                }
+                required_span += extent * stride;
+            }
+        }
+        if (static_cast<std::uint64_t>(end - start) < required_span) {
+            return fail(ErrorCode::kInvalidVariantPack, argument.name,
+                        "ragged segment is shorter than its runtime sequence "
+                        "length and inner layout require");
+        }
+    }
+    auto const endpoint = read_offset(batches);
+    if (static_cast<std::uint64_t>(endpoint) >
+        std::numeric_limits<std::uint64_t>::max() / element_bytes) {
+        return fail(ErrorCode::kDimensionOverflow, argument.name,
+                    "runtime ragged byte span overflows uint64");
+    }
+    size_bytes = static_cast<std::uint64_t>(endpoint) * element_bytes;
+    return Status::ok();
+}
+
 Status validate_argument_table(
     compiler::InvocationAdapterKind adapter_kind,
     compiler::Conv2DCompileMetadata const& metadata) {
@@ -526,8 +640,6 @@ Status Executable::execute_variant(
 
     std::vector<void*> argument_pointers;
     argument_pointers.reserve(impl_->metadata.arguments.size());
-    std::vector<Interval> intervals;
-    intervals.reserve(impl_->metadata.arguments.size());
     for (auto const& argument : impl_->metadata.arguments) {
         auto it = uid_to_host_ptr.find(argument.uid);
         if (it == uid_to_host_ptr.end()) {
@@ -543,19 +655,35 @@ Status Executable::execute_variant(
             return fail(ErrorCode::kInvalidVariantPack, argument.name,
                         "tensor pointer does not meet required alignment");
         }
-        auto const argument_index = argument_pointers.size();
-        auto const size_bytes = resolved[argument_index].size_bytes;
+        argument_pointers.push_back(it->second);
+    }
+
+    std::vector<Interval> intervals;
+    intervals.reserve(impl_->metadata.arguments.size());
+    for (std::size_t argument_index = 0;
+         argument_index < impl_->metadata.arguments.size();
+         ++argument_index) {
+        auto const& argument = impl_->metadata.arguments[argument_index];
+        auto size_bytes = resolved[argument_index].size_bytes;
+        if (argument.storage_policy ==
+            compiler::TensorStoragePolicy::kRaggedBatchPrefix) {
+            auto status = resolve_ragged_size(impl_->metadata, argument,
+                                              uid_to_host_ptr, size_bytes);
+            if (status.is_bad()) return status;
+            resolved[argument_index].size_bytes = size_bytes;
+        }
         if (size_bytes > std::numeric_limits<std::size_t>::max()) {
             return fail(ErrorCode::kDimensionOverflow, argument.name,
                         "tensor byte range overflows size_t");
         }
+        auto const begin = reinterpret_cast<std::uintptr_t>(
+            argument_pointers[argument_index]);
         std::uintptr_t end = 0;
         if (!checked_add(begin, static_cast<std::size_t>(size_bytes),
                          end)) {
             return fail(ErrorCode::kDimensionOverflow, argument.name,
                         "tensor pointer range overflows uintptr_t");
         }
-        argument_pointers.push_back(it->second);
         intervals.push_back(
             {begin, end, argument.name, argument.access});
     }

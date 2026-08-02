@@ -456,10 +456,15 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     f32 single-`POINTWISE` subset. Dynamic memref descriptors, Frontend-shaped
     execute/workspace overloads, artifact v3 persistence, loaded execution,
     and malformed/max-bound cases are tested.
+11. Completed C6.3 static f32 SDPA forward ragged/paged storage. Q/K/V/O may be
+    independently ragged and K/V independently paged; runtime prefix/content
+    checks, compact alias spans, independent page tables, safe invalid-page
+    addressing, artifact v4 persistence/reload, and malformed metadata are
+    covered by Release, ASan, and UBSan tests.
 
-The remaining C6 functional work is broader dynamic behavior, ragged/paged
-metadata, reorder formats outside that scale subset, optimization, and release
-qualification. Benchmark-driven optimization remains owned by the
+The remaining C6 functional work is broader dynamic behavior, backward/packed
+ragged and paged metadata, reorder formats outside that scale subset,
+optimization, and release qualification. Benchmark-driven optimization remains owned by the
 Loop/Schedule layer: establish repeatable pinned-core measurements first, then
 evaluate outer tiling, padding fusion, and multithreading independently.
 Optimizations must not change the frozen serialization, ABI, workspace

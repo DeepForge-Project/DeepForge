@@ -7,10 +7,12 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `3`; the reader also
-accepts version `2` static-metadata artifacts and version `1` Conv2D artifacts.
-For version `1`, it reconstructs the argument table; versions `1` and `2`
-default all dynamic and override metadata to disabled.
+generated kernel. The current writer emits format version `4`; the reader also
+accepts version `3` shape-override artifacts, version `2` static-metadata
+artifacts, and version `1` Conv2D artifacts. For version `1`, it reconstructs
+the argument table; versions `1` and `2` default all dynamic and override
+metadata to disabled. Versions `1` through `3` default tensor storage to plain
+strided addressing.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -40,7 +42,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 3
+u32 format_version = 4
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -59,6 +61,9 @@ repeated tensor_argument {
   string name
   u32 data_type
   u32 access                  # 0 read, 1 write, 2 read-write
+  u32 storage_policy          # 0 strided, 1 ragged batch prefix
+  i64 ragged_offset_uid       # zero unless storage_policy == 1
+  i64 ragged_sequence_uid     # zero unless storage_policy == 1
   u64 alignment
   u64 size_bytes
   u32 rank
@@ -116,6 +121,14 @@ pointwise override subset. The runtime still validates every override before
 invocation. The transitional Conv adapter rejects all dynamic and override
 metadata.
 
+Version `4` adds an argument storage policy. A ragged argument records the UID
+of its `[B+1,1,1,1]` INT32/INT64 element-prefix tensor and the UID of its
+`[B,1,1,1]` INT32 sequence-length tensor. Its serialized `size_bytes` is the
+maximum compiled span. Execution validates prefix contents and segment
+capacity, then uses the final prefix endpoint as the actual byte span for alias
+checks. Malformed or unresolved references are rejected before native code is
+invoked.
+
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
 `<base>_avx2`, and `<base>_avx512`. The C-interface wrapper in each object is
@@ -134,7 +147,8 @@ operations resolve their standard `libm` symbols from the current process.
 
 Execution validates the ordered argument table, UIDs, null pointers, per-tensor
 alignment and byte ranges, runtime override policy and bounds, 64-byte
-workspace alignment, and integer overflow.
+workspace alignment, ragged prefix/reference consistency, and integer
+overflow.
 Read/read aliasing is legal; overlap involving a write argument or workspace is
 rejected. CPUID, FMA, OSXSAVE, and XGETBV determine safe AVX-512, AVX2, or
 scalar selection. Loading an object does not itself execute high-ISA code.
@@ -158,5 +172,5 @@ inconsistent shape or padding, invalid workspace alignment, ranges or
 lifetimes, invalid argument tables or adapter payloads, invalid variant symbols
 or features, duplicate variants, empty objects, truncation, trailing payload,
 and checksum mismatch. Changes to the top-level encoding must increment the
-format version. Version `1` and `2` field order and semantics remain frozen;
-both are read-only. New compilations write version `3`.
+format version. Version `1`, `2`, and `3` field order and semantics remain
+frozen; all are read-only. New compilations write version `4`.

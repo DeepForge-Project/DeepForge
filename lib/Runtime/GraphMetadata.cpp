@@ -2,6 +2,7 @@
 
 #include "DeepForge/Import/Capability.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <set>
@@ -39,6 +40,47 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
             return true;
     }
     return false;
+}
+
+bool valid_storage_policy(TensorStoragePolicy policy) {
+    switch (policy) {
+        case TensorStoragePolicy::kStrided:
+        case TensorStoragePolicy::kRaggedBatchPrefix:
+            return true;
+    }
+    return false;
+}
+
+bool ragged_storage_bytes(TensorArgumentMetadata const& argument,
+                          std::uint64_t& output) {
+    if (argument.dimensions.empty()) return false;
+    std::uint64_t inner_span = 1;
+    for (std::size_t axis = 1; axis < argument.dimensions.size(); ++axis) {
+        auto const extent =
+            static_cast<std::uint64_t>(argument.dimensions[axis] - 1);
+        auto const stride = static_cast<std::uint64_t>(argument.strides[axis]);
+        if (argument.dimensions[axis] <= 0 || argument.strides[axis] <= 0 ||
+            extent >
+                (std::numeric_limits<std::uint64_t>::max() - inner_span) /
+                    stride) {
+            return false;
+        }
+        inner_span += extent * stride;
+    }
+    if (argument.dimensions.front() <= 0) return false;
+    auto const batches =
+        static_cast<std::uint64_t>(argument.dimensions.front());
+    if (batches > std::numeric_limits<std::uint64_t>::max() / inner_span) {
+        return false;
+    }
+    auto const elements = batches * inner_span;
+    auto const bits = import::data_type_storage_bits(argument.data_type);
+    if (bits == 0 ||
+        elements > (std::numeric_limits<std::uint64_t>::max() - 7) / bits) {
+        return false;
+    }
+    output = (elements * bits + 7) / 8;
+    return true;
 }
 
 }  // namespace
@@ -80,6 +122,9 @@ import::Status validate_graph_compile_metadata(
         if (!valid_access(argument.access)) {
             return fail("argument access mode is invalid");
         }
+        if (!valid_storage_policy(argument.storage_policy)) {
+            return fail("argument storage policy is invalid");
+        }
         if (metadata.override_policy == ShapeOverridePolicy::kPointwiseExact) {
             if (argument.data_type != import::DataType::kFloat32 ||
                 argument.dimensions != metadata.arguments.front().dimensions) {
@@ -93,20 +138,62 @@ import::Status validate_graph_compile_metadata(
                     "exact-pointwise override arguments cannot be read-write");
             }
         }
-        if (!import::tensor_storage_bytes(argument.data_type,
-                                          argument.dimensions,
-                                          argument.strides, expected_size) ||
+        auto const valid_size =
+            argument.storage_policy == TensorStoragePolicy::kRaggedBatchPrefix
+                ? ragged_storage_bytes(argument, expected_size)
+                : import::tensor_storage_bytes(
+                      argument.data_type, argument.dimensions,
+                      argument.strides, expected_size);
+        if (!valid_size ||
             expected_size != argument.size_bytes ||
             argument.size_bytes >
                 static_cast<std::uint64_t>(
                     std::numeric_limits<std::size_t>::max())) {
             return fail("argument storage range is invalid");
         }
+        if (argument.storage_policy == TensorStoragePolicy::kStrided &&
+            (argument.ragged_offset_uid != 0 ||
+             argument.ragged_sequence_uid != 0)) {
+            return fail("strided argument carries ragged references");
+        }
     }
     if (metadata.override_policy == ShapeOverridePolicy::kPointwiseExact &&
         (metadata.arguments.size() < 2 || override_write_count != 1)) {
         return fail(
             "exact-pointwise override metadata requires inputs and one output");
+    }
+    for (auto const& argument : metadata.arguments) {
+        if (argument.storage_policy !=
+            TensorStoragePolicy::kRaggedBatchPrefix) {
+            continue;
+        }
+        auto const find_uid = [&](std::int64_t uid) {
+            return std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == uid;
+                });
+        };
+        auto const offset = find_uid(argument.ragged_offset_uid);
+        auto const sequence = find_uid(argument.ragged_sequence_uid);
+        if (argument.data_type != import::DataType::kFloat32 ||
+            argument.dimensions.size() != 4 ||
+            offset == metadata.arguments.end() ||
+            sequence == metadata.arguments.end() ||
+            (offset->data_type != import::DataType::kInt32 &&
+             offset->data_type != import::DataType::kInt64) ||
+            sequence->data_type != import::DataType::kInt32 ||
+            argument.dimensions[0] ==
+                std::numeric_limits<std::int64_t>::max() ||
+            offset->dimensions !=
+                std::vector<std::int64_t>{argument.dimensions[0] + 1, 1, 1,
+                                          1} ||
+            sequence->dimensions !=
+                std::vector<std::int64_t>{argument.dimensions[0], 1, 1, 1} ||
+            offset->access != TensorAccess::kRead ||
+            sequence->access != TensorAccess::kRead) {
+            return fail("ragged argument references are inconsistent");
+        }
     }
     return import::Status::ok();
 }

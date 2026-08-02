@@ -619,6 +619,10 @@ Status serialize_artifact(CompilationResult const& compilation,
         }
         append_u32(bytes, static_cast<std::uint32_t>(argument.data_type));
         append_u32(bytes, static_cast<std::uint32_t>(argument.access));
+        append_u32(bytes,
+                   static_cast<std::uint32_t>(argument.storage_policy));
+        append_i64(bytes, argument.ragged_offset_uid);
+        append_i64(bytes, argument.ragged_sequence_uid);
         append_u64(bytes, argument.alignment);
         append_u64(bytes, argument.size_bytes);
         append_u32(bytes,
@@ -698,6 +702,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     }
     if (version != kLegacyArtifactFormatVersion &&
         version != kStaticMetadataArtifactFormatVersion &&
+        version != kShapeOverrideArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -723,7 +728,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         result.target_triple.find('\0') != std::string::npos) {
         return parse_failure("target triple is invalid");
     }
-    if (version == kArtifactFormatVersion) {
+    if (version == kShapeOverrideArtifactFormatVersion ||
+        version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
         std::uint32_t override_policy = 0;
@@ -751,11 +757,23 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             TensorArgumentMetadata argument;
             std::uint32_t data_type = 0;
             std::uint32_t access = 0;
+            std::uint32_t storage_policy = 0;
             std::uint32_t rank = 0;
             if (!reader.read_i64(argument.uid) ||
                 !reader.read_string(argument.name) ||
-                !reader.read_u32(data_type) || !reader.read_u32(access) ||
-                !reader.read_u64(argument.alignment) ||
+                !reader.read_u32(data_type) || !reader.read_u32(access)) {
+                return parse_failure("argument table entry is malformed");
+            }
+            if (version == kArtifactFormatVersion &&
+                (!reader.read_u32(storage_policy) ||
+                 !reader.read_i64(argument.ragged_offset_uid) ||
+                 !reader.read_i64(argument.ragged_sequence_uid) ||
+                 storage_policy > static_cast<std::uint32_t>(
+                                      TensorStoragePolicy::
+                                          kRaggedBatchPrefix))) {
+                return parse_failure("argument storage policy is malformed");
+            }
+            if (!reader.read_u64(argument.alignment) ||
                 !reader.read_u64(argument.size_bytes) ||
                 !reader.read_u32(rank) || rank == 0 || rank > 64 ||
                 data_type > static_cast<std::uint32_t>(
@@ -766,6 +784,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             }
             argument.data_type = static_cast<import::DataType>(data_type);
             argument.access = static_cast<TensorAccess>(access);
+            argument.storage_policy =
+                static_cast<TensorStoragePolicy>(storage_policy);
             argument.dimensions.resize(rank);
             argument.strides.resize(rank);
             for (auto& dimension : argument.dimensions) {

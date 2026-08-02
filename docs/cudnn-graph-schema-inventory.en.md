@@ -246,8 +246,14 @@ and left/right bounds are executable; the v1.24.0 bottom-right causal path does
 not combine with bias, ALiBi, or dropout. ALiBi requires `right_bound == 0`.
 Probability dropout takes scalar INT64 seed/offset and can expose `RNG_DUMP`;
 custom dropout takes a mask and explicit scale, plus scale inverse in backward.
-Paged/cache attention, block masks, sink tokens, packed/ragged metadata, and
-the C5-specialized optional features above remain deferred.
+Static f32 forward also accepts independent external ragged Q/K/V/O storage
+with INT32/INT64 `[B+1,1,1,1]` element prefixes, and independent paged K/V
+containers `[num_blocks,H,block_size,D]` with external INT32
+`[B,1,page_slots,1]` tables. Both require padding and both sequence lengths;
+page IDs must be valid container block indices. A ragged Q/O may be combined
+with paged K/V. Backward ragged/paged execution, packed tables and row outputs,
+block masks, sink tokens, and the C5-specialized optional features above remain
+deferred.
 
 The CPU Bernoulli stream is stable and bit-identical across DeepForge CPU
 variants for the same seed and offset. It is an implementation-defined CPU
@@ -262,8 +268,10 @@ dimensions. Those dimensions are maxima; runtime dimensions must be positive
 and no larger, runtime strides must satisfy the supported positive non-overlap
 condition, and each storage span must fit its compiled bound. The dynamic flag
 alone is persisted without changing static descriptor semantics. Explicit
-aliasing, other dynamic operations, ragged tensors, and physical reorder
-handling outside the documented `F8_128x4` scale subset are deferred.
+aliasing, other dynamic operations, ragged tensors outside the SDPA forward
+subset, and physical reorder handling outside the documented `F8_128x4` scale
+subset are deferred. New artifacts use format v4 for ragged storage references;
+v1-v3 remain readable as ordinary strided storage.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

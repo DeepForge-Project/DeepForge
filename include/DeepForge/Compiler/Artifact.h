@@ -12,7 +12,8 @@ namespace deepforge::compiler {
 
 inline constexpr std::uint32_t kLegacyArtifactFormatVersion = 1;
 inline constexpr std::uint32_t kStaticMetadataArtifactFormatVersion = 2;
-inline constexpr std::uint32_t kArtifactFormatVersion = 3;
+inline constexpr std::uint32_t kShapeOverrideArtifactFormatVersion = 3;
+inline constexpr std::uint32_t kArtifactFormatVersion = 4;
 inline constexpr double kDefaultAbsoluteTolerance = 1.0e-4;
 inline constexpr double kDefaultRelativeTolerance = 1.0e-3;
 

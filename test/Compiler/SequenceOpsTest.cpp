@@ -66,12 +66,12 @@ std::vector<std::int64_t> contiguous_strides(
     return strides;
 }
 
-Json tensor(std::string name,
-            std::int64_t uid,
-            std::vector<std::int64_t> dimensions,
-            std::string data_type = "FLOAT",
-            bool is_virtual = false) {
-    auto strides = contiguous_strides(dimensions);
+Json strided_tensor(std::string name,
+                    std::int64_t uid,
+                    std::vector<std::int64_t> dimensions,
+                    std::vector<std::int64_t> strides,
+                    std::string data_type = "FLOAT",
+                    bool is_virtual = false) {
     return Json{{"name", std::move(name)},
                 {"data_type", std::move(data_type)},
                 {"dim", std::move(dimensions)},
@@ -82,6 +82,17 @@ Json tensor(std::string name,
                 {"reordering_type", "NONE"},
                 {"uid", uid},
                 {"uid_assigned", true}};
+}
+
+Json tensor(std::string name,
+            std::int64_t uid,
+            std::vector<std::int64_t> dimensions,
+            std::string data_type = "FLOAT",
+            bool is_virtual = false) {
+    auto strides = contiguous_strides(dimensions);
+    return strided_tensor(std::move(name), uid, std::move(dimensions),
+                          std::move(strides), std::move(data_type),
+                          is_virtual);
 }
 
 Json context(std::string name) {
@@ -484,6 +495,94 @@ Json feature_sdpa_graph() {
                       {"Sum_exp", 112}}),
         true, false, true, nullptr, 2, 1);
     return graph_document(4003, "feature_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json ragged_sdpa_graph() {
+    Json tensors = Json::object();
+    auto q = strided_tensor("Q", 601, {2, 1, 3, 2}, {2, 2, 2, 1});
+    q["ragged_offset_uid"] = 605;
+    q["ragged_offset_name"] = "QO_offsets";
+    tensors["601"] = std::move(q);
+    tensors["602"] = tensor("K", 602, {2, 1, 3, 2});
+    tensors["603"] = tensor("V", 603, {2, 1, 3, 2});
+    tensors["604"] = tensor("SEQ_LEN_Q", 604, {2, 1, 1, 1}, "INT32");
+    tensors["605"] = tensor("QO_offsets", 605, {3, 1, 1, 1}, "INT64");
+    tensors["606"] = tensor("SEQ_LEN_KV", 606, {2, 1, 1, 1}, "INT32");
+    auto o = strided_tensor("O", 607, {2, 1, 3, 2}, {2, 2, 2, 1});
+    o["ragged_offset_uid"] = 605;
+    o["ragged_offset_name"] = "QO_offsets";
+    tensors["607"] = std::move(o);
+    auto node = forward_attention_node(
+        Json::object({{"Q", 601},
+                      {"K", 602},
+                      {"V", 603},
+                      {"SEQ_LEN_Q", 604},
+                      {"SEQ_LEN_KV", 606}}),
+        Json::object({{"O", 607}}), false, false, true, nullptr, nullptr,
+        nullptr, "TOP_LEFT", 0.65F);
+    return graph_document(4008, "ragged_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json fully_ragged_sdpa_graph() {
+    Json tensors = Json::object();
+    auto q = strided_tensor("Q", 801, {2, 2, 3, 2}, {12, 2, 4, 1});
+    q["ragged_offset_uid"] = 811;
+    q["ragged_offset_name"] = "Q_offsets";
+    tensors["801"] = std::move(q);
+    auto k = strided_tensor("K", 802, {2, 1, 3, 2}, {6, 2, 2, 1});
+    k["ragged_offset_uid"] = 812;
+    k["ragged_offset_name"] = "K_offsets";
+    tensors["802"] = std::move(k);
+    auto v = strided_tensor("V", 803, {2, 1, 3, 2}, {6, 2, 2, 1});
+    v["ragged_offset_uid"] = 813;
+    v["ragged_offset_name"] = "V_offsets";
+    tensors["803"] = std::move(v);
+    tensors["804"] = tensor("SEQ_LEN_Q", 804, {2, 1, 1, 1}, "INT32");
+    tensors["805"] = tensor("SEQ_LEN_KV", 805, {2, 1, 1, 1}, "INT32");
+    auto o = strided_tensor("O", 806, {2, 2, 3, 2}, {12, 2, 4, 1});
+    o["ragged_offset_uid"] = 814;
+    o["ragged_offset_name"] = "O_offsets";
+    tensors["806"] = std::move(o);
+    tensors["811"] = tensor("Q_offsets", 811, {3, 1, 1, 1}, "INT64");
+    tensors["812"] = tensor("K_offsets", 812, {3, 1, 1, 1}, "INT32");
+    tensors["813"] = tensor("V_offsets", 813, {3, 1, 1, 1}, "INT32");
+    tensors["814"] = tensor("O_offsets", 814, {3, 1, 1, 1}, "INT64");
+    auto node = forward_attention_node(
+        Json::object({{"Q", 801},
+                      {"K", 802},
+                      {"V", 803},
+                      {"SEQ_LEN_Q", 804},
+                      {"SEQ_LEN_KV", 805}}),
+        Json::object({{"O", 806}}), false, false, true, nullptr, nullptr,
+        nullptr, "TOP_LEFT", 0.55F);
+    return graph_document(4010, "fully_ragged_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json paged_sdpa_graph() {
+    Json tensors = Json::object();
+    tensors["701"] = tensor("Q", 701, {2, 1, 1, 2});
+    tensors["702"] = tensor("K_container", 702, {4, 1, 2, 2});
+    tensors["703"] = tensor("V_container", 703, {4, 1, 2, 2});
+    tensors["704"] = tensor("Page_table_K", 704, {2, 1, 2, 1}, "INT32");
+    tensors["705"] = tensor("Page_table_V", 705, {2, 1, 2, 1}, "INT32");
+    tensors["706"] = tensor("SEQ_LEN_Q", 706, {2, 1, 1, 1}, "INT32");
+    tensors["707"] = tensor("SEQ_LEN_KV", 707, {2, 1, 1, 1}, "INT32");
+    tensors["708"] = tensor("O", 708, {2, 1, 1, 2});
+    auto node = forward_attention_node(
+        Json::object({{"Q", 701},
+                      {"K", 702},
+                      {"V", 703},
+                      {"Page_table_K", 704},
+                      {"Page_table_V", 705},
+                      {"SEQ_LEN_Q", 706},
+                      {"SEQ_LEN_KV", 707}}),
+        Json::object({{"O", 708}}), false, false, true, nullptr, nullptr,
+        nullptr, "TOP_LEFT", 0.5F);
+    node["max_seq_len_kv"] = 3;
+    return graph_document(4009, "paged_sdpa", Json::array({node}),
                           std::move(tensors));
 }
 
@@ -913,6 +1012,293 @@ void run_feature_attention_tests(TestRunner& tests) {
                 "SDPA dQ matches finite differences through masked dropout forward");
 }
 
+void run_ragged_attention_tests(TestRunner& tests) {
+    AttentionCase configuration;
+    configuration.q_dim = {2, 1, 3, 2};
+    configuration.k_dim = {2, 1, 3, 2};
+    configuration.v_dim = {2, 1, 3, 2};
+    configuration.o_dim = {2, 1, 3, 2};
+    configuration.q = {0.2F, -0.3F, 0.7F, 0.1F, -9.0F, -9.0F,
+                       -0.5F, 0.4F, -9.0F, -9.0F, -9.0F, -9.0F};
+    configuration.k = {0.6F, -0.2F, -0.4F, 0.9F, 0.1F, 0.5F,
+                       -0.3F, 0.8F, 0.7F, -0.6F, 0.2F, 0.4F};
+    configuration.v = {0.3F, -0.7F, 0.8F, 0.2F, -0.6F, 0.4F,
+                       0.5F, -0.1F, -0.2F, 0.9F, 0.6F, -0.8F};
+    configuration.bias.clear();
+    configuration.dropout_mask.clear();
+    configuration.dropout_scale = 1.0F;
+    configuration.dropout_scale_inv = 1.0F;
+    configuration.padding = true;
+    configuration.seq_q = {2, 1};
+    configuration.seq_kv = {3, 2};
+    configuration.left_bound.reset();
+    configuration.right_bound.reset();
+    configuration.attention_scale = 0.65F;
+    auto reference = attention_forward(configuration);
+
+    std::vector<float> compact_q;
+    std::vector<float> expected_o;
+    for (std::int64_t batch = 0; batch < configuration.q_dim[0]; ++batch) {
+        for (std::int64_t sequence = 0;
+             sequence < configuration.seq_q[static_cast<std::size_t>(batch)];
+             ++sequence) {
+            for (std::int64_t embedding = 0;
+                 embedding < configuration.q_dim[3]; ++embedding) {
+                compact_q.push_back(configuration.q[offset4(
+                    configuration.q_dim, batch, 0, sequence, embedding)]);
+                expected_o.push_back(reference.o[offset4(
+                    configuration.o_dim, batch, 0, sequence, embedding)]);
+            }
+        }
+    }
+    std::vector<std::int64_t> offsets{0, 4, 6};
+    std::vector<float> output(expected_o.size(), -99.0F);
+
+    deepforge::compiler::CompilationResult compilation;
+    auto status = compile_document(ragged_sdpa_graph(), compilation);
+    tests.good(status, "compile compact ragged SDPA forward");
+    if (status.is_bad() || !compilation.executable) return;
+    auto const q_metadata = std::find_if(
+        compilation.metadata.arguments.begin(),
+        compilation.metadata.arguments.end(), [](auto const& argument) {
+            return argument.uid == 601;
+        });
+    tests.check(
+        q_metadata != compilation.metadata.arguments.end() &&
+            q_metadata->storage_policy ==
+                deepforge::compiler::TensorStoragePolicy::kRaggedBatchPrefix &&
+            q_metadata->ragged_offset_uid == 605 &&
+            q_metadata->ragged_sequence_uid == 604,
+        "ragged storage policy records offset and sequence UIDs");
+
+    deepforge::runtime::VariantPack pack{{601, compact_q.data()},
+                                         {602, configuration.k.data()},
+                                         {603, configuration.v.data()},
+                                         {604, configuration.seq_q.data()},
+                                         {605, offsets.data()},
+                                         {606, configuration.seq_kv.data()},
+                                         {607, output.data()}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.good(status, "execute exact-allocation ragged SDPA forward");
+    tests.check(close_vectors(output, expected_o),
+                "ragged Q/O element offsets match dense SDPA reference");
+
+    std::vector<std::uint8_t> artifact;
+    status = deepforge::compiler::serialize_artifact(compilation, artifact);
+    tests.good(status, "serialize ragged artifact v4");
+    std::unique_ptr<deepforge::runtime::Executable> loaded;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(artifact,
+                                                               loaded);
+    }
+    tests.good(status, "load ragged artifact v4");
+    if (loaded) {
+        std::fill(output.begin(), output.end(), -99.0F);
+        status = loaded->execute(nullptr, pack, nullptr);
+        tests.good(status, "execute reloaded ragged artifact");
+        tests.check(close_vectors(output, expected_o),
+                    "artifact preserves ragged runtime validation and addressing");
+    }
+
+    offsets = {0, 3, 6};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kInvalidVariantPack,
+                "runtime rejects ragged segments shorter than sequence metadata");
+
+    AttentionCase packed_configuration;
+    packed_configuration.q_dim = {2, 2, 3, 2};
+    packed_configuration.k_dim = {2, 1, 3, 2};
+    packed_configuration.v_dim = {2, 1, 3, 2};
+    packed_configuration.o_dim = {2, 2, 3, 2};
+    packed_configuration.q.resize(24);
+    packed_configuration.k.resize(12);
+    packed_configuration.v.resize(12);
+    for (std::size_t index = 0; index < packed_configuration.q.size();
+         ++index) {
+        packed_configuration.q[index] =
+            static_cast<float>(static_cast<int>(index % 13) - 6) / 7.0F;
+    }
+    for (std::size_t index = 0; index < packed_configuration.k.size();
+         ++index) {
+        packed_configuration.k[index] =
+            static_cast<float>(static_cast<int>(index % 9) - 4) / 6.0F;
+        packed_configuration.v[index] =
+            static_cast<float>(static_cast<int>((index * 3) % 11) - 5) /
+            8.0F;
+    }
+    packed_configuration.bias.clear();
+    packed_configuration.dropout_mask.clear();
+    packed_configuration.dropout_scale = 1.0F;
+    packed_configuration.dropout_scale_inv = 1.0F;
+    packed_configuration.padding = true;
+    packed_configuration.seq_q = {2, 1};
+    packed_configuration.seq_kv = {3, 2};
+    packed_configuration.left_bound.reset();
+    packed_configuration.right_bound.reset();
+    packed_configuration.attention_scale = 0.55F;
+    auto packed_reference = attention_forward(packed_configuration);
+    auto pack_bshd = [](std::vector<float> const& dense,
+                        std::array<std::int64_t, 4> const& dimensions,
+                        std::vector<std::int32_t> const& lengths) {
+        std::vector<float> packed;
+        for (std::int64_t batch = 0; batch < dimensions[0]; ++batch) {
+            for (std::int64_t sequence = 0;
+                 sequence < lengths[static_cast<std::size_t>(batch)];
+                 ++sequence) {
+                for (std::int64_t head = 0; head < dimensions[1]; ++head) {
+                    for (std::int64_t embedding = 0;
+                         embedding < dimensions[3]; ++embedding) {
+                        packed.push_back(dense[offset4(
+                            dimensions, batch, head, sequence, embedding)]);
+                    }
+                }
+            }
+        }
+        return packed;
+    };
+    auto packed_q = pack_bshd(packed_configuration.q,
+                              packed_configuration.q_dim,
+                              packed_configuration.seq_q);
+    auto packed_k = pack_bshd(packed_configuration.k,
+                              packed_configuration.k_dim,
+                              packed_configuration.seq_kv);
+    auto packed_v = pack_bshd(packed_configuration.v,
+                              packed_configuration.v_dim,
+                              packed_configuration.seq_kv);
+    auto packed_expected_o = pack_bshd(
+        packed_reference.o, packed_configuration.o_dim,
+        packed_configuration.seq_q);
+    std::vector<float> packed_o(packed_expected_o.size(), -99.0F);
+    std::vector<std::int64_t> q_offsets{0, 8, 12};
+    std::vector<std::int32_t> k_offsets{0, 6, 10};
+    std::vector<std::int32_t> v_offsets{0, 6, 10};
+    std::vector<std::int64_t> o_offsets{0, 8, 12};
+
+    deepforge::compiler::CompilationResult packed_compilation;
+    status = compile_document(fully_ragged_sdpa_graph(), packed_compilation);
+    tests.good(status, "compile producer-stride ragged Q/K/V/O SDPA");
+    if (status.is_good() && packed_compilation.executable) {
+        deepforge::runtime::VariantPack packed_pack{
+            {801, packed_q.data()},
+            {802, packed_k.data()},
+            {803, packed_v.data()},
+            {804, packed_configuration.seq_q.data()},
+            {805, packed_configuration.seq_kv.data()},
+            {806, packed_o.data()},
+            {811, q_offsets.data()},
+            {812, k_offsets.data()},
+            {813, v_offsets.data()},
+            {814, o_offsets.data()}};
+        status = packed_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, packed_pack,
+            nullptr);
+        tests.good(status, "execute producer-stride ragged Q/K/V/O SDPA");
+        tests.check(close_vectors(packed_o, packed_expected_o),
+                    "BSHD-packed inner strides and independent prefixes match reference");
+    }
+}
+
+void run_paged_attention_tests(TestRunner& tests) {
+    AttentionCase configuration;
+    configuration.q_dim = {2, 1, 1, 2};
+    configuration.k_dim = {2, 1, 3, 2};
+    configuration.v_dim = {2, 1, 3, 2};
+    configuration.o_dim = {2, 1, 1, 2};
+    configuration.q = {0.2F, -0.3F, -0.5F, 0.4F};
+    configuration.k = {0.6F, -0.2F, -0.4F, 0.9F, 0.1F, 0.5F,
+                       -0.3F, 0.8F, 0.7F, -0.6F, 0.2F, 0.4F};
+    configuration.v = {0.3F, -0.7F, 0.8F, 0.2F, -0.6F, 0.4F,
+                       0.5F, -0.1F, -0.2F, 0.9F, 0.6F, -0.8F};
+    configuration.bias.clear();
+    configuration.dropout_mask.clear();
+    configuration.dropout_scale = 1.0F;
+    configuration.dropout_scale_inv = 1.0F;
+    configuration.padding = true;
+    configuration.seq_q = {1, 1};
+    configuration.seq_kv = {3, 3};
+    configuration.left_bound.reset();
+    configuration.right_bound.reset();
+    configuration.attention_scale = 0.5F;
+    auto reference = attention_forward(configuration);
+
+    std::vector<std::int32_t> page_k{2, 0, 3, 1};
+    std::vector<std::int32_t> page_v{1, 3, 0, 2};
+    std::array<std::int64_t, 4> const container_dim{4, 1, 2, 2};
+    auto make_container = [&](std::vector<float> const& logical,
+                              std::vector<std::int32_t> const& table) {
+        std::vector<float> container(16, -17.0F);
+        for (std::int64_t batch = 0; batch < 2; ++batch) {
+            for (std::int64_t sequence = 0; sequence < 3; ++sequence) {
+                auto const page = table[static_cast<std::size_t>(
+                    batch * 2 + sequence / 2)];
+                for (std::int64_t embedding = 0; embedding < 2;
+                     ++embedding) {
+                    container[offset4(container_dim, page, 0, sequence % 2,
+                                      embedding)] =
+                        logical[offset4(configuration.k_dim, batch, 0,
+                                        sequence, embedding)];
+                }
+            }
+        }
+        return container;
+    };
+    auto k_container = make_container(configuration.k, page_k);
+    auto v_container = make_container(configuration.v, page_v);
+    std::vector<float> output(reference.o.size(), -99.0F);
+
+    deepforge::compiler::CompilationResult compilation;
+    auto status = compile_document(paged_sdpa_graph(), compilation);
+    tests.good(status, "compile independently paged K/V SDPA");
+    if (status.is_bad() || !compilation.executable) return;
+    deepforge::runtime::VariantPack pack{{701, configuration.q.data()},
+                                         {702, k_container.data()},
+                                         {703, v_container.data()},
+                                         {704, page_k.data()},
+                                         {705, page_v.data()},
+                                         {706, configuration.seq_q.data()},
+                                         {707, configuration.seq_kv.data()},
+                                         {708, output.data()}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.good(status, "execute independently paged K/V SDPA");
+    tests.check(close_vectors(output, reference.o),
+                "page-table block mapping matches contiguous SDPA reference");
+
+    auto inferred_graph = paged_sdpa_graph();
+    inferred_graph["nodes"][0]["max_seq_len_kv"] = nullptr;
+    inferred_graph["tensors"]["709"] = tensor("Bias", 709, {1, 1, 1, 3});
+    inferred_graph["nodes"][0]["inputs"]["Bias"] = 709;
+    deepforge::compiler::CompilationResult inferred_compilation;
+    status = compile_document(inferred_graph, inferred_compilation);
+    tests.good(status, "infer both-paged logical sequence from Bias");
+    if (status.is_good() && inferred_compilation.executable) {
+        std::vector<float> zero_bias(3, 0.0F);
+        deepforge::runtime::VariantPack inferred_pack = pack;
+        inferred_pack[709] = zero_bias.data();
+        std::fill(output.begin(), output.end(), -99.0F);
+        status = inferred_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, inferred_pack,
+            nullptr);
+        tests.good(status, "execute Bias-inferred both-paged SDPA");
+        tests.check(close_vectors(output, reference.o),
+                    "both-paged inference follows Frontend Bias precedence");
+    }
+
+    page_k[0] = -1;
+    page_k[1] = 99;
+    page_v[0] = -1;
+    page_v[1] = 99;
+    std::fill(output.begin(), output.end(), -99.0F);
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.good(status, "execute guarded invalid page IDs without an OOB access");
+    tests.check(output[0] == 0.0F && output[1] == 0.0F,
+                "invalid page IDs produce guarded zero K/V loads");
+}
+
 void run_internal_dropout_tests(TestRunner& tests) {
     deepforge::compiler::CompilationResult compilation;
     auto status = compile_document(internal_dropout_graph(), compilation);
@@ -1094,6 +1480,57 @@ void run_rejection_tests(TestRunner& tests) {
                     deepforge::import::ErrorCode::kUnsupportedOperation,
                 "SDPA reports block-mask deferral explicitly");
 
+    auto invalid_ragged_shape = ragged_sdpa_graph();
+    invalid_ragged_shape["tensors"]["605"]["dim"] = {2, 1, 1, 1};
+    status = compile_document(invalid_ragged_shape, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "ragged SDPA requires B+1 prefix offsets");
+
+    auto invalid_ragged_identity = ragged_sdpa_graph();
+    invalid_ragged_identity["tensors"]["601"]["ragged_offset_name"] =
+        "different";
+    status = compile_document(invalid_ragged_identity, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "ragged offset UID and serialized name must identify one tensor");
+
+    auto invalid_ragged_batch = ragged_sdpa_graph();
+    invalid_ragged_batch["tensors"]["601"]["dim"][0] = 0;
+    status = compile_document(invalid_ragged_batch, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "ragged SDPA rejects a non-positive batch extent");
+
+    auto missing_ragged_sequence = ragged_sdpa_graph();
+    missing_ragged_sequence["nodes"][0]["inputs"].erase("SEQ_LEN_Q");
+    status = compile_document(missing_ragged_sequence, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "ragged SDPA requires explicit sequence metadata");
+
+    auto invalid_paged_capacity = paged_sdpa_graph();
+    invalid_paged_capacity["nodes"][0]["max_seq_len_kv"] = 5;
+    status = compile_document(invalid_paged_capacity, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "paged SDPA rejects logical sequence beyond table capacity");
+
+    auto unmasked_paged = paged_sdpa_graph();
+    unmasked_paged["nodes"][0]["padding_mask"] = false;
+    unmasked_paged["nodes"][0]["inputs"].erase("SEQ_LEN_Q");
+    unmasked_paged["nodes"][0]["inputs"].erase("SEQ_LEN_KV");
+    status = compile_document(unmasked_paged, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "paged SDPA requires padding and sequence metadata");
+
+    auto packed_page_table = paged_sdpa_graph();
+    packed_page_table["tensors"]["704"]["ragged_offset_uid"] = 709;
+    packed_page_table["tensors"]["704"]["ragged_offset_name"] =
+        "Page_table_K_offsets";
+    packed_page_table["tensors"]["709"] =
+        tensor("Page_table_K_offsets", 709, {3, 1, 1, 1}, "INT64");
+    status = compile_document(packed_page_table, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA reports packed page-table deferral explicitly");
+
     auto invalid_bottom_right = feature_sdpa_graph();
     invalid_bottom_right["nodes"][0]["diagonal_alignment"] = "BOTTOM_RIGHT";
     invalid_bottom_right["nodes"][0]["right_bound"] = 0;
@@ -1110,6 +1547,8 @@ int main() {
     run_rng_tests(tests);
     run_rope_tests(tests);
     run_feature_attention_tests(tests);
+    run_ragged_attention_tests(tests);
+    run_paged_attention_tests(tests);
     run_internal_dropout_tests(tests);
     run_alibi_tests(tests);
     run_bottom_right_tests(tests);

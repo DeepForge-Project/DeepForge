@@ -105,10 +105,15 @@ std::uint64_t read_u64(std::span<std::uint8_t const> bytes,
 }
 
 std::size_t skip_string(std::span<std::uint8_t const> bytes,
-                        std::size_t offset) {
+                        std::size_t offset,
+                        std::string_view context) {
     auto size = read_u32(bytes, offset);
     if (size > bytes.size() - offset) {
-        throw std::runtime_error("artifact test string is truncated");
+        throw std::runtime_error(
+            "artifact test skipped string is truncated at " +
+            std::to_string(offset - 4) + " with size " +
+            std::to_string(size) + " while reading " +
+            std::string(context));
     }
     return offset + size;
 }
@@ -158,7 +163,7 @@ std::size_t metadata_numbers_offset(
     for (int index = 0; index < 5; ++index) {
         auto size = read_u32(bytes, offset);
         if (size > bytes.size() - offset) {
-            throw std::runtime_error("artifact test string is truncated");
+            throw std::runtime_error("artifact test header string is truncated");
         }
         offset += size;
     }
@@ -169,7 +174,8 @@ std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
     std::size_t version_offset = 8;
     auto const version = read_u32(bytes, version_offset);
     auto offset = metadata_numbers_offset(bytes);
-    if (version == deepforge::compiler::kArtifactFormatVersion) {
+    if (version == deepforge::compiler::kShapeOverrideArtifactFormatVersion ||
+        version == deepforge::compiler::kArtifactFormatVersion) {
         offset += 3 * 4;
     }
     return offset;
@@ -178,10 +184,16 @@ std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
 std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
     auto offset = argument_table_offset(bytes);
     auto count = read_u32(bytes, offset);
+    std::size_t version_offset = 8;
+    auto const version = read_u32(bytes, version_offset);
     for (std::uint32_t index = 0; index < count; ++index) {
         offset += 8;
-        offset = skip_string(bytes, offset);
-        offset += 4 + 4 + 8 + 8;
+        offset = skip_string(bytes, offset, "adapter argument");
+        offset += 4 + 4;
+        if (version == deepforge::compiler::kArtifactFormatVersion) {
+            offset += 4 + 8 + 8;
+        }
+        offset += 8 + 8;
         auto rank = read_u32(bytes, offset);
         if (rank == 0 || rank > 64 ||
             static_cast<std::uint64_t>(rank) * 16 > bytes.size() - offset) {
@@ -213,7 +225,7 @@ std::size_t workspace_alignment_offset(
     return workspace_size_offset(bytes) + 8;
 }
 
-std::size_t first_argument_alignment_offset(
+std::size_t first_argument_storage_policy_offset(
     std::span<std::uint8_t const> bytes) {
     auto offset = argument_table_offset(bytes);
     auto count = read_u32(bytes, offset);
@@ -221,8 +233,54 @@ std::size_t first_argument_alignment_offset(
         throw std::runtime_error("artifact test argument table is empty");
     }
     offset += 8;
-    offset = skip_string(bytes, offset);
+    offset = skip_string(bytes, offset, "first argument");
     return offset + 4 + 4;
+}
+
+std::size_t first_argument_alignment_offset(
+    std::span<std::uint8_t const> bytes) {
+    return first_argument_storage_policy_offset(bytes) + 4 + 8 + 8;
+}
+
+std::vector<std::uint8_t> make_shape_override_v3(
+    std::span<std::uint8_t const> current) {
+    auto const table = argument_table_offset(current);
+    auto count_offset = table;
+    auto const count = read_u32(current, count_offset);
+    std::vector<std::uint8_t> version_three(
+        current.begin(),
+        current.begin() + static_cast<std::ptrdiff_t>(table + 4));
+    auto offset = count_offset;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        auto const entry_begin = offset;
+        offset += 8;
+        offset = skip_string(current, offset,
+                             "v3 conversion argument " +
+                                 std::to_string(index));
+        offset += 4 + 4;
+        version_three.insert(
+            version_three.end(),
+            current.begin() + static_cast<std::ptrdiff_t>(entry_begin),
+            current.begin() + static_cast<std::ptrdiff_t>(offset));
+        offset += 4 + 8 + 8;
+        auto const old_tail_begin = offset;
+        offset += 8 + 8;
+        auto const rank = read_u32(current, offset);
+        offset += static_cast<std::size_t>(rank) * 16;
+        version_three.insert(
+            version_three.end(),
+            current.begin() + static_cast<std::ptrdiff_t>(old_tail_begin),
+            current.begin() + static_cast<std::ptrdiff_t>(offset));
+    }
+    version_three.insert(
+        version_three.end(),
+        current.begin() + static_cast<std::ptrdiff_t>(offset),
+        current.end() - 8);
+    version_three.resize(version_three.size() + 8);
+    write_u32(version_three, 8,
+              deepforge::compiler::kShapeOverrideArtifactFormatVersion);
+    refresh_checksum(version_three);
+    return version_three;
 }
 
 std::vector<std::uint8_t> make_legacy_v1(
@@ -252,15 +310,16 @@ std::vector<std::uint8_t> make_legacy_v1(
 
 std::vector<std::uint8_t> make_static_metadata_v2(
     std::span<std::uint8_t const> current) {
+    auto version_three = make_shape_override_v3(current);
     auto const flags_begin = metadata_numbers_offset(current);
-    auto const arguments_begin = argument_table_offset(current);
+    auto const arguments_begin = argument_table_offset(version_three);
     std::vector<std::uint8_t> version_two(
-        current.begin(),
-        current.begin() + static_cast<std::ptrdiff_t>(flags_begin));
+        version_three.begin(),
+        version_three.begin() + static_cast<std::ptrdiff_t>(flags_begin));
     version_two.insert(
         version_two.end(),
-        current.begin() + static_cast<std::ptrdiff_t>(arguments_begin),
-        current.end() - 8);
+        version_three.begin() + static_cast<std::ptrdiff_t>(arguments_begin),
+        version_three.end() - 8);
     version_two.resize(version_two.size() + 8);
     write_u32(version_two, 8,
               deepforge::compiler::kStaticMetadataArtifactFormatVersion);
@@ -362,7 +421,7 @@ int main(int argc, char** argv) {
                    "parse serialized artifact");
         tests.check(parsed.format_version ==
                         deepforge::compiler::kArtifactFormatVersion,
-                    "writer emits artifact format v3");
+                    "writer emits artifact format v4");
         tests.check(parsed.adapter_kind ==
                         deepforge::compiler::ArtifactAdapterKind::
                             kConv2DRankedMemref,
@@ -387,6 +446,17 @@ int main(int argc, char** argv) {
                                 compilation.variants[index].object,
                         "artifact variant section round-trips");
         }
+
+        auto shape_v3 = make_shape_override_v3(first);
+        deepforge::compiler::ArtifactInfo shape_v3_info;
+        tests.good(deepforge::compiler::parse_artifact(shape_v3,
+                                                       shape_v3_info),
+                   "parse shape-override format-v3 artifact");
+        tests.check(
+            shape_v3_info.format_version ==
+                    deepforge::compiler::kShapeOverrideArtifactFormatVersion &&
+                shape_v3_info.metadata == compilation.metadata,
+            "format-v3 reader defaults tensor storage policy to strided");
 
         auto static_v2 = make_static_metadata_v2(first);
         deepforge::compiler::ArtifactInfo static_v2_info;
@@ -610,6 +680,27 @@ int main(int argc, char** argv) {
             invalid_argument_alignment, parsed);
         tests.parse_error(status,
                           "checksummed zero argument alignment is rejected");
+        auto invalid_storage_policy = first;
+        write_u32(invalid_storage_policy,
+                  first_argument_storage_policy_offset(
+                      invalid_storage_policy),
+                  std::numeric_limits<std::uint32_t>::max());
+        refresh_checksum(invalid_storage_policy);
+        status = deepforge::compiler::parse_artifact(invalid_storage_policy,
+                                                      parsed);
+        tests.parse_error(status,
+                          "checksummed unknown tensor storage policy is rejected");
+        auto inconsistent_strided_storage = first;
+        write_u64(inconsistent_strided_storage,
+                  first_argument_storage_policy_offset(
+                      inconsistent_strided_storage) +
+                      4,
+                  999);
+        refresh_checksum(inconsistent_strided_storage);
+        status = deepforge::compiler::parse_artifact(
+            inconsistent_strided_storage, parsed);
+        tests.parse_error(status,
+                          "strided argument rejects ragged UID references");
         auto invalid_adapter_kind = first;
         write_u32(invalid_adapter_kind,
                   adapter_kind_offset(invalid_adapter_kind),

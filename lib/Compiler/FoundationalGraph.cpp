@@ -320,10 +320,11 @@ bool checked_element_count(std::vector<std::int64_t> const& dimensions,
     return true;
 }
 
-bool has_non_overlapping_layout(TensorDesc const& tensor) {
+bool has_non_overlapping_layout(TensorDesc const& tensor,
+                                std::size_t first_axis = 0) {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> axes;
     axes.reserve(tensor.dim.size());
-    for (std::size_t index = 0; index < tensor.dim.size(); ++index) {
+    for (std::size_t index = first_axis; index < tensor.dim.size(); ++index) {
         if (tensor.dim[index] <= 0 || tensor.stride[index] <= 0) {
             return false;
         }
@@ -346,6 +347,44 @@ bool has_non_overlapping_layout(TensorDesc const& tensor) {
     return true;
 }
 
+bool execution_storage_bytes(TensorDesc const& tensor,
+                             std::uint64_t& output) {
+    if (!tensor.ragged_offset_uid) {
+        return import::tensor_storage_bytes(tensor.data_type, tensor.dim,
+                                            tensor.stride, output);
+    }
+    if (tensor.dim.empty() || tensor.dim.front() <= 0) {
+        return false;
+    }
+    std::uint64_t inner_span = 1;
+    for (std::size_t axis = 1; axis < tensor.dim.size(); ++axis) {
+        if (tensor.dim[axis] <= 0 || tensor.stride[axis] <= 0) {
+            return false;
+        }
+        auto const extent = static_cast<std::uint64_t>(tensor.dim[axis] - 1);
+        auto const stride = static_cast<std::uint64_t>(tensor.stride[axis]);
+        if (extent >
+            (std::numeric_limits<std::uint64_t>::max() - inner_span) /
+                stride) {
+            return false;
+        }
+        inner_span += extent * stride;
+    }
+    auto const batches = static_cast<std::uint64_t>(tensor.dim.front());
+    if (batches > std::numeric_limits<std::uint64_t>::max() / inner_span) {
+        return false;
+    }
+    auto const slots = batches * inner_span;
+    auto const storage_bits = import::data_type_storage_bits(tensor.data_type);
+    if (storage_bits == 0 ||
+        slots > (std::numeric_limits<std::uint64_t>::max() - 7) /
+                    storage_bits) {
+        return false;
+    }
+    output = (slots * storage_bits + 7) / 8;
+    return true;
+}
+
 Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
     if (!numeric::is_cpu_storage_type(tensor.data_type)) {
         return fail(ErrorCode::kUnsupportedDataType, path,
@@ -363,19 +402,24 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
                            "tensor reordering has no CPU physical-layout "
                            "implementation");
     }
-    if (tensor.ragged_offset_uid || tensor.ragged_offset_name) {
-        return unsupported(path, "ragged tensors are not enabled in this C6 "
-                                 "increment");
-    }
     if (tensor.dim.empty() || tensor.dim.size() > 64 ||
         tensor.dim.size() != tensor.stride.size()) {
         return fail(ErrorCode::kInvalidShape, path,
                     "rank must be between 1 and 64");
     }
+    if (tensor.ragged_offset_uid && tensor.dim.front() <= 0) {
+        return fail(ErrorCode::kInvalidShape, path,
+                    "ragged batch dimension must be positive");
+    }
     if (tensor.reordering_type == "NONE" &&
-        !has_non_overlapping_layout(tensor)) {
+        !has_non_overlapping_layout(tensor,
+                                    tensor.ragged_offset_uid ? 1 : 0)) {
         return fail(ErrorCode::kInvalidLayout, path,
-                    "CPU execution requires a non-overlapping strided layout");
+                    tensor.ragged_offset_uid
+                        ? "ragged CPU execution requires a non-overlapping "
+                          "inner layout"
+                        : "CPU execution requires a non-overlapping strided "
+                          "layout");
     }
     return Status::ok();
 }
@@ -1048,9 +1092,49 @@ Status analyze_graph(SerializedGraph const& graph,
         if (status.is_bad()) {
             return status;
         }
+        if (!tensor.ragged_offset_uid) {
+            continue;
+        }
+        auto const offset_it = graph.tensors.find(*tensor.ragged_offset_uid);
+        if (offset_it == graph.tensors.end()) {
+            return fail(ErrorCode::kMissingUid,
+                        "tensors." + std::to_string(uid) +
+                            ".ragged_offset_uid",
+                        "ragged offset tensor is unresolved");
+        }
+        auto const& offset = offset_it->second;
+        if (offset.name != *tensor.ragged_offset_name) {
+            return fail(ErrorCode::kInvalidValue,
+                        "tensors." + std::to_string(uid),
+                        "ragged offset UID and name resolve to different "
+                        "tensor identities");
+        }
+        if (offset.uid == uid || offset.is_virtual ||
+            offset.is_pass_by_value || offset.pass_by_value ||
+            offset.ragged_offset_uid || offset.reordering_type != "NONE") {
+            return unsupported(
+                "tensors." + std::to_string(uid),
+                "ragged offsets must be separate external plain tensors");
+        }
+        if (offset.data_type != import::DataType::kInt32 &&
+            offset.data_type != import::DataType::kInt64) {
+            return fail(ErrorCode::kUnsupportedDataType,
+                        "tensors." + std::to_string(offset.uid),
+                        "ragged offsets must use INT32 or INT64 elements");
+        }
     }
 
     std::map<std::int64_t, Usage> usage;
+    std::map<std::int64_t, std::int64_t> ragged_sequence_uids;
+    auto const ragged_port_supported = [](OperationTag tag, bool input,
+                                          std::string_view port) {
+        if (tag != OperationTag::kSdpa) {
+            return false;
+        }
+        return input ? (port == "Q" || port == "K" || port == "V" ||
+                        port == "Page_table_K" || port == "Page_table_V")
+                     : port == "O";
+    };
     for (std::size_t node_index = 0; node_index < graph.nodes.size();
          ++node_index) {
         auto const& node = graph.nodes[node_index];
@@ -1070,6 +1154,14 @@ Status analyze_graph(SerializedGraph const& graph,
                                 "].inputs." + port,
                             "tensor reference is unresolved");
             }
+            if (tensor->ragged_offset_uid &&
+                !ragged_port_supported(node.tag, true, port)) {
+                return unsupported(
+                    "nodes[" + std::to_string(node_index) + "].inputs." +
+                        port,
+                    "ragged storage is currently limited to SDPA forward "
+                    "Q/K/V ports");
+            }
             if (!is_specialized_operation(node.tag) &&
                 tensor->data_type != import::DataType::kFloat32 &&
                 !is_sequence_metadata_input(node.tag, port,
@@ -1088,6 +1180,14 @@ Status analyze_graph(SerializedGraph const& graph,
                             "nodes[" + std::to_string(node_index) +
                                 "].outputs." + port,
                             "tensor reference is unresolved");
+            }
+            if (tensor->ragged_offset_uid &&
+                !ragged_port_supported(node.tag, false, port)) {
+                return unsupported(
+                    "nodes[" + std::to_string(node_index) + "].outputs." +
+                        port,
+                    "ragged storage is currently limited to the SDPA "
+                    "forward O port");
             }
             if (!is_specialized_operation(node.tag) &&
                 tensor->data_type != import::DataType::kFloat32) {
@@ -1125,6 +1225,40 @@ Status analyze_graph(SerializedGraph const& graph,
             info.read = true;
             info.last_consumer = std::max(
                 info.last_consumer, static_cast<std::uint64_t>(node_index));
+            auto const& tensor = graph.tensors.at(uid);
+            if (tensor.ragged_offset_uid) {
+                auto const sequence_port = port == "Q" ? "SEQ_LEN_Q"
+                                                        : "SEQ_LEN_KV";
+                auto const sequence_reference =
+                    operation->inputs.find(sequence_port);
+                if (sequence_reference == operation->inputs.end()) {
+                    return fail(
+                        ErrorCode::kInvalidValue,
+                        "nodes[" + std::to_string(node_index) +
+                            "].inputs." + sequence_port,
+                        "ragged attention requires sequence-length metadata");
+                }
+                std::int64_t sequence_uid = 0;
+                status = reference_uid(
+                    sequence_reference->second,
+                    "nodes[" + std::to_string(node_index) + "].inputs." +
+                        sequence_port,
+                    sequence_uid);
+                if (status.is_bad()) return status;
+                auto const [sequence_it, inserted] =
+                    ragged_sequence_uids.emplace(uid, sequence_uid);
+                if (!inserted && sequence_it->second != sequence_uid) {
+                    return unsupported(
+                        tensor.name,
+                        "one ragged tensor cannot use different sequence "
+                        "metadata across operations");
+                }
+                auto& offset_info = usage[*tensor.ragged_offset_uid];
+                offset_info.read = true;
+                offset_info.last_consumer = std::max(
+                    offset_info.last_consumer,
+                    static_cast<std::uint64_t>(node_index));
+            }
         }
         for (auto const& [port, reference] : operation->outputs) {
             std::int64_t uid = 0;
@@ -1138,6 +1272,39 @@ Status analyze_graph(SerializedGraph const& graph,
             auto& info = usage[uid];
             info.write = true;
             info.producer = static_cast<std::uint64_t>(node_index);
+            auto const& tensor = graph.tensors.at(uid);
+            if (tensor.ragged_offset_uid) {
+                auto const sequence_reference =
+                    operation->inputs.find("SEQ_LEN_Q");
+                if (sequence_reference == operation->inputs.end()) {
+                    return fail(
+                        ErrorCode::kInvalidValue,
+                        "nodes[" + std::to_string(node_index) +
+                            "].inputs.SEQ_LEN_Q",
+                        "ragged attention output requires query-length "
+                        "metadata");
+                }
+                std::int64_t sequence_uid = 0;
+                status = reference_uid(
+                    sequence_reference->second,
+                    "nodes[" + std::to_string(node_index) +
+                        "].inputs.SEQ_LEN_Q",
+                    sequence_uid);
+                if (status.is_bad()) return status;
+                auto const [sequence_it, inserted] =
+                    ragged_sequence_uids.emplace(uid, sequence_uid);
+                if (!inserted && sequence_it->second != sequence_uid) {
+                    return unsupported(
+                        tensor.name,
+                        "one ragged tensor cannot use different sequence "
+                        "metadata across operations");
+                }
+                auto& offset_info = usage[*tensor.ragged_offset_uid];
+                offset_info.read = true;
+                offset_info.last_consumer = std::max(
+                    offset_info.last_consumer,
+                    static_cast<std::uint64_t>(node_index));
+            }
         }
     }
 
@@ -1174,9 +1341,18 @@ Status analyze_graph(SerializedGraph const& graph,
                               ? TensorAccess::kReadWrite
                               : (info.write ? TensorAccess::kWrite
                                             : TensorAccess::kRead);
-        if (!import::tensor_storage_bytes(
-                argument.data_type, argument.dimensions, argument.strides,
-                argument.size_bytes)) {
+        if (tensor.ragged_offset_uid) {
+            auto const sequence = ragged_sequence_uids.find(uid);
+            if (sequence == ragged_sequence_uids.end()) {
+                return fail(ErrorCode::kInvalidValue, tensor.name,
+                            "ragged sequence metadata is absent");
+            }
+            argument.storage_policy =
+                TensorStoragePolicy::kRaggedBatchPrefix;
+            argument.ragged_offset_uid = *tensor.ragged_offset_uid;
+            argument.ragged_sequence_uid = sequence->second;
+        }
+        if (!execution_storage_bytes(tensor, argument.size_bytes)) {
             return fail(ErrorCode::kDimensionOverflow, tensor.name,
                         "external tensor byte range overflows uint64");
         }
@@ -1198,8 +1374,7 @@ Status analyze_graph(SerializedGraph const& graph,
                         "virtual tensor has no producer");
         }
         std::uint64_t size_bytes = 0;
-        if (!import::tensor_storage_bytes(tensor.data_type, tensor.dim,
-                                          tensor.stride, size_bytes)) {
+        if (!execution_storage_bytes(tensor, size_bytes)) {
             return fail(ErrorCode::kDimensionOverflow, tensor.name,
                         "virtual tensor byte range overflows uint64");
         }

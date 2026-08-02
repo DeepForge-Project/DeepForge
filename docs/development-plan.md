@@ -413,9 +413,13 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     runtime shape override；dynamic memref descriptor、Frontend-shaped
     execute/workspace overload、artifact v3 持久化、artifact reload 执行及错误
     metadata/上界测试均已覆盖。
+11. 已完成：C6.3 为静态 f32 SDPA forward 实现 ragged/paged storage。Q/K/V/O 可
+    独立 ragged，K/V 可独立 paged；runtime prefix/content 校验、紧凑 alias span、
+    独立 page table、非法 page 安全寻址、artifact v4 持久化/reload 和错误 metadata
+    均通过 Release、ASan、UBSan 测试。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为、ragged/paged metadata、上述 scale
-子集以外的 reorder format、优化和发布验收。
+剩余 C6 功能工作包括更广泛的 dynamic 行为、backward/packed ragged/paged
+metadata、上述 scale 子集以外的 reorder format、优化和发布验收。
 Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
 隔离负载的可重复测量，再逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

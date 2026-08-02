@@ -222,8 +222,10 @@ a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
 the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
 documented block/MXFP8 ports and runtime override for one exact-shape external
-f32 `POINTWISE` node. Broader dynamic behavior, ragged and other physical
-reorder metadata, paged/cache composites, threading, and broad fusion remain.
+f32 `POINTWISE` node. It also supports static f32 SDPA forward with independent
+ragged Q/K/V/O and paged K/V storage. Broader dynamic behavior,
+backward/packed ragged and paged metadata, other physical reorder metadata,
+threading, and broad fusion remain.
 
 Deferral does not discard a direction. Each capability may be introduced
 independently after its semantics, upstream support, correctness tests, and

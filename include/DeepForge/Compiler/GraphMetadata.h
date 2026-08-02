@@ -25,6 +25,11 @@ enum class ShapeOverridePolicy : std::uint8_t {
     kPointwiseExact,
 };
 
+enum class TensorStoragePolicy : std::uint8_t {
+    kStrided = 0,
+    kRaggedBatchPrefix,
+};
+
 struct TensorArgumentMetadata {
     std::int64_t uid = 0;
     std::string name;
@@ -34,6 +39,9 @@ struct TensorArgumentMetadata {
     std::uint64_t size_bytes = 0;
     std::uint64_t alignment = 1;
     TensorAccess access = TensorAccess::kRead;
+    TensorStoragePolicy storage_policy = TensorStoragePolicy::kStrided;
+    std::int64_t ragged_offset_uid = 0;
+    std::int64_t ragged_sequence_uid = 0;
 
     bool operator==(TensorArgumentMetadata const&) const = default;
 };

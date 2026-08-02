@@ -227,8 +227,12 @@ Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride，K/V head �
 bottom-right causal 路径不与 bias、ALiBi 或 dropout 组合。ALiBi 要求
 `right_bound == 0`。Probability dropout 接收 scalar INT64 seed/offset，并可输出
 `RNG_DUMP`；custom dropout 接收 mask 和显式 scale，backward 还接收 scale inverse。
-Paged/cache attention、block mask、sink token、packed/ragged metadata 以及上述
-C5 特殊可选能力延后。
+静态 f32 forward 还接受独立 external ragged Q/K/V/O storage（INT32/INT64
+`[B+1,1,1,1]` element prefix）和独立 paged K/V container
+`[num_blocks,H,block_size,D]`（external INT32 `[B,1,page_slots,1]` table）。两种
+形式都要求 padding 和两个 sequence length，page ID 必须是合法 container block
+index；ragged Q/O 可与 paged K/V 组合。Backward ragged/paged、packed table/row
+output、block mask、sink token 和上述 C5 特殊可选能力仍延后。
 
 相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
 bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
@@ -240,8 +244,9 @@ Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index �
 tensor。编译 dimension 是上界；runtime dimension 必须为正且不超过该上界，
 runtime stride 必须满足当前支持的正且不重叠条件，每个 storage span 必须位于编译
 bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 descriptor 语义。
-显式 alias、其他动态 operation、ragged tensor 和文档所列 `F8_128x4` scale 子集
-以外的物理 reorder 处理延后。
+显式 alias、其他动态 operation、SDPA forward 子集外的 ragged tensor 和文档所列
+`F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v4
+记录 ragged storage reference；v1-v3 继续按普通 strided storage 读取。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
 以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。

@@ -17,7 +17,7 @@ DeepForge `0.1.0` currently supports:
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
 | Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; one exact-shape f32 `POINTWISE` subset supports runtime override |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; shapes are otherwise static; documented C4 metadata may be INT32/INT64; virtual intermediates are supported |
-| Generic layout | Positive, non-overlapping arbitrary strides; no ragged metadata; `F8_128x4` is enabled only for the scale ports below |
+| Generic layout | Positive, non-overlapping arbitrary strides; documented SDPA forward tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
 | Convolution | Rank 3-5 FPROP/DGRAD/WGRAD, grouped channels, positive stride/dilation, non-negative asymmetric padding, both math modes |
 | CPU code | Scalar, AVX2+FMA, and AVX-512F+FMA with runtime dispatch |
@@ -54,7 +54,7 @@ C4 sequence and attention support is:
 |---|---|
 | `RNG` | Bernoulli f32 output; fixed seed or scalar INT64 `Seed`/`Offset`; deterministic DeepForge CPU stream |
 | `ROPE`, `ROPE_BWD` | f32 BHSD split-half rotation of the full or final even-width subspace; `[S,1,1,R]` frequencies and output scaling |
-| `SDPA`, `SDPA_BWD` | f32 BHSD, GQA, scalar scale, broadcast bias, ALiBi causal mask, INT32 sequence lengths, top-left/bottom-right windows, custom/probability dropout, forward row outputs, and backward Q/K/V/bias gradients |
+| `SDPA`, `SDPA_BWD` | f32 BHSD, GQA, scalar scale, broadcast bias, ALiBi causal mask, INT32 sequence lengths, top-left/bottom-right windows, custom/probability dropout, forward row outputs, and backward Q/K/V/bias gradients; forward also supports the ragged/paged subset below |
 
 C5 specialized operation support is:
 
@@ -66,10 +66,14 @@ C5 specialized operation support is:
 | `SDPA_FP8_FWD`, `SDPA_FP8_BWD` | Static FP8 E4M3/E5M2 BHSD with GQA, scalar FLOAT scales/descales, top-left or bottom-right windows, Stats and amax outputs; no padding, dropout, or ALiBi |
 | `SDPA_MXFP8_FWD`, `SDPA_MXFP8_BWD` | Static BHSD/GQA, 32-element E8M0 block descales, f16/bf16/f32 output or gradients, transpose-oriented backward inputs, Stats and amax outputs; descale tensors accept `NONE` or Frontend `F8_128x4`, and backward dS uses the documented f32 CPU reference approximation |
 
-Paged/cache attention, block masks, sink tokens, and packed/ragged attention
-are deferred. C5 FP8 attention also defers padding, dropout, ALiBi, and optional
-ports. C6 implements producer-emitted `F8_128x4` scale reordering for the
-documented block-scale and MXFP8 ports and the pointwise override subset below.
+Static f32 SDPA forward supports external ragged Q/K/V/O tensors and
+independently paged K/V caches. Both require `padding_mask=true`, INT32
+`SEQ_LEN_Q`/`SEQ_LEN_KV`, and the exact descriptors documented in the runtime
+section. Ragged/paged backward, packed page tables, ragged row outputs, block
+masks, and sink tokens remain deferred. C5 FP8 attention also defers padding,
+dropout, ALiBi, and optional ports. C6 implements producer-emitted `F8_128x4`
+scale reordering for the documented block-scale and MXFP8 ports and the
+pointwise override subset below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -394,13 +398,36 @@ query validates the same rules and is statically bounded for this subset.
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static.
 
+For ragged SDPA forward, Q, K, V, and O may independently be external plain f32
+rank-4 logical tensors. Each ragged tensor names a separate external INT32 or
+INT64 offset tensor with dimensions `[B+1,1,1,1]`. Offsets are element indices,
+must start at zero, be nondecreasing, and stay within the compiled maximum
+storage span. At execution, each segment must hold the corresponding runtime
+sequence length under the tensor's inner strides. The final prefix endpoint is
+the actual data-buffer span used by alias checks, so a compact allocation is
+valid. Runtime shape overrides cannot be combined with ragged storage.
+
+Paged SDPA forward accepts K and V independently. A paged container has
+dimensions `[num_blocks,H,block_size,D]`; its external plain INT32 page table
+has dimensions `[B,1,page_slots,1]`. `max_seq_len_kv` supplies the logical K/V
+extent when present; otherwise Frontend order infers it from an unpaged peer,
+Bias, `RNG_DUMP`, or finally the available page capacity. Every page ID must be
+in `[0,num_blocks)`. Generated
+code guards an invalid ID from becoming a memory address, but such a table
+violates the caller contract. Ragged Q/O can be combined with paged K/V, while
+one K or V tensor cannot itself be both paged and ragged. Runtime sequence
+values are caller preconditions: `SEQ_LEN_Q` is in `[0,Sq]` and `SEQ_LEN_KV` is
+in `[0,logical_Skv]`; ragged arguments additionally enforce their corresponding
+bound before dispatch.
+
 Runtime contract:
 
 - The variant pack must provide host pointers for every non-virtual argument
   UID in the metadata. Extra UIDs are ignored.
 - Each argument must meet its recorded alignment and have capacity for its
-  compiled span, or at least the supplied runtime span for an override call.
-  The API carries no buffer lengths, so the runtime cannot prove actual sizes.
+  compiled span, except that a validated ragged prefix defines that call's
+  compact span; an override call needs at least its supplied runtime span. The
+  API carries no buffer lengths, so the runtime cannot prove actual sizes.
 - Writable argument and workspace address ranges must not overlap.
 - Allocate the size returned by `get_workspace_size()` with 64-byte alignment
   when it is non-zero.

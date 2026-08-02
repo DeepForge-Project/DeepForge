@@ -18,10 +18,13 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -38,6 +41,7 @@ namespace {
 using import::ErrorCode;
 using import::GenericOperationDesc;
 using import::OperationTag;
+using import::PassByValueKind;
 using import::SerializedGraph;
 using import::SerializedValue;
 using import::Status;
@@ -394,10 +398,6 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
     if (!tensor.uid_assigned) {
         return unsupported(path, "CPU execution requires an assigned UID");
     }
-    if (tensor.pass_by_value) {
-        return fail(ErrorCode::kUnsupportedExecutionMetadata, path,
-                    "embedded pass-by-value constants are not executable");
-    }
     if (!numeric::is_supported_reordering(tensor)) {
         return unsupported(path,
                            "tensor reordering has no CPU physical-layout "
@@ -428,11 +428,53 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
                 "runtime pass-by-value scalar type is outside the cuDNN "
                 "Frontend scalar set");
         }
+        if (tensor.pass_by_value) {
+            auto const kind_matches = [&]() {
+                switch (tensor.data_type) {
+                    case import::DataType::kInt64:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kInt64 &&
+                               std::holds_alternative<std::int64_t>(
+                                   tensor.pass_by_value->value);
+                    case import::DataType::kInt32:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kInt32 &&
+                               std::holds_alternative<std::int32_t>(
+                                   tensor.pass_by_value->value);
+                    case import::DataType::kFloat32:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kFloat32 &&
+                               std::holds_alternative<std::uint32_t>(
+                                   tensor.pass_by_value->value);
+                    case import::DataType::kFloat16:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kFloat16 &&
+                               std::holds_alternative<std::uint64_t>(
+                                   tensor.pass_by_value->value);
+                    case import::DataType::kFloat64:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kFloat64 &&
+                               std::holds_alternative<std::uint64_t>(
+                                   tensor.pass_by_value->value);
+                    case import::DataType::kBFloat16:
+                        return tensor.pass_by_value->kind ==
+                                   PassByValueKind::kBFloat16 &&
+                               std::holds_alternative<std::uint64_t>(
+                                   tensor.pass_by_value->value);
+                    default:
+                        return false;
+                }
+            }();
+            if (!kind_matches) {
+                return fail(ErrorCode::kInvalidValue, path,
+                            "embedded scalar kind does not match tensor data type");
+            }
+        }
         if (tensor.is_virtual || tensor.ragged_offset_uid ||
             tensor.ragged_offset_name || tensor.reordering_type != "NONE") {
             return unsupported(
                 path,
-                "runtime pass-by-value requires an external plain tensor");
+                "pass-by-value requires an external plain tensor");
         }
         if (!std::all_of(tensor.dim.begin(), tensor.dim.end(),
                          [](std::int64_t dimension) {
@@ -440,8 +482,11 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
                          })) {
             return unsupported(
                 path,
-                "runtime pass-by-value requires every dimension to equal one");
+                "pass-by-value requires every dimension to equal one");
         }
+    } else if (tensor.pass_by_value) {
+        return fail(ErrorCode::kInvalidValue, path,
+                    "embedded scalar requires is_pass_by_value=true");
     }
     if (tensor.ragged_offset_uid && tensor.dim.front() <= 0) {
         return fail(ErrorCode::kInvalidShape, path,
@@ -1254,7 +1299,7 @@ Status analyze_graph(SerializedGraph const& graph,
                 return unsupported(
                     "nodes[" + std::to_string(node_index) + "].outputs." +
                         port,
-                    "runtime pass-by-value tensors are input-only");
+                    "pass-by-value tensors are input-only");
             }
             if (tensor->ragged_offset_uid &&
                 !ragged_port_supported(node.tag, false, port)) {
@@ -1434,7 +1479,7 @@ Status analyze_graph(SerializedGraph const& graph,
                         "used tensor is absent");
         }
         auto const& tensor = tensor_it->second;
-        if (tensor.is_virtual) {
+        if (tensor.is_virtual || tensor.pass_by_value) {
             continue;
         }
         TensorArgumentMetadata argument;
@@ -1532,6 +1577,100 @@ Status analyze_graph(SerializedGraph const& graph,
     return ::mlir::MemRefType::get(dimensions,
                                    element_type(context, tensor.data_type),
                                    layout);
+}
+
+std::string pass_by_value_name(std::int64_t uid) {
+    return "__deepforge_pbv_" +
+           std::to_string(std::bit_cast<std::uint64_t>(uid));
+}
+
+Status pass_by_value_initializer(
+    ::mlir::OpBuilder& builder,
+    TensorDesc const& tensor,
+    ::mlir::RankedTensorType initializer_type,
+    ::mlir::DenseElementsAttr& output) {
+    if (!tensor.pass_by_value) {
+        return fail(ErrorCode::kInvalidValue, tensor.name,
+                    "embedded scalar payload is absent");
+    }
+
+    ::mlir::Attribute scalar;
+    switch (tensor.pass_by_value->kind) {
+        case PassByValueKind::kInt64:
+            scalar = builder.getIntegerAttr(
+                initializer_type.getElementType(),
+                std::get<std::int64_t>(tensor.pass_by_value->value));
+            break;
+        case PassByValueKind::kInt32:
+            scalar = builder.getIntegerAttr(
+                initializer_type.getElementType(),
+                std::get<std::int32_t>(tensor.pass_by_value->value));
+            break;
+        case PassByValueKind::kFloat32: {
+            auto bits = llvm::APInt(
+                32, std::get<std::uint32_t>(tensor.pass_by_value->value));
+            auto value = llvm::APFloat(llvm::APFloat::IEEEsingle(), bits);
+            scalar = builder.getFloatAttr(initializer_type.getElementType(),
+                                          value);
+            break;
+        }
+        case PassByValueKind::kFloat16:
+        case PassByValueKind::kBFloat16:
+            scalar = builder.getFloatAttr(
+                initializer_type.getElementType(),
+                std::bit_cast<double>(
+                    std::get<std::uint64_t>(tensor.pass_by_value->value)));
+            break;
+        case PassByValueKind::kFloat64: {
+            auto bits = llvm::APInt(
+                64, std::get<std::uint64_t>(tensor.pass_by_value->value));
+            auto value = llvm::APFloat(llvm::APFloat::IEEEdouble(), bits);
+            scalar = builder.getFloatAttr(initializer_type.getElementType(),
+                                          value);
+            break;
+        }
+    }
+    llvm::SmallVector<::mlir::Attribute, 1> values{scalar};
+    output = ::mlir::DenseElementsAttr::get(initializer_type, values);
+    return Status::ok();
+}
+
+Status bind_pass_by_value_constants(
+    ::mlir::OpBuilder& builder,
+    ::mlir::Location location,
+    ::mlir::ModuleOp module,
+    SerializedGraph const& graph,
+    std::map<std::int64_t, ::mlir::Value>& values) {
+    for (auto const& [uid, tensor] : graph.tensors) {
+        if (!tensor.pass_by_value) {
+            continue;
+        }
+        auto const storage_type = ::mlir::MemRefType::get(
+            {1}, element_type(*builder.getContext(), tensor.data_type));
+        auto const initializer_type = ::mlir::RankedTensorType::get(
+            {1}, storage_type.getElementType());
+        ::mlir::DenseElementsAttr initializer;
+        auto status = pass_by_value_initializer(builder, tensor,
+                                                initializer_type, initializer);
+        if (status.is_bad()) {
+            return status;
+        }
+        auto const name = pass_by_value_name(uid);
+        {
+            ::mlir::OpBuilder::InsertionGuard guard(builder);
+            builder.setInsertionPointToStart(module.getBody());
+            ::mlir::memref::GlobalOp::create(
+                builder, location, name, builder.getStringAttr("private"),
+                storage_type, initializer, true, ::mlir::IntegerAttr());
+        }
+        auto storage = ::mlir::memref::GetGlobalOp::create(
+            builder, location, storage_type, name);
+        auto view = ::mlir::memref::ReinterpretCastOp::create(
+            builder, location, tensor_type(*builder.getContext(), tensor),
+            storage, 0, tensor.dim, tensor.stride);
+        values.emplace(uid, view);
+    }
+    return Status::ok();
 }
 
 ::mlir::Value index_constant(::mlir::OpBuilder& builder,
@@ -2746,6 +2885,11 @@ Status build_module(::mlir::MLIRContext& context,
     for (std::size_t index = 0; index < metadata.arguments.size(); ++index) {
         values.emplace(metadata.arguments[index].uid, entry->getArgument(index));
     }
+    auto status = bind_pass_by_value_constants(builder, location, module,
+                                               graph, values);
+    if (status.is_bad()) {
+        return status;
+    }
     auto workspace_value = entry->getArgument(metadata.arguments.size());
     for (auto const& [uid, tensor] : graph.tensors) {
         if (!tensor.is_virtual) {
@@ -2787,8 +2931,8 @@ Status build_module(::mlir::MLIRContext& context,
             return fail(ErrorCode::kInvalidValue, "mlir",
                         "validated node has no normalized operation");
         }
-        auto status = emit_operation(node.tag, builder, location, *operation,
-                                     graph, values);
+        status = emit_operation(node.tag, builder, location, *operation,
+                                graph, values);
         if (status.is_bad()) {
             return status;
         }

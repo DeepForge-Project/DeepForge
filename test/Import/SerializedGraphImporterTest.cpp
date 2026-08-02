@@ -506,16 +506,78 @@ int main(int argc, char** argv) {
         expect_invalid("wrong output shape", ErrorCode::kInvalidShape, [](Json& value) {
             value["tensors"]["3"]["dim"][2] = 4;
         });
-        expect_invalid("non-empty pass-by-values",
-                       ErrorCode::kUnsupportedExecutionMetadata,
+        expect_invalid("orphan pass-by-value root entry",
+                       ErrorCode::kMissingUid,
                        [](Json& value) {
-                           value["pass_by_values"]["4"] = 1.0;
+                           value["pass_by_values"]["4"] =
+                               Json{{"index", 3}, {"value", "3F800000"}};
                        });
-        expect_invalid("generic non-empty pass-by-values",
-                       ErrorCode::kUnsupportedExecutionMetadata,
+        expect_invalid("generic orphan pass-by-value root entry",
+                       ErrorCode::kMissingUid,
                        [&](Json& value) {
                            value = graph_for_schema(value, *pointwise_schema);
-                           value["pass_by_values"]["4"] = 1.0;
+                           value["pass_by_values"]["4"] =
+                               Json{{"index", 3}, {"value", "3F800000"}};
+                       });
+        expect_invalid("root scalar without tensor payload",
+                       ErrorCode::kInvalidValue,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["pass_by_values"]["1"] =
+                               Json{{"index", 3}, {"value", "3F800000"}};
+                       });
+        expect_invalid("tensor scalar without root map",
+                       ErrorCode::kMissingField,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] =
+                               Json{{"index", 3}, {"value", "40200000"}};
+                           value.erase("pass_by_values");
+                       });
+        expect_invalid("root and tensor scalar mismatch",
+                       ErrorCode::kInvalidValue,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] =
+                               Json{{"index", 3}, {"value", "40200000"}};
+                           value["pass_by_values"]["1"] =
+                               Json{{"index", 3}, {"value", "40400000"}};
+                       });
+        expect_invalid("scalar variant index mismatch",
+                       ErrorCode::kInvalidValue,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] =
+                               Json{{"index", 4}, {"value", 2.5}};
+                       });
+        expect_invalid("raw scalar payload",
+                       ErrorCode::kInvalidFieldType,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] = 2.5;
+                       });
+        expect_invalid("malformed FLOAT scalar bits",
+                       ErrorCode::kInvalidValue,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] =
+                               Json{{"index", 3}, {"value", "4020000"}};
+                       });
+        expect_invalid("INT32 scalar out of range",
+                       ErrorCode::kInvalidValue,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["tensors"]["1"]["data_type"] = "INT32";
+                           value["tensors"]["1"]["is_pass_by_value"] = true;
+                           value["tensors"]["1"]["pass_by_value"] =
+                               Json{{"index", 1},
+                                    {"value", static_cast<std::int64_t>(
+                                                  std::numeric_limits<std::int32_t>::max()) + 1}};
                        });
         expect_invalid("generic non-empty workspace modifications",
                        ErrorCode::kUnsupportedExecutionMetadata,
@@ -576,12 +638,57 @@ int main(int argc, char** argv) {
 
         Json scalar_graph = graph_for_schema(fixture, *pointwise_schema);
         scalar_graph["tensors"]["1"]["is_pass_by_value"] = true;
-        scalar_graph["tensors"]["1"]["pass_by_value"] = 2.5;
+        auto const scalar_payload =
+            Json{{"index", 3}, {"value", "40200000"}};
+        scalar_graph["tensors"]["1"]["pass_by_value"] = scalar_payload;
+        scalar_graph["pass_by_values"]["1"] = scalar_payload;
         SerializedGraph scalar_model;
         status = parse_json(importer, scalar_graph, scalar_model);
         tests.expect_good(status, "pass-by-value payload is recognized");
-        tests.check(scalar_model.tensors.at(1).pass_by_value.has_value(),
+        tests.check(
+            scalar_model.tensors.at(1).pass_by_value.has_value() &&
+                scalar_model.tensors.at(1).pass_by_value->kind ==
+                    deepforge::import::PassByValueKind::kFloat32 &&
+                std::get<std::uint32_t>(
+                    scalar_model.tensors.at(1).pass_by_value->value) ==
+                    0x40200000U,
                     "pass-by-value payload is preserved canonically");
+        auto scalar_ubjson = Json::to_ubjson(scalar_graph);
+        SerializedGraph scalar_ubjson_model;
+        status = importer.parse(
+            std::span<std::uint8_t const>(scalar_ubjson), InputFormat::kUbjson,
+            scalar_ubjson_model);
+        tests.expect_good(status, "pass-by-value UBJSON is recognized");
+        tests.check(scalar_ubjson_model == scalar_model,
+                    "pass-by-value JSON and UBJSON canonical forms match");
+
+        struct ScalarCase {
+            char const* data_type;
+            std::int64_t index;
+            Json value;
+        };
+        std::vector<ScalarCase> scalar_cases{
+            {"INT64", 0, std::int64_t{7}},
+            {"INT32", 1, std::int32_t{7}},
+            {"HALF", 2, 2.5},
+            {"FLOAT", 3, "40200000"},
+            {"DOUBLE", 4, 2.5},
+            {"BFLOAT16", 5, 2.5},
+        };
+        for (auto const& scalar_case : scalar_cases) {
+            auto document = graph_for_schema(fixture, *pointwise_schema);
+            auto payload = Json{{"index", scalar_case.index},
+                                {"value", scalar_case.value}};
+            document["tensors"]["1"]["data_type"] = scalar_case.data_type;
+            document["tensors"]["1"]["is_pass_by_value"] = true;
+            document["tensors"]["1"]["pass_by_value"] = payload;
+            document["pass_by_values"]["1"] = std::move(payload);
+            SerializedGraph model;
+            status = parse_json(importer, document, model);
+            tests.expect_good(status,
+                              std::string("Frontend scalar variant ") +
+                                  scalar_case.data_type);
+        }
 
         auto const* batchnorm_schema =
             deepforge::import::find_operation_schema(

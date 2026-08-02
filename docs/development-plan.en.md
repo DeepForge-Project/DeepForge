@@ -138,9 +138,9 @@ model and validate every MVP boundary once.
 - validate `json_version == "1.0"`,
   `cudnn_frontend_version == 12400`, required fields, and integer ranges;
 - accept and ignore embedded `cudnn_backend_data` and `behavior_notes`, validate
-  `variant_pack_uids`, and reject nonempty `pass_by_values`,
-  `workspace_modifications`, `variant_pack_replacements`, or nonzero
-  `fe_workspace_size`;
+  `variant_pack_uids`, validate `pass_by_values` against typed tensor payloads,
+  and reject nonempty `workspace_modifications`, `variant_pack_replacements`,
+  or nonzero `fe_workspace_size`;
 - parse context, tensors, nodes, UIDs, dimensions, strides, data types,
   `is_virtual`, node port references, and Conv attributes;
 - assign stable `DFE_UNSUPPORTED_*` diagnostics to unknown nodes and never skip
@@ -480,13 +480,20 @@ P0-P6 and post-MVP C0-C5 completed in this order:
 15. Completed C6.7 Frontend runtime scalar pass-by-value inputs. External
     input-only all-one tensors use the ordinary UID-map pointer and artifact
     argument metadata; pointwise broadcast, normalization epsilon, FP8 MATMUL
-    controls, generic root-metadata rejection, malformed descriptors, Release,
+    controls, malformed root metadata and descriptors, Release,
     ASan, and UBSan cover the increment without an ABI or artifact-version
-    change. Embedded/fused scalar constants remain a separate deferred form.
+    change.
+16. Completed C6.8 Frontend embedded/fused pass-by-value scalar constants. The
+    importer recognizes all six exact `{index,value}` variants and requires a
+    one-to-one bit-preserving match between tensor payloads and root
+    `pass_by_values`. The compiler emits private read-only globals, excludes
+    graph-owned UIDs from public metadata, and persists values in the existing
+    target objects without artifact v6. Pointwise non-overrideability, artifact
+    reload, normalization epsilon, INT64 RNG seed/offset, FP8 MATMUL controls,
+    malformed metadata, Release, ASan, and UBSan cover the increment.
 
 The remaining C6 functional work is broader dynamic behavior and reorder
-formats outside that scale subset, plus embedded/fused constant ownership and
-persistence. Paged backward is not representable by the
+formats outside that scale subset. Paged backward is not representable by the
 pinned v1.24.0 serializer and is tracked only as future schema-version
 compatibility work. Further benchmark-driven
 optimization remains owned by the Loop/Schedule layer: evaluate outer tiling,

@@ -280,12 +280,17 @@ reload, malformed descriptors, Release, ASan, and UBSan coverage.
 The seventh implements Frontend runtime scalar pass-by-value inputs as external,
 input-only, all-one tensors backed by ordinary UID-map pointers. Pointwise
 broadcasting, normalization epsilon, FP8 MATMUL controls, artifact reload,
-generic root-metadata rejection, malformed descriptors, Release, ASan, and
-UBSan cover the increment. Embedded/fused scalar constants remain deferred.
+malformed root metadata and descriptors, Release, ASan, and UBSan cover the
+increment.
+The eighth implements embedded/fused pass-by-value scalars with exact typed
+Frontend variants, one-to-one root/tensor validation, graph-owned private
+globals, public-argument exclusion, and persistence in existing artifact
+objects. Pointwise non-overrideability and reload, normalization epsilon,
+INT64 RNG controls, FP8 MATMUL controls, malformed metadata, Release, ASan, and
+UBSan form its acceptance set.
 
 **Work:** expand dynamic behavior beyond the delivered pointwise and MATMUL
-subsets; add reorder formats outside the delivered scale subset; define
-embedded constant ownership and artifact persistence; then evaluate
+subsets; add reorder formats outside the delivered scale subset; then evaluate
 fusion, threading, additional vector schedules, and family-specific cost models
 independently. The pinned v1.24.0 serializer exposes no paged-backward
 page-table ports, so that capability is compatibility work for a future schema

@@ -327,6 +327,21 @@ Json matmul_fp8_pass_by_value_graph() {
     return graph;
 }
 
+Json matmul_fp8_embedded_graph() {
+    auto graph = matmul_fp8_pass_by_value_graph();
+    graph["graph_uid"] = 5019;
+    graph["context"]["name"] = "matmul-fp8-embedded";
+    auto const descale_a = Json{{"index", 3}, {"value", "3F000000"}};
+    auto const descale_b = Json{{"index", 3}, {"value", "40000000"}};
+    auto const scale_c = Json{{"index", 3}, {"value", "3F800000"}};
+    graph["tensors"]["23"]["pass_by_value"] = descale_a;
+    graph["tensors"]["24"]["pass_by_value"] = descale_b;
+    graph["tensors"]["25"]["pass_by_value"] = scale_c;
+    graph["pass_by_values"] = Json::object(
+        {{"23", descale_a}, {"24", descale_b}, {"25", scale_c}});
+    return graph;
+}
+
 Json matmul_fp8_override_graph() {
     auto graph = matmul_fp8_graph();
     graph["graph_uid"] = 5018;
@@ -827,6 +842,31 @@ void run_matmul_test(TestRunner& tests) {
     tests.check(close_vectors(c, {5.0F, 1.0F, 11.0F, 1.0F}) &&
                     close_vectors(amax, {11.0F}),
                 "FP8 matmul descales inputs and reports pre-output-scale amax");
+
+    deepforge::compiler::CompilationResult embedded;
+    status = compile_document(matmul_fp8_embedded_graph(), embedded);
+    tests.good(status, "compile FP8 matmul with embedded PBV scalars");
+    tests.check(
+        std::none_of(embedded.metadata.arguments.begin(),
+                     embedded.metadata.arguments.end(), [](auto const& argument) {
+                         return argument.uid >= 23 && argument.uid <= 25;
+                     }),
+        "embedded FP8 scales are absent from public arguments");
+    if (status.is_good() && embedded.executable) {
+        std::fill(c.begin(), c.end(), -99.0F);
+        std::fill(amax.begin(), amax.end(), -99.0F);
+        deepforge::runtime::VariantPack embedded_pack{{21, a.data()},
+                                                       {22, b.data()},
+                                                       {26, c.data()},
+                                                       {27, amax.data()}};
+        status = embedded.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, embedded_pack,
+            nullptr);
+        tests.good(status, "execute FP8 matmul without embedded scalar UIDs");
+        tests.check(close_vectors(c, {5.0F, 1.0F, 11.0F, 1.0F}) &&
+                        close_vectors(amax, {11.0F}),
+                    "embedded FP8 scales match runtime scalar semantics");
+    }
 
     deepforge::compiler::CompilationResult override_compilation;
     status = compile_document(matmul_fp8_override_graph(),

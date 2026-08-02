@@ -255,13 +255,15 @@ padding、FP8 零 padding、artifact reload、错误 descriptor、Release、ASan
 覆盖。
 第七个将 Frontend runtime scalar pass-by-value input 实现为 external、仅作为 input、
 全 1 dimension 且由普通 UID-map pointer 提供的 tensor。Pointwise broadcast、
-normalization epsilon、FP8 MATMUL control、artifact reload、通用根级 metadata 拒绝、
-错误 descriptor、Release、ASan 和 UBSan 覆盖该增量；内嵌/fused scalar constant
-继续延后。
+normalization epsilon、FP8 MATMUL control、artifact reload、错误根级 metadata/
+descriptor、Release、ASan 和 UBSan 覆盖该增量。
+第八个实现内嵌/fused pass-by-value scalar，包括精确 typed Frontend variant、根级与
+tensor 一一对应校验、graph-owned private global、公开 argument 排除和现有 artifact
+object 持久化。Pointwise 不可覆盖性/reload、normalization epsilon、INT64 RNG
+control、FP8 MATMUL control、错误 metadata、Release、ASan 和 UBSan 构成验收集。
 
 **工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；加入已交付
-scale 子集外的 reorder format；定义内嵌 constant ownership 和 artifact 持久化；
-随后独立评估 fusion、threading、其他 vector
+scale 子集外的 reorder format；随后独立评估 fusion、threading、其他 vector
 schedule 和各操作族 cost model。固定使用的 v1.24.0 serializer 没有 paged backward
 page-table 端口，因此该能力属于未来 schema 版本的兼容工作，不是当前契约下的实现
 任务。

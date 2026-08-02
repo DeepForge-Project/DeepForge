@@ -235,6 +235,19 @@ Json rng_graph(bool fixed_seed = false) {
                           std::move(tensors));
 }
 
+Json embedded_rng_graph() {
+    auto graph = rng_graph();
+    graph["graph_uid"] = 4011;
+    graph["context"]["name"] = "embedded-rng";
+    auto const seed = Json{{"index", 0}, {"value", -31}};
+    auto const offset = Json{{"index", 0}, {"value", 19}};
+    graph["tensors"]["1"]["pass_by_value"] = seed;
+    graph["tensors"]["2"]["pass_by_value"] = offset;
+    graph["pass_by_values"] =
+        Json::object({{"1", seed}, {"2", offset}});
+    return graph;
+}
+
 Json rope_graph() {
     Json tensors = Json::object();
     tensors["11"] = tensor("X", 11, {1, 2, 3, 6});
@@ -1147,6 +1160,26 @@ void run_rng_tests(TestRunner& tests) {
     tests.check(changed == changed_expected,
                 "changed RNG offset matches the stable CPU contract");
     tests.check(changed != scalar, "RNG offset changes the generated stream");
+
+    deepforge::compiler::CompilationResult embedded;
+    status = compile_document(embedded_rng_graph(), embedded);
+    tests.good(status, "compile RNG with embedded PBV seed and offset");
+    tests.check(
+        std::none_of(embedded.metadata.arguments.begin(),
+                     embedded.metadata.arguments.end(), [](auto const& argument) {
+                         return argument.uid == 1 || argument.uid == 2;
+                     }),
+        "embedded RNG scalars are absent from public arguments");
+    if (status.is_good() && embedded.executable) {
+        std::vector<float> output(6, -1.0F);
+        deepforge::runtime::VariantPack embedded_pack{{3, output.data()}};
+        status = embedded.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, embedded_pack,
+            nullptr);
+        tests.good(status, "execute RNG without embedded scalar UIDs");
+        tests.check(output == expected,
+                    "embedded INT64 RNG scalars preserve stream semantics");
+    }
 
     deepforge::compiler::CompilationResult fixed;
     status = compile_document(rng_graph(true), fixed);

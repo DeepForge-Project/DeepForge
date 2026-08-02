@@ -210,6 +210,44 @@ Json runtime_scalar_pointwise_graph() {
                           Json::array({node}), std::move(tensors));
 }
 
+Json embedded_scalar_pointwise_graph() {
+    auto graph = runtime_scalar_pointwise_graph();
+    graph["graph_uid"] = 2107;
+    graph["context"]["name"] = "embedded-scalar-pointwise";
+    auto const payload = Json{{"index", 3}, {"value", "40200000"}};
+    graph["tensors"]["602"]["pass_by_value"] = payload;
+    graph["pass_by_values"] = Json::object({{"602", payload}});
+    return graph;
+}
+
+Json all_embedded_scalar_types_graph() {
+    auto graph = embedded_scalar_pointwise_graph();
+    graph["graph_uid"] = 2108;
+    graph["context"]["name"] = "all-embedded-scalar-types";
+    struct ScalarCase {
+        char const* uid;
+        char const* data_type;
+        Json payload;
+    };
+    std::array<ScalarCase, 5> const scalars{{
+        {"604", "INT64", Json{{"index", 0}, {"value", -7}}},
+        {"605", "INT32", Json{{"index", 1}, {"value", 7}}},
+        {"606", "HALF", Json{{"index", 2}, {"value", 1.5}}},
+        {"607", "DOUBLE", Json{{"index", 4}, {"value", 1.25}}},
+        {"608", "BFLOAT16", Json{{"index", 5}, {"value", -2.0}}},
+    }};
+    for (auto const& scalar : scalars) {
+        auto const uid = std::stoll(scalar.uid);
+        graph["tensors"][scalar.uid] =
+            tensor("UNUSED_" + std::string(scalar.data_type), uid, {1}, {1},
+                   false, scalar.data_type);
+        graph["tensors"][scalar.uid]["is_pass_by_value"] = true;
+        graph["tensors"][scalar.uid]["pass_by_value"] = scalar.payload;
+        graph["pass_by_values"][scalar.uid] = scalar.payload;
+    }
+    return graph;
+}
+
 Json reduction_graph() {
     Json nodes = Json::array();
     Json tensors = Json::object();
@@ -642,6 +680,109 @@ int main() {
                     "loaded artifact consumes the runtime scalar pointer");
     }
 
+    deepforge::import::SerializedGraph embedded_scalar;
+    status = parse_graph(embedded_scalar_pointwise_graph(), embedded_scalar);
+    tests.good(status, "parse embedded pass-by-value scalar");
+    auto embedded_options = options;
+    embedded_options.capture_mlir = true;
+    deepforge::compiler::CompilationResult embedded_compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(
+            embedded_scalar, embedded_options, embedded_compilation);
+    }
+    tests.good(status, "compile embedded pass-by-value scalar");
+    auto const embedded_argument = std::find_if(
+        embedded_compilation.metadata.arguments.begin(),
+        embedded_compilation.metadata.arguments.end(),
+        [](auto const& argument) { return argument.uid == 602; });
+    tests.check(
+        embedded_argument == embedded_compilation.metadata.arguments.end() &&
+            embedded_compilation.metadata.arguments.size() == 2,
+        "embedded scalar is graph-owned and absent from public arguments");
+    tests.check(
+        embedded_compilation.imported_mlir.find("memref.global") !=
+                std::string::npos &&
+            embedded_compilation.imported_mlir.find("__deepforge_pbv_") !=
+                std::string::npos,
+        "embedded scalar lowers to a private MLIR global");
+    std::vector<float> embedded_output(6, -99.0F);
+    deepforge::runtime::VariantPack embedded_pack{
+        {601, scalar_input.data()}, {603, embedded_output.data()}};
+    if (embedded_compilation.executable) {
+        status = embedded_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, embedded_pack,
+            nullptr);
+        tests.good(status, "execute without embedded scalar UID");
+        tests.check(embedded_output ==
+                        std::vector<float>({3.5F, 4.5F, 5.5F,
+                                            6.5F, 7.5F, 8.5F}),
+                    "embedded scalar broadcasts from graph-owned storage");
+
+        float attempted_override = 100.0F;
+        embedded_pack.emplace(602, &attempted_override);
+        std::fill(embedded_output.begin(), embedded_output.end(), -99.0F);
+        status = embedded_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, embedded_pack,
+            nullptr);
+        tests.good(status, "execute with ignored embedded scalar override");
+        tests.check(embedded_output ==
+                        std::vector<float>({3.5F, 4.5F, 5.5F,
+                                            6.5F, 7.5F, 8.5F}),
+                    "caller cannot override a graph-owned scalar");
+        embedded_pack.erase(602);
+    }
+
+    std::vector<std::uint8_t> embedded_artifact;
+    status = deepforge::compiler::serialize_artifact(
+        embedded_compilation, embedded_artifact);
+    tests.good(status, "serialize embedded scalar artifact");
+    std::unique_ptr<deepforge::runtime::Executable> embedded_loaded;
+    deepforge::compiler::ArtifactInfo embedded_info;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            embedded_artifact, embedded_loaded, &embedded_info);
+    }
+    tests.good(status, "load embedded scalar artifact");
+    tests.check(embedded_info.metadata == embedded_compilation.metadata,
+                "artifact preserves embedded scalar argument exclusion");
+    if (embedded_loaded) {
+        std::fill(embedded_output.begin(), embedded_output.end(), -99.0F);
+        status = embedded_loaded->execute(nullptr, embedded_pack, nullptr);
+        tests.good(status, "execute loaded embedded scalar artifact");
+        tests.check(embedded_output ==
+                        std::vector<float>({3.5F, 4.5F, 5.5F,
+                                            6.5F, 7.5F, 8.5F}),
+                    "artifact carries graph-owned scalar data");
+    }
+
+    deepforge::import::SerializedGraph all_embedded_scalars;
+    status = parse_graph(all_embedded_scalar_types_graph(),
+                         all_embedded_scalars);
+    tests.good(status, "parse all embedded scalar storage types");
+    deepforge::compiler::CompilationResult all_embedded_compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(
+            all_embedded_scalars, embedded_options,
+            all_embedded_compilation);
+    }
+    tests.good(status, "compile all embedded scalar storage types");
+    std::size_t global_count = 0;
+    std::size_t global_position = 0;
+    while ((global_position = all_embedded_compilation.imported_mlir.find(
+                "memref.global", global_position)) != std::string::npos) {
+        ++global_count;
+        global_position += std::string_view("memref.global").size();
+    }
+    tests.check(
+        global_count == 6 &&
+            std::none_of(all_embedded_compilation.metadata.arguments.begin(),
+                         all_embedded_compilation.metadata.arguments.end(),
+                         [](auto const& argument) {
+                             return argument.uid == 602 ||
+                                    (argument.uid >= 604 && argument.uid <= 608);
+                         }),
+        "all six Frontend scalar variants build graph-owned globals");
+
     deepforge::import::SerializedGraph softplus;
     status = parse_graph(single_softplus_graph(), softplus);
     tests.good(status, "parse single-node stable softplus");
@@ -959,8 +1100,23 @@ int main() {
     fused_scalar["tensors"]["602"]["pass_by_value"] = 2.5;
     status = compile_document(fused_scalar);
     tests.check(status.code() ==
-                    deepforge::import::ErrorCode::kUnsupportedExecutionMetadata,
-                "embedded pass-by-value constants remain deferred");
+                    deepforge::import::ErrorCode::kInvalidFieldType,
+                "raw-number scalar payload is not producer-compatible");
+
+    auto nonscalar_embedded = embedded_scalar_pointwise_graph();
+    nonscalar_embedded["tensors"]["602"]["dim"] = Json::array({1, 2});
+    nonscalar_embedded["tensors"]["602"]["stride"] = Json::array({2, 1});
+    status = compile_document(nonscalar_embedded);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "embedded pass-by-value rejects non-scalar tensors");
+
+    auto virtual_embedded = embedded_scalar_pointwise_graph();
+    virtual_embedded["tensors"]["602"]["is_virtual"] = true;
+    status = compile_document(virtual_embedded);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kInvalidValue,
+        "embedded pass-by-value rejects virtual tensors");
 
     auto virtual_scalar = runtime_scalar_pointwise_graph();
     virtual_scalar["tensors"]["604"] =

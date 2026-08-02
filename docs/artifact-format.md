@@ -109,8 +109,10 @@ wrapper。这个内部 adapter 不改变公开的 handle + UID variant-pack + wo
 
 Runtime pass-by-value scalar 不增加 argument-table flag。编译后它与 external 单元素
 只读 argument 具有相同 CPU 调用语义：调用者按 UID 提供地址，因此现有 format 可
-精确 reload。内嵌/fused scalar constant 需要持久化 value ownership，当前仍不支持；
-reader 不得从普通单元素 argument 推断这种 constant。
+精确 reload。内嵌/fused scalar 也不增加 argument-table flag，因为其 UID 会被完全
+移除。Private constant global 作为数据保存在每个现有 target object 中，因此 format
+v5 无需新增 metadata section 即可 reload graph-owned value。Reader 不得从其他普通
+单元素 argument 推断任一 pass-by-value 形式。
 
 版本 `3` 将执行 shape 意图与 argument 的编译最大 shape/byte span 分开记录。policy
 `1` 表示 object 为 exact-shape pointwise override 子集生成了 dynamic memref

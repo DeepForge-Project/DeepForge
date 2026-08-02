@@ -310,6 +310,16 @@ Json norm_forward_graph(NormCase const& configuration) {
                           Json::array({node}), std::move(tensors));
 }
 
+Json embedded_norm_forward_graph(NormCase const& configuration) {
+    auto graph = norm_forward_graph(configuration);
+    graph["graph_uid"] = 4010;
+    graph["context"]["name"] = configuration.forward_tag + "-embedded";
+    auto const epsilon = Json{{"index", 3}, {"value", "38D1B717"}};
+    graph["tensors"]["104"]["pass_by_value"] = epsilon;
+    graph["pass_by_values"] = Json::object({{"104", epsilon}});
+    return graph;
+}
+
 Json norm_backward_graph(NormCase const& configuration) {
     Json tensors = Json::object();
     tensors["201"] = tensor("DY", 201, configuration.x_dim);
@@ -446,6 +456,40 @@ void run_norm_case(TestRunner& tests,
                          close_vectors(mean, reference.mean)),
                     configuration.forward_tag +
                         " matches independent forward reference");
+    }
+
+    if (configuration.forward_tag == "LAYER_NORM") {
+        deepforge::compiler::CompilationResult embedded;
+        status = compile_document(embedded_norm_forward_graph(configuration),
+                                  embedded);
+        tests.good(status, "compile LAYER_NORM with embedded epsilon");
+        tests.check(
+            std::none_of(embedded.metadata.arguments.begin(),
+                         embedded.metadata.arguments.end(),
+                         [](auto const& argument) {
+                             return argument.uid == 104;
+                         }),
+            "embedded normalization epsilon is absent from public arguments");
+        if (status.is_good() && embedded.executable) {
+            std::vector<float> y(x.size(), -99.0F);
+            std::vector<float> mean(reference.mean.size(), -99.0F);
+            std::vector<float> inverse(reference.inverse.size(), -99.0F);
+            deepforge::runtime::VariantPack pack{{101, x.data()},
+                                                 {102, scale.data()},
+                                                 {103, bias.data()},
+                                                 {105, y.data()},
+                                                 {106, mean.data()},
+                                                 {107, inverse.data()}};
+            status = embedded.executable->execute_variant(
+                deepforge::runtime::CpuVariant::kScalar, nullptr, pack,
+                nullptr);
+            tests.good(status,
+                       "execute LAYER_NORM without embedded epsilon UID");
+            tests.check(close_vectors(y, reference.y) &&
+                            close_vectors(inverse, reference.inverse) &&
+                            close_vectors(mean, reference.mean),
+                        "embedded epsilon matches runtime normalization semantics");
+        }
     }
 
     deepforge::compiler::CompilationResult backward;

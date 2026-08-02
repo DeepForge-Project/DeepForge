@@ -101,6 +101,27 @@ struct SerializedValue {
     bool operator==(SerializedValue const&) const = default;
 };
 
+enum class PassByValueKind : std::uint8_t {
+    kInt64 = 0,
+    kInt32 = 1,
+    kFloat16 = 2,
+    kFloat32 = 3,
+    kFloat64 = 4,
+    kBFloat16 = 5,
+};
+
+struct PassByValueScalar {
+    // FLOAT uses uint32 bits; HALF/DOUBLE/BFLOAT16 retain the JSON number's
+    // double bits in uint64 until MLIR converts to the destination semantics.
+    using Storage =
+        std::variant<std::int64_t, std::int32_t, std::uint32_t, std::uint64_t>;
+
+    PassByValueKind kind = PassByValueKind::kFloat32;
+    Storage value = std::uint32_t{0};
+
+    bool operator==(PassByValueScalar const&) const = default;
+};
+
 using TensorReference = std::variant<std::int64_t, std::string>;
 
 struct TensorDesc {
@@ -110,7 +131,7 @@ struct TensorDesc {
     std::vector<std::int64_t> stride;
     bool is_virtual = false;
     bool is_pass_by_value = false;
-    std::optional<SerializedValue> pass_by_value;
+    std::optional<PassByValueScalar> pass_by_value;
     std::string reordering_type = "NONE";
     std::optional<std::int64_t> ragged_offset_uid;
     std::optional<std::string> ragged_offset_name;

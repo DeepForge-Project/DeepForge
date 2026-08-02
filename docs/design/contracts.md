@@ -45,7 +45,8 @@ plan bytes；`cudnn_backend_data` 是文档内的一个 JSON value。importer �
 |---|---|
 | `cudnn_backend_data`, `behavior_notes` | 接受并忽略；不得解释为 CPU execution plan |
 | `variant_pack_uids` | 若存在，必须与单 Conv 的非 virtual X/W/Y UID 集合一致 |
-| `pass_by_values`, `workspace_modifications`, `variant_pack_replacements` | 必须不存在或为空；`variant_pack_replacements` 的空 object/array 均接受，非空表示 MVP 未支持的执行语义 |
+| `pass_by_values` | 没有内嵌 scalar 时必须不存在或为空；否则必须是 object，以 canonical 十进制 UID 为 key，与每个 tensor payload 一一对应且 typed scalar variant 完全相同 |
+| `workspace_modifications`, `variant_pack_replacements` | 必须不存在或为空；`variant_pack_replacements` 的空 object/array 均接受，非空表示未支持的执行语义 |
 | `fe_workspace_size` | 若存在必须为 0；CPU workspace 由 DeepForge 重新规划 |
 | `tensors_to_dump` | 调试 metadata，接受并忽略 |
 
@@ -184,13 +185,13 @@ reduction count 大于 1 时使用 sample variance；running-stat 更新公式�
 和 `DBN_WEIGHT` 通过公开序列化端口输出 sum、等价 affine 和 gradient coefficient，
 不引入私有 side channel。
 
-scalar-like 输入必须是所有维度为 1 的 f32 tensor，可以是普通 input，也可以是
-3.8 节约束下的 runtime pass-by-value input。非空
+scalar-like 输入必须是所有维度为 1 的 f32 tensor，可以是普通 input、3.8 节约束下
+的 runtime pass-by-value input，也可以是 3.9 节约束下的内嵌 pass-by-value
+constant。非空
 分布式 `peer_stats` 被拒绝。BATCHNORM running-stat 端口必须全有或全无。执行时
 epsilon 必须使 square-root 输入为正，`ACCUM_COUNT` 必须为正；这些数据值属于调用者
 前置条件，而不是编译期 metadata。C2/C3 node 可通过 virtual workspace tensor
-混合。dynamic shape、alias、内嵌 pass-by-value constant、ragged/reordered storage 和其他非 f32
-执行仍延后。
+混合。dynamic shape、alias、ragged/reordered storage 和其他非 f32 执行仍延后。
 
 ### 3.3 MVP 后 C4 扩展
 
@@ -253,9 +254,8 @@ ordering，并使用 f32 dS reference approximation。Frontend producer 生成�
 descriptor，但公开 execute ABI 按设计不会在 dispatch 前扫描 tensor 内容。
 
 连接 tensor type 同时受两端支持时，C2-C5 node 可以混合。公开 UID variant-pack
-和 workspace ABI 不变。Dynamic/override shape、内嵌 pass-by-value constant、alias、
-ragged storage、reorder format 和 paged/cache metadata 除下述 C6 显式扩展外均不
-支持。
+和 workspace ABI 不变。Dynamic/override shape、alias、ragged storage、reorder
+format 和 paged/cache metadata 除下述 C6 显式扩展外均不支持。
 
 ### 3.5 C6 F8_128x4 物理 scale 扩展
 
@@ -362,11 +362,29 @@ argument，因此公开 ABI、workspace 规则、invocation adapter 和 artifact
 均覆盖了该行为。
 
 Pass-by-value output、virtual/ragged/reordered descriptor 以及 graph-level runtime
-shape override 均被拒绝。数值型 tensor `pass_by_value` payload 或非空根级
-`pass_by_values` 表示内嵌 fused constant，并返回
-`DFE_UNSUPPORTED_EXECUTION_METADATA`；该独立形式的 constant ownership 和 artifact
-持久化仍延后。所有图形式都拒绝非空根级 `workspace_modifications` 和
+shape override 均被拒绝。非 null tensor payload 选择 3.9 节的内嵌形式，而不是本节
+的 runtime-pointer 形式。所有图形式都拒绝非空根级 `workspace_modifications` 和
 `variant_pack_replacements`，该规则不再只依赖优化 Conv specialization。
+
+### 3.9 C6 内嵌 Pass-by-Value Scalar 扩展
+
+内嵌形式沿用 3.8 节的仅作为 input、external、全 1 dimension、plain layout 和
+scalar type 约束。Tensor `pass_by_value` 必须是固定版本 Frontend 的精确 variant
+object `{index,value}`：index 0-5 依次表示 `INT64`、`INT32`、`HALF`、`FLOAT`、
+`DOUBLE` 和 `BFLOAT16`。Integer 使用 JSON integer，HALF/DOUBLE/BFLOAT16 使用 JSON
+number，FLOAT 使用保存精确 f32 bit pattern 的 8 位十六进制字符串。
+
+根级 `pass_by_values` 必须在 tensor 的 canonical 十进制 UID 下包含完全相同的 typed
+value。每个 tensor payload 必须有一个根级条目，每个根级条目也必须对应一个已分配
+UID 的 tensor payload。未知 UID、缺少对应项、错误 index、格式错误、INT32 越界或
+value 不同都会在 lowering 前被拒绝。
+
+该 value 归 graph 所有。编译器在每个 target object 中生成 private constant
+`memref.global` 并在内部绑定 view，同时从公开 argument metadata 移除其 UID。执行
+时既不需要也不采用调用者对该 UID 提供的 pointer。Artifact format v5 无需增加
+section，因为现有三个 object 已携带 constant，reload 后行为不变。独立的
+`has_compile_time_constant` 源码字段未被固定版本 v1.24.0 tensor serializer 输出，
+因此不属于当前输入契约。
 
 ## 4. 对外运行接口
 

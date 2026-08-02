@@ -122,8 +122,9 @@ MVP 边界做一次性校验。
 - 校验 `json_version == "1.0"`、`cudnn_frontend_version == 12400`、必需字段和
   整数范围；
 - 接受并忽略内嵌 `cudnn_backend_data`/`behavior_notes`，校验
-  `variant_pack_uids`；对非空 `pass_by_values`、`workspace_modifications`、
-  `variant_pack_replacements` 或非零 `fe_workspace_size` 返回不支持诊断；
+  `variant_pack_uids`，并将 `pass_by_values` 与 typed tensor payload 做一致性校验；
+  对非空 `workspace_modifications`、`variant_pack_replacements` 或非零
+  `fe_workspace_size` 返回不支持诊断；
 - 解析 `context`、`tensors`、`nodes`、UID、dim、stride、dtype、`is_virtual`、
   node input/output port 引用和 Conv attributes；
 - 为未知 node 建立稳定的 `DFE_UNSUPPORTED_*` 诊断；禁止忽略未识别节点；
@@ -433,13 +434,19 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     且不改变公开 execute ABI。
 15. 已完成：C6.7 Frontend runtime scalar pass-by-value input。External、仅作为
     input、全 1 dimension 的 tensor 使用普通 UID-map pointer 和 artifact argument
-    metadata；pointwise broadcast、normalization epsilon、FP8 MATMUL control、通用
-    根级 metadata 拒绝、错误 descriptor、Release、ASan 和 UBSan 覆盖该增量，且不
-    改变 ABI 或 artifact version。内嵌/fused scalar constant 作为独立形式继续延后。
+    metadata；pointwise broadcast、normalization epsilon、FP8 MATMUL control、错误
+    根级 metadata/descriptor、Release、ASan 和 UBSan 覆盖该增量，且不改变 ABI 或
+    artifact version。
+16. 已完成：C6.8 Frontend 内嵌/fused pass-by-value scalar constant。Importer 识别
+    全部六种精确 `{index,value}` variant，并要求 tensor payload 与根级
+    `pass_by_values` 一一对应且 bit-preserving 一致。编译器生成 private read-only
+    global，从公开 metadata 排除 graph-owned UID，并通过现有 target object 持久化
+    value，不引入 artifact v6。Pointwise 不可覆盖性、artifact reload、normalization
+    epsilon、INT64 RNG seed/offset、FP8 MATMUL control、错误 metadata、Release、ASan
+    和 UBSan 覆盖该增量。
 
 剩余 C6 功能工作包括更广泛的 dynamic 行为、上述 scale 子集以外的 reorder
-format，以及内嵌/fused constant 的 ownership 和持久化。固定使用的 v1.24.0
-serializer 无法表达 paged backward，该能力仅作为未来
+format。固定使用的 v1.24.0 serializer 无法表达 paged backward，该能力仅作为未来
 schema 版本的兼容工作跟踪。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
 baseline policy 逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

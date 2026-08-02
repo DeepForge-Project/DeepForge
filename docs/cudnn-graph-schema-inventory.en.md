@@ -27,12 +27,13 @@ Every context serializer field is required: `name`, `compute_data_type`,
 `is_dynamic_shape_enabled`, and `is_override_shape_enabled`. Nullable context
 fields remain nullable in the canonical model. `sm_count` must fit `int32`.
 
-Plan-only root fields such as `variant_pack_uids`, `pass_by_values`,
+Plan/runtime root fields such as `variant_pack_uids`, `pass_by_values`,
 `workspace_modifications`, `variant_pack_replacements`, `fe_workspace_size`,
 `behavior_notes`, and `tensors_to_dump` are not node semantics. The validated
-Conv2D adapter applies its existing strict execution-metadata checks; generic
-nodes preserve protocol semantics without treating those plan fields as node
-attributes.
+Conv2D adapter applies its existing strict execution-metadata checks. Generic
+nodes preserve protocol semantics without treating those fields as node
+attributes; `pass_by_values` is additionally validated against embedded tensor
+payloads before lowering.
 
 ## 2. Tensor And Graph Rules
 
@@ -40,8 +41,9 @@ Each tensor has the ten fields emitted by `Tensor_attributes`: `name`,
 `data_type`, `dim`, `stride`, `is_virtual`, `pass_by_value`,
 `is_pass_by_value`, `reordering_type`, `uid`, and `uid_assigned`.
 `ragged_offset_uid` and `ragged_offset_name` are optional but must occur
-together. A pass-by-value payload is null or numeric. The recognized reorder
-values are `NONE`, `INT8x32`, `F16x16`, and `F8_128x4`.
+together. A pass-by-value payload is null or the exact Frontend
+`{index,value}` scalar variant object. The recognized reorder values are
+`NONE`, `INT8x32`, `F16x16`, and `F8_128x4`.
 
 The importer recognizes all 20 non-sentinel v1.24.0 data types. This is enum
 recognition, not an execution claim. Tensor references are signed 64-bit UIDs
@@ -231,8 +233,9 @@ and unlisted optional ports. Windowed forms that could produce fully masked
 rows are rejected. Backward consumes the supplied log-sum-exp `Stats`.
 
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
-are f32 tensors whose dimensions are all one; they may be ordinary inputs or
-runtime pass-by-value inputs. Distributed nonempty `peer_stats` is not
+are f32 tensors whose dimensions are all one; they may be ordinary inputs,
+runtime pass-by-value inputs, or embedded pass-by-value constants. Distributed
+nonempty `peer_stats` is not
 executable. Running-stat ports must be either all present or all absent, and
 their runtime values are required to provide positive accumulation counts and
 valid epsilon values.
@@ -243,9 +246,18 @@ dimension is one, and the descriptor is external, non-ragged, and `NONE`
 reordered. The scalar type is `INT64`, `INT32`, `HALF`, `FLOAT`, `DOUBLE`, or
 `BFLOAT16`, subject to each operation port's narrower type rules. Its host
 pointer is supplied under the ordinary UID and is persisted as a one-element
-read argument in artifacts. Outputs, virtual tensors, runtime shape-override
-arrays, embedded scalar payloads, and nonempty root `pass_by_values` are
-rejected. The embedded forms remain deferred fused constants.
+read argument in artifacts. Outputs, virtual tensors, and runtime
+shape-override arrays are rejected.
+
+C6 embedded pass-by-value uses the same descriptor constraints with a non-null
+payload. Variant indices 0-5 map to `INT64`, `INT32`, `HALF`, `FLOAT`, `DOUBLE`,
+and `BFLOAT16`; FLOAT stores an exact eight-digit hexadecimal bit pattern and
+the other floating variants store JSON numbers. Root `pass_by_values` and
+tensor payloads must form an exact one-to-one typed-value map. The compiler
+binds each value from a private constant global, excludes its UID from public
+arguments, and persists it in existing artifact objects. The distinct
+Frontend compile-time-constant source fields are not serialized by v1.24.0 and
+are outside this inventory.
 
 `ROPE` rotates the final even `rope_dim` values, or the full final dimension
 when `rope_dim == 0`; the preceding values are scaled pass-through. `FREQS`
@@ -291,8 +303,8 @@ MATMUL and MATMUL_FP8 accept optional external plain INT32 M/N/K inputs whose
 rank matches C, whose trailing dimensions are `[1,1]`, and whose batch
 dimensions broadcast to C. Values select the output and reduction extents
 within static maxima; standard MATMUL uses a finite f32 padding value outside
-M/N and MATMUL_FP8 uses zero. Explicit aliasing, embedded pass-by-value
-constants, other dynamic operations, ragged tensors outside the documented
+M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
+ragged tensors outside the documented
 standard-f32 SDPA subset, and physical reorder handling outside the documented
 `F8_128x4` scale subset are deferred. New artifacts use format v5 for ragged
 storage references and logical-sequence divisors; v1-v4 remain readable, with

@@ -81,8 +81,8 @@ causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge vari
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
-不支持 pointwise 和 MATMUL override 子集之外的动态执行、显式 alias、内嵌
-pass-by-value constant、不满足下述约束的 pass-by-value descriptor、
+不支持 pointwise 和 MATMUL override 子集之外的动态执行、显式 alias、不满足下述
+约束的 pass-by-value descriptor、
 文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
 device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
@@ -198,11 +198,12 @@ output_extent = 1 + (input_extent + pre + post - effective_filter) / stride
 `X.C / C_per_group` 推导，且 `Y.K` 必须可被 group 数整除。
 
 X、W、Y 必须有显式且互不重复的 UID。对所有 JSON/UBJSON graph，非空根级
-`pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 都会被
-拒绝，因为它们包含当前 CPU runtime 未实现的执行语义。
+`workspace_modifications` 或 `variant_pack_replacements` 都会被拒绝。
+`pass_by_values` 仅接受下述内嵌 scalar 形式，其他非空内容都会因一致性校验失败。
 
-通用 C2-C6 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
-tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
+通用 C2-C6 图中每个被读写的非 virtual tensor，除 graph-owned 内嵌 scalar 外，都
+必须出现在执行期 UID map 中。virtual tensor 不放入 UID map，而是使用查询得到的
+workspace。可写 buffer 不得与其他
 argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 `in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
 不能替代显式 UID。epsilon、momentum、accumulation count 等 normalization scalar
@@ -214,9 +215,27 @@ Runtime pass-by-value input 要求 `is_pass_by_value=true`、`pass_by_value` pay
 ragged、非 reordered tensor，data type 限于 `INT64`、`INT32`、`HALF`、`FLOAT`、
 `DOUBLE`、`BFLOAT16`，具体 operation port 还可进一步收窄。执行期 UID map 与普通
 单元素只读 argument 一样提供 scalar 的 host pointer；artifact 持久化不需要改变
-format。Pass-by-value output、virtual tensor、shape-override array、tensor 内嵌
-payload 和非空根级 `pass_by_values` 仍不支持；后两种表示 fused constant，不是
-runtime scalar parameter。
+format。Pass-by-value output、virtual tensor 和 shape-override array 仍不支持。
+
+内嵌 pass-by-value scalar 使用相同的 tensor 约束，但 `pass_by_value` 必须包含
+v1.24.0 scalar variant object，根级 `pass_by_values` 也必须以 canonical 十进制 UID
+为 key 包含完全相同的 object。支持的 variant 对应关系如下：
+
+| `index` | Tensor type | `value` 表示 |
+|---:|---|---|
+| 0 | `INT64` | JSON integer |
+| 1 | `INT32` | 范围合法的 JSON integer |
+| 2 | `HALF` | JSON number |
+| 3 | `FLOAT` | 恰好 8 位十六进制字符，保存 f32 bit pattern |
+| 4 | `DOUBLE` | JSON number |
+| 5 | `BFLOAT16` | JSON number |
+
+Tensor payload 与根级条目必须一一存在，且 type/value 完全一致；缺失、孤立、格式
+错误或冲突条目都会被拒绝。编译器将 scalar 固化为 private read-only global，从
+公开 argument metadata 移除其 UID，并让每个 artifact object 自带该值。执行期 UID
+map 应省略该 UID；即使额外传入同 UID 也不能覆盖 graph-owned value。较新 Frontend
+源码中的独立 `has_compile_time_constant` 字段没有被固定版本 tensor serializer
+输出，因此不属于当前输入契约。
 
 `F8_128x4` scale descriptor 的最后两个逻辑 matrix axis 是 M 和 K，顺序可以互换。
 M padding 到 128 的倍数，K padding 到 4 的倍数；K axis stride 为 1，M axis stride

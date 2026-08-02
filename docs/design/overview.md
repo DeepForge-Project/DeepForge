@@ -197,8 +197,10 @@ stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能�
 exact-shape external f32 `POINTWISE` node 的 runtime override。标准和 FP8 MATMUL
 还支持 producer 序列化的 per-batch INT32 M/N/K extent tensor，同时保持静态
 allocation 上界。Runtime scalar pass-by-value input 以 external、仅作为 input、全 1
-dimension tensor 的形式执行，host pointer 由普通 UID 提供；内嵌/fused constant
-payload 仍延后。标准 f32 SDPA 已
+dimension tensor 的形式执行，host pointer 由普通 UID 提供。内嵌/fused
+pass-by-value payload 使用相同 descriptor 子集，并在根级 `pass_by_values` 中镜像
+精确 typed Frontend variant；它被 lowering 为 graph-owned private global，从公开
+argument 中移除，并持久化在现有 artifact object 中。标准 f32 SDPA 已
 支持 ragged forward data/row output 和 backward data/gradient、带紧凑 page table
 的独立 paged K/V、forward block mask 及 forward/backward sink token。更广泛
 dynamic 行为、其他 physical reorder metadata、内嵌 constant 持久化、threading 和

@@ -27,16 +27,18 @@ model 中继续保留为空，`sm_count` 必须落在 `int32` 范围内。
 
 `variant_pack_uids`、`pass_by_values`、`workspace_modifications`、
 `variant_pack_replacements`、`fe_workspace_size`、`behavior_notes` 和
-`tensors_to_dump` 等 plan 字段不属于 node 语义。已验证的 Conv2D adapter 继续执行
-原有的严格 execution metadata 检查；通用 node 不会把这些字段误当成 node 属性。
+`tensors_to_dump` 等 plan/runtime 字段不属于 node 语义。已验证的 Conv2D adapter
+继续执行原有的严格 execution metadata 检查；通用 node 不会把这些字段误当成 node
+属性，`pass_by_values` 还会在 lowering 前与 tensor 内嵌 payload 做一致性校验。
 
 ## 2. Tensor 和 Graph 规则
 
 每个 tensor 都包含 `Tensor_attributes` 输出的十个字段：`name`、`data_type`、
 `dim`、`stride`、`is_virtual`、`pass_by_value`、`is_pass_by_value`、
 `reordering_type`、`uid` 和 `uid_assigned`。`ragged_offset_uid` 与
-`ragged_offset_name` 可选，但必须同时出现。Pass-by-value payload 只能为空或数值。
-可识别的 reorder 值为 `NONE`、`INT8x32`、`F16x16` 和 `F8_128x4`。
+`ragged_offset_name` 可选，但必须同时出现。Pass-by-value payload 只能为空或精确的
+Frontend `{index,value}` scalar variant object。可识别的 reorder 值为 `NONE`、
+`INT8x32`、`F16x16` 和 `F8_128x4`。
 
 Importer 识别 v1.24.0 的全部 20 个非 sentinel data type；这只是 enum 识别，
 不代表已经可执行。Tensor reference 可以是有符号 64 位 UID 或名称，与 Frontend
@@ -214,7 +216,8 @@ FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
 读取外部提供的 log-sum-exp `Stats`。
 
 epsilon、momentum、accumulation count 等 normalization scalar 输入必须是所有维度
-均为 1 的 f32 tensor，可以是普通 input 或 runtime pass-by-value input。非空分布式
+均为 1 的 f32 tensor，可以是普通 input、runtime pass-by-value input 或内嵌
+pass-by-value constant。非空分布式
 `peer_stats` 不可执行。running-stat 端口必须全有或全无，运行时值必须提供正的
 accumulation count 和有效 epsilon。
 
@@ -223,8 +226,15 @@ C6 runtime pass-by-value 只接受满足以下条件的 input tensor：
 1，并且 descriptor 是 external、非 ragged、`NONE` reorder。Scalar type 限于
 `INT64`、`INT32`、`HALF`、`FLOAT`、`DOUBLE`、`BFLOAT16`，具体 operation port 可
 进一步收窄。调用者按普通 UID 提供 host pointer，artifact 将其持久化为单元素只读
-argument。Output、virtual tensor、runtime shape-override array、内嵌 scalar payload
-和非空根级 `pass_by_values` 均被拒绝；内嵌形式仍属于延后的 fused constant。
+argument。Output、virtual tensor 和 runtime shape-override array 均被拒绝。
+
+C6 内嵌 pass-by-value 使用相同 descriptor 约束，但 payload 非 null。Variant index
+0-5 依次映射 `INT64`、`INT32`、`HALF`、`FLOAT`、`DOUBLE` 和 `BFLOAT16`；FLOAT
+保存 8 位十六进制精确 bit pattern，其他浮点 variant 使用 JSON number。根级
+`pass_by_values` 与 tensor payload 必须组成 typed value 完全相同的一一映射。编译器
+从 private constant global 绑定 value，从公开 argument 中排除其 UID，并将其保存在
+现有 artifact object 中。Frontend 独立的 compile-time-constant 源码字段未被
+v1.24.0 序列化，因此不属于该清单。
 
 `ROPE` 旋转最后一个偶数宽度的 `rope_dim`；`rope_dim == 0` 时旋转整个末维，
 前缀为 scaled pass-through。`FREQS` shape 为 `[S,1,1,rope_dim]`，split-half
@@ -262,8 +272,8 @@ bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 
 MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们的 rank 与 C
 相同，末两个 dimension 为 `[1,1]`，batch dimension 可 broadcast 到 C。各值在静态
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
-value，MATMUL_FP8 使用零。显式 alias、内嵌 pass-by-value constant、其他动态
-operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
+value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
+子集外的 ragged tensor 和
 `F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v5
 记录 ragged storage reference 和逻辑 sequence divisor；v1-v4 继续可读，其中 v4
 divisor 默认为 1。

@@ -227,12 +227,14 @@ f32 `POINTWISE` node. Standard and FP8 MATMUL also accept producer-serialized
 per-batch INT32 M/N/K extent tensors while retaining static allocation maxima.
 Runtime scalar pass-by-value inputs are accepted as external, input-only,
 all-one tensors whose host pointer is supplied by ordinary UID. Embedded/fused
-constant payloads remain deferred.
+pass-by-value payloads use the same descriptor subset with an exact typed
+Frontend variant mirrored in root `pass_by_values`. They lower to graph-owned
+private globals, disappear from public arguments, and persist in the existing
+artifact objects.
 Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
 tables, forward block masks, and forward/backward sink tokens. Broader dynamic
-behavior, other physical reorder metadata, embedded constant persistence,
-threading, and broad fusion remain.
+behavior, other physical reorder metadata, threading, and broad fusion remain.
 Paged backward cannot be represented by the pinned v1.24.0 serializer and is
 therefore future schema-version compatibility work.
 

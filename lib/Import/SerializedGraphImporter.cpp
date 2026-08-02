@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -165,6 +166,116 @@ Status read_uint64(Json const& value, std::string const& path, std::uint64_t& ou
         return Status::ok();
     }
     return fail(ErrorCode::kInvalidFieldType, path, "expected integer");
+}
+
+std::optional<PassByValueKind> pass_by_value_kind(DataType type) {
+    switch (type) {
+        case DataType::kInt64:
+            return PassByValueKind::kInt64;
+        case DataType::kInt32:
+            return PassByValueKind::kInt32;
+        case DataType::kFloat16:
+            return PassByValueKind::kFloat16;
+        case DataType::kFloat32:
+            return PassByValueKind::kFloat32;
+        case DataType::kFloat64:
+            return PassByValueKind::kFloat64;
+        case DataType::kBFloat16:
+            return PassByValueKind::kBFloat16;
+        default:
+            return std::nullopt;
+    }
+}
+
+Status parse_pass_by_value(Json const& value,
+                           DataType tensor_type,
+                           std::string const& path,
+                           PassByValueScalar& output) {
+    if (!value.is_object()) {
+        return fail(ErrorCode::kInvalidFieldType, path,
+                    "expected Frontend scalar variant object");
+    }
+    if (value.size() != 2 || !value.contains("index") ||
+        !value.contains("value")) {
+        return fail(ErrorCode::kInvalidValue, path,
+                    "Frontend scalar variant requires only index and value");
+    }
+
+    std::int64_t index = 0;
+    auto status = read_int64(value.at("index"), child_path(path, "index"),
+                             index);
+    if (status.is_bad()) {
+        return status;
+    }
+    if (index < 0 || index > 5) {
+        return fail(ErrorCode::kInvalidValue, child_path(path, "index"),
+                    "Frontend scalar variant index must be in [0, 5]");
+    }
+    auto const expected = pass_by_value_kind(tensor_type);
+    if (!expected || static_cast<std::int64_t>(*expected) != index) {
+        return fail(ErrorCode::kInvalidValue, child_path(path, "index"),
+                    "Frontend scalar variant type does not match tensor data_type");
+    }
+
+    output.kind = *expected;
+    auto const& scalar = value.at("value");
+    switch (*expected) {
+        case PassByValueKind::kInt64: {
+            std::int64_t integer = 0;
+            status = read_int64(scalar, child_path(path, "value"), integer);
+            if (status.is_good()) {
+                output.value = integer;
+            }
+            return status;
+        }
+        case PassByValueKind::kInt32: {
+            std::int64_t integer = 0;
+            status = read_int64(scalar, child_path(path, "value"), integer);
+            if (status.is_bad()) {
+                return status;
+            }
+            if (integer < std::numeric_limits<std::int32_t>::min() ||
+                integer > std::numeric_limits<std::int32_t>::max()) {
+                return fail(ErrorCode::kInvalidValue,
+                            child_path(path, "value"),
+                            "Frontend INT32 scalar is out of range");
+            }
+            output.value = static_cast<std::int32_t>(integer);
+            return Status::ok();
+        }
+        case PassByValueKind::kFloat32: {
+            if (!scalar.is_string()) {
+                return fail(ErrorCode::kInvalidFieldType,
+                            child_path(path, "value"),
+                            "Frontend FLOAT scalar requires an 8-digit hexadecimal bit pattern");
+            }
+            auto const text = scalar.get<std::string>();
+            std::uint32_t bits = 0;
+            auto const parsed = std::from_chars(
+                text.data(), text.data() + text.size(), bits, 16);
+            if (text.size() != 8 || parsed.ec != std::errc{} ||
+                parsed.ptr != text.data() + text.size()) {
+                return fail(ErrorCode::kInvalidValue,
+                            child_path(path, "value"),
+                            "Frontend FLOAT scalar requires exactly 8 hexadecimal digits");
+            }
+            output.value = bits;
+            return Status::ok();
+        }
+        case PassByValueKind::kFloat16:
+        case PassByValueKind::kFloat64:
+        case PassByValueKind::kBFloat16: {
+            if (!scalar.is_number()) {
+                return fail(ErrorCode::kInvalidFieldType,
+                            child_path(path, "value"),
+                            "Frontend floating scalar requires a numeric value");
+            }
+            output.value = std::bit_cast<std::uint64_t>(scalar.get<double>());
+            return Status::ok();
+        }
+    }
+    return fail(ErrorCode::kInvalidValue, path,
+                "unknown Frontend scalar variant index");
 }
 
 Status parse_serialized_value(Json const& value,
@@ -561,19 +672,11 @@ Status parse_tensor(Json const& value, std::string const& path, TensorDesc& outp
         return status;
     }
     if (!field->is_null()) {
-        SerializedValue payload;
-        status = parse_serialized_value(
-            *field, child_path(path, "pass_by_value"), payload);
-        if (status.is_bad()) {
-            return status;
-        }
-        if (!std::holds_alternative<std::int64_t>(payload.value) &&
-            !std::holds_alternative<std::uint64_t>(payload.value) &&
-            !std::holds_alternative<double>(payload.value)) {
-            return fail(ErrorCode::kInvalidFieldType,
-                        child_path(path, "pass_by_value"),
-                        "Frontend scalar payload must be numeric");
-        }
+        PassByValueScalar payload;
+        status = parse_pass_by_value(*field, output.data_type,
+                                     child_path(path, "pass_by_value"),
+                                     payload);
+        if (status.is_bad()) return status;
         output.pass_by_value = std::move(payload);
     }
     if (output.pass_by_value && !output.is_pass_by_value) {
@@ -751,6 +854,72 @@ Status parse_tensors(Json const& root,
         }
     }
 
+    return Status::ok();
+}
+
+Status validate_pass_by_values(Json const& root,
+                               SerializedGraph const& graph) {
+    for (auto const& [name, tensor] : graph.named_tensors) {
+        if (tensor.pass_by_value) {
+            return fail(ErrorCode::kMissingUid,
+                        child_path(child_path("tensors", name), "uid"),
+                        "embedded pass-by-value constants require an assigned UID");
+        }
+    }
+
+    auto const values = root.find("pass_by_values");
+    if (values == root.end()) {
+        auto const embedded = std::find_if(
+            graph.tensors.begin(), graph.tensors.end(),
+            [](auto const& item) { return item.second.pass_by_value.has_value(); });
+        if (embedded != graph.tensors.end()) {
+            return fail(ErrorCode::kMissingField, "pass_by_values",
+                        "embedded scalar payload requires the Frontend root map");
+        }
+        return Status::ok();
+    }
+    if (!values->is_object()) {
+        return fail(ErrorCode::kInvalidFieldType, "pass_by_values",
+                    "expected object keyed by tensor UID");
+    }
+
+    std::set<std::int64_t> seen;
+    for (auto it = values->begin(); it != values->end(); ++it) {
+        auto const path = child_path("pass_by_values", it.key());
+        std::int64_t uid = 0;
+        if (!parse_uid_key(it.key(), uid)) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "root scalar key must be a canonical decimal int64 UID");
+        }
+        auto const tensor = graph.tensors.find(uid);
+        if (tensor == graph.tensors.end()) {
+            return fail(ErrorCode::kMissingUid, path,
+                        "root scalar UID has no tensor descriptor");
+        }
+        if (!tensor->second.pass_by_value) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "root scalar UID has no matching tensor payload");
+        }
+        PassByValueScalar scalar;
+        auto status = parse_pass_by_value(it.value(), tensor->second.data_type,
+                                          path, scalar);
+        if (status.is_bad()) {
+            return status;
+        }
+        if (scalar != *tensor->second.pass_by_value) {
+            return fail(ErrorCode::kInvalidValue, path,
+                        "root and tensor scalar payloads differ");
+        }
+        seen.insert(uid);
+    }
+
+    for (auto const& [uid, tensor] : graph.tensors) {
+        if (tensor.pass_by_value && !seen.contains(uid)) {
+            return fail(ErrorCode::kMissingField,
+                        child_path("pass_by_values", std::to_string(uid)),
+                        "tensor scalar payload has no matching root entry");
+        }
+    }
     return Status::ok();
 }
 
@@ -1745,11 +1914,8 @@ Status validate_variant_pack_uids(Json const& root, ConvFpropDesc const& conv) {
 }
 
 Status validate_execution_metadata(Json const& root) {
-    auto status = require_empty_object_if_present(root, "pass_by_values");
-    if (status.is_bad()) {
-        return status;
-    }
-    status = require_empty_object_if_present(root, "workspace_modifications");
+    auto status =
+        require_empty_object_if_present(root, "workspace_modifications");
     if (status.is_bad()) {
         return status;
     }
@@ -1869,6 +2035,10 @@ Status read_document(Json const& root, SerializedGraph& output) {
     }
 
     status = parse_tensors(root, graph.tensors, graph.named_tensors);
+    if (status.is_bad()) {
+        return status;
+    }
+    status = validate_pass_by_values(root, graph);
     if (status.is_bad()) {
         return status;
     }

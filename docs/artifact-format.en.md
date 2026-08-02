@@ -119,9 +119,11 @@ unknown adapter kinds and nonempty kind-1 metadata.
 Runtime pass-by-value scalars intentionally add no argument-table flag. After
 compilation they have the same CPU invocation semantics as an external,
 one-element read argument: the caller supplies its address under the UID. This
-allows the existing format to reload them exactly. An embedded/fused scalar
-constant would require persisted value ownership and remains unsupported; it
-must not be inferred from an ordinary one-element argument.
+allows the existing format to reload them exactly. Embedded/fused scalars also
+add no argument-table flag because their UIDs are omitted entirely. Their
+private constant globals are data in each existing target object, so format v5
+reloads graph-owned values without a new metadata section. A reader must not
+infer either form from an unrelated ordinary one-element argument.
 
 Version `3` records execution-shape intent separately from each argument's
 compiled maximum shape and byte span. Policy `1` means the object contains

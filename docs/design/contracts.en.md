@@ -52,7 +52,8 @@ additional fields:
 |---|---|
 | `cudnn_backend_data`, `behavior_notes` | Accept and ignore; never interpret as a CPU execution plan |
 | `variant_pack_uids` | If present, it must equal the set of non-virtual X/W/Y UIDs for the single Conv |
-| `pass_by_values`, `workspace_modifications`, `variant_pack_replacements` | Must be absent or empty; an empty object or array is accepted for `variant_pack_replacements`, while a nonempty value represents unsupported execution semantics |
+| `pass_by_values` | Absent/empty when no embedded scalar exists; otherwise an object with exactly one typed scalar variant per matching tensor payload under its canonical decimal UID |
+| `workspace_modifications`, `variant_pack_replacements` | Must be absent or empty; an empty object or array is accepted for `variant_pack_replacements`, while a nonempty value represents unsupported execution semantics |
 | `fe_workspace_size` | If present, must be zero; DeepForge replans CPU workspace |
 | `tensors_to_dump` | Debug metadata; accept and ignore |
 
@@ -211,14 +212,15 @@ scale, and serialized bias outputs. `GENSTATS`, `BN_FINALIZE`, and
 gradient coefficients without a private side channel.
 
 Scalar-like inputs are f32 tensors with every dimension equal to one. They may
-be ordinary inputs or runtime pass-by-value inputs under section 3.8. Nonempty
-distributed `peer_stats` is rejected.
+be ordinary inputs, runtime pass-by-value inputs under section 3.8, or embedded
+pass-by-value constants under section 3.9. Nonempty distributed `peer_stats` is
+rejected.
 BATCHNORM running-stat ports must be all present or all absent. At execution,
 epsilon must make the square-root operand positive and `ACCUM_COUNT` must be
 positive; these data values are caller preconditions rather than compile-time
 metadata. C2 and C3 nodes may be mixed, including through virtual workspace
-tensors. Dynamic shape, aliasing, embedded pass-by-value constants,
-ragged/reordered storage, and other non-f32 execution remain deferred.
+tensors. Dynamic shape, aliasing, ragged/reordered storage, and other non-f32
+execution remain deferred.
 
 ### 3.3 Post-MVP C4 Extension
 
@@ -293,9 +295,8 @@ execute ABI intentionally does not inspect tensor contents before dispatch.
 
 C2-C5 nodes may be mixed when both ends support the connected tensor type.
 The public UID variant-pack and workspace ABI is unchanged. Dynamic/override
-shapes, embedded pass-by-value constants, aliasing, ragged storage, reorder formats, and
-paged/cache metadata are unsupported except for the explicit C6 extensions
-below.
+shapes, aliasing, ragged storage, reorder formats, and paged/cache metadata are
+unsupported except for the explicit C6 extensions below.
 
 ### 3.5 C6 F8_128x4 Physical Scale Extension
 
@@ -422,12 +423,33 @@ same behavior is exercised by pointwise broadcasting, normalization epsilon,
 and FP8 MATMUL scale controls.
 
 Pass-by-value outputs, virtual/ragged/reordered descriptors, and graph-level
-runtime shape overrides are rejected. A numeric tensor `pass_by_value` payload
-or nonempty root `pass_by_values` represents an embedded fused constant and
-returns `DFE_UNSUPPORTED_EXECUTION_METADATA`; constant ownership and artifact
-persistence for that distinct form remain deferred. Nonempty root
-`workspace_modifications` and `variant_pack_replacements` are likewise rejected
-for every graph form, not only the optimized Conv specialization.
+runtime shape overrides are rejected. A non-null tensor payload selects the
+embedded form in section 3.9 rather than this runtime-pointer form. Nonempty
+root `workspace_modifications` and `variant_pack_replacements` are rejected for
+every graph form, not only the optimized Conv specialization.
+
+### 3.9 C6 Embedded Pass-by-Value Scalar Extension
+
+The embedded form has the same input-only, external, all-one, plain-layout and
+scalar-type constraints as section 3.8. Its tensor `pass_by_value` is exactly
+the pinned Frontend variant object `{index,value}`: indices 0-5 denote `INT64`,
+`INT32`, `HALF`, `FLOAT`, `DOUBLE`, and `BFLOAT16`, respectively. Integer values
+are JSON integers, HALF/DOUBLE/BFLOAT16 values are JSON numbers, and FLOAT is
+an eight-hex-digit string containing the exact f32 bit pattern.
+
+Root `pass_by_values` must contain exactly the same typed value under the
+tensor's canonical decimal UID. Every tensor payload requires one root entry,
+and every root entry requires one UID-assigned tensor payload. Unknown UIDs,
+missing counterparts, wrong indices, malformed values, out-of-range INT32,
+and unequal values are rejected before lowering.
+
+The value is graph-owned. The compiler emits a private constant `memref.global`
+in each target object, binds its view internally, and omits the UID from public
+argument metadata. Execution neither requires nor honors a caller pointer for
+that UID. Artifact format v5 needs no new section because all three existing
+objects already carry the constant; reload reproduces the same behavior. The
+distinct `has_compile_time_constant` source fields are not serialized by the
+pinned v1.24.0 tensor serializer and remain outside this input contract.
 
 ## 4. Public Execution Interface
 

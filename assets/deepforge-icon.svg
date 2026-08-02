@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">DeepForge project icon</title>
+  <desc id="desc">A forging hammer strikes a matrix-marked anvil, representing deep learning graphs compiled into CPU code.</desc>
+
+  <rect width="512" height="512" fill="#ffffff"/>
+
+  <!-- Forging hammer -->
+  <g fill="#c84a32" transform="rotate(-28 292 176)">
+    <rect x="226" y="72" width="190" height="62" rx="12"/>
+    <rect x="290" y="122" width="38" height="154" rx="14"/>
+  </g>
+
+  <!-- Impact sparks -->
+  <path d="M140 156l14 22-14 22-14-22z" fill="#c84a32"/>
+  <path d="M188 112l12 19-12 19-12-19z" fill="#c84a32"/>
+  <path d="M100 204l10 16-10 16-10-16z" fill="#c84a32"/>
+
+  <!-- Matrix-marked anvil -->
+  <path d="M70 232h246c48 0 84-18 126-58h18c-18 58-56 100-112 118h-54l-22 50h-88l-22-50h-50z" fill="#c84a32"/>
+  <rect x="116" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
+  <rect x="156" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
+  <rect x="196" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
+
+  <!-- Anvil stem and base -->
+  <path d="M184 326h88l34 84H150z" fill="#c84a32"/>
+  <path d="M116 392h220l52 58H64z" fill="#c84a32"/>
+</svg>

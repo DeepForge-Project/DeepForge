@@ -210,7 +210,10 @@ MXFP8 block size 固定为 32。C6 已解码正常 Frontend MXFP8 producer 生�
 M 可被 128 整除、K 可被 4 整除、K stride 为 1、M stride 为 K，leading axis
 按 packed 排列。该布局只开放给 block-scale conversion 的 E4M3/E8M0 scale
 输入/输出和 E8M0 MXFP8 `Descale_*` 输入；其他端口以及 `INT8x32`/`F16x16`
-reorder format 会被拒绝。
+reorder format 会被拒绝。除固定 v1.24.0 的 enum/string 转换 plumbing 外，`F16x16`
+只在 attribute serialization round-trip 中被实际使用；可执行 `INT8x32` sample 和
+reorder helper 只属于 legacy backend/filter 路径。两者都没有可达的现代 serialized
+Graph operation port 和已定义物理地址映射，因此 DeepForge 不根据枚举名推测布局。
 FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
 和未列出的可选端口；可能产生全 mask row 的 window 组合也会被拒绝。Backward
 读取外部提供的 log-sum-exp `Stats`。
@@ -264,17 +267,19 @@ bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox �
 
 Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index 表示。
 连接端口均接受 tensor type 时，C2-C6 操作可在同一个有序 DAG 中混合。C6 接受
-两个 dynamic context flag。Runtime shape override 仅可执行一个无 broadcast 的
-`POINTWISE` node，其 argument 必须是编译 dimension 相同的 external plain f32
-tensor。编译 dimension 是上界；runtime dimension 必须为正且不超过该上界，
-runtime stride 必须满足当前支持的正且不重叠条件，每个 storage span 必须位于编译
-bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 descriptor 语义。
+两个 dynamic context flag。Runtime shape override 可执行无 broadcast 的纯
+`POINTWISE` 有序 DAG，全部已用 tensor 必须是编译 dimension 相同的 plain f32。
+External argument 是只读 input 加唯一只写 output；virtual 中间值通过静态上界的
+packed workspace view 获得公共 runtime shape。编译 dimension 是上界；runtime
+dimension 必须为正且不超过该上界，runtime stride 必须满足当前支持的正且不重叠
+条件，每个 external storage span 必须位于编译 bound 内。dynamic flag 单独出现时只
+持久化 metadata，不改变静态 descriptor 语义。
 MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们的 rank 与 C
 相同，末两个 dimension 为 `[1,1]`，batch dimension 可 broadcast 到 C。各值在静态
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
 value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
-子集外的 ragged tensor 和
-`F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v5
+子集外的 ragged tensor，以及固定版本现代 Graph producer 未生成的物理 reorder
+契约延后。新 artifact 使用 format v5
 记录 ragged storage reference 和逻辑 sequence divisor；v1-v4 继续可读，其中 v4
 divisor 默认为 1。
 

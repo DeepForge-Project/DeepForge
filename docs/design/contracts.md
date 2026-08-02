@@ -280,23 +280,27 @@ coordinate；公开 execute 和 workspace ABI 不变。
 ### 3.6 C6 Runtime Shape Override 扩展
 
 `is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
-dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor。当前启用
-override 必须精确包含一个 `POINTWISE` node；全部输入输出必须是编译 dimension
-相同的 external、非 ragged、非 reordered、非 pass-by-value FLOAT tensor，不支持 broadcast 或
-virtual workspace。
+dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor。启用 override
+要求图是非空且只包含 `POINTWISE` node 的有序 DAG；全部已用 tensor 必须是编译
+dimension 相同的非 ragged、非 reordered、非 pass-by-value FLOAT，因此不支持
+broadcast。External argument 由只读 input 和唯一只写 output 组成，中间 tensor 可为
+virtual。
 
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
 override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
 rank，dimension 为正且不超过编译上界；stride 为正并满足当前支持的不重叠条件，
 计算所得 storage span 不能超过编译 byte bound。应用 partial override 后，所有
-pointwise argument dimension 必须仍完全相同。因此缩小 shape 时通常要覆盖全部
-argument；空 list 按编译最大 shape 执行。
+external argument dimension 必须仍完全相同。因此缩小 shape 时通常要覆盖全部
+external argument；空 list 按编译最大 shape 执行。Virtual UID 不是公开 argument，
+不能被调用者 override。
 
 编译器仅对该 policy 生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
 loop bound。runtime descriptor 将解析后的值传给进程内对象和 artifact-loaded
-对象，alias 检查使用本次解析出的 byte span。workspace 保持静态上界，override
-workspace query 与 execute 使用同一套校验。Artifact format `3` 至 `5` 都记录两个
-context flag 和 policy；v1/v2 reader 默认全部关闭。
+对象。每个 virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
+规划的 workspace 上建立内部 packed view。Alias 检查使用本次解析出的 external byte
+span。workspace 保持静态上界，override workspace query 与 execute 使用同一套校验。
+Artifact format `3` 至 `5` 都记录两个 context flag 和 policy；v1/v2 reader 默认全部
+关闭。
 
 该 graph-level override-array 机制与 3.1 节 serialized MATMUL extent-override
 tensor 端口相互独立。

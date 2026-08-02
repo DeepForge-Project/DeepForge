@@ -325,10 +325,11 @@ ABI is unchanged.
 
 `is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
 persisted independently. The dynamic flag alone is plan metadata and does not
-alter a static kernel descriptor. Enabling override currently requires exactly
-one `POINTWISE` node. Every input and output must be an external, non-ragged,
-non-reordered, non-pass-by-value FLOAT tensor with the same compiled dimensions;
-broadcasting and virtual workspace are excluded.
+alter a static kernel descriptor. Enabling override requires a nonempty ordered
+DAG containing only `POINTWISE` nodes. Every used tensor must be non-ragged,
+non-reordered, non-pass-by-value FLOAT with the same compiled dimensions, so
+broadcasting is excluded. External arguments consist of read-only inputs and
+one write-only output; intermediate tensors may be virtual.
 
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
@@ -336,13 +337,16 @@ external argument UIDs. Each supplied shape preserves rank, has positive
 dimensions no larger than its compiled maxima, and uses positive strides that
 satisfy the supported non-overlap condition. Its computed storage span must
 not exceed the compiled byte bound. After applying partial overrides, every
-pointwise argument must still have exactly the same dimensions. Consequently,
-a shrinking call normally overrides all arguments; an empty list executes the
-compiled maximum shape.
+external argument must still have exactly the same dimensions. Consequently, a
+shrinking call normally overrides all external arguments; an empty list
+executes the compiled maximum shape. Virtual UIDs are not public arguments and
+cannot be overridden.
 
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
 loop bounds only for this policy. Runtime descriptors carry the resolved values
-to both in-process and artifact-loaded objects. Alias checks use the resolved
+to both in-process and artifact-loaded objects. Each virtual intermediate uses
+the common runtime dimensions and an internal packed view over workspace sized
+for its serialized maximum descriptor. Alias checks use the resolved external
 byte spans. Workspace remains statically bounded, and the override workspace
 query performs the same validation as execution. Artifact formats `3` through
 `5` record both context flags and policy; the v1/v2 readers default them to

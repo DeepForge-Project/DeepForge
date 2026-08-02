@@ -1077,23 +1077,7 @@ Status validate_shape_override_subset(SerializedGraph const& graph) {
     if (!graph.context.is_override_shape_enabled.value_or(false)) {
         return Status::ok();
     }
-    if (graph.nodes.size() != 1 ||
-        graph.nodes.front().tag != OperationTag::kPointwise) {
-        return unsupported(
-            "context.is_override_shape_enabled",
-            "C6 runtime overrides currently require one POINTWISE node");
-    }
-    auto const* operation =
-        std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
-    if (operation == nullptr || !operation->outputs.contains("OUT_0")) {
-        return fail(ErrorCode::kInvalidValue, "nodes[0]",
-                    "POINTWISE attributes are malformed");
-    }
-    auto const* output = graph.find_tensor(operation->outputs.at("OUT_0"));
-    if (output == nullptr) {
-        return fail(ErrorCode::kMissingUid, "nodes[0].outputs.OUT_0",
-                    "tensor reference is unresolved");
-    }
+    std::optional<std::vector<std::int64_t>> maximum_dimensions;
     auto check = [&](TensorReference const& reference,
                      std::string const& path) -> Status {
         auto const* tensor = graph.find_tensor(reference);
@@ -1101,35 +1085,46 @@ Status validate_shape_override_subset(SerializedGraph const& graph) {
             return fail(ErrorCode::kMissingUid, path,
                         "tensor reference is unresolved");
         }
-        if (tensor->is_virtual || tensor->is_pass_by_value ||
-            tensor->pass_by_value ||
+        if (tensor->is_pass_by_value || tensor->pass_by_value ||
             tensor->data_type != import::DataType::kFloat32 ||
             tensor->reordering_type != "NONE" || tensor->ragged_offset_uid ||
             tensor->ragged_offset_name) {
             return unsupported(
                 path,
-                "runtime pointwise overrides require external plain f32 tensors");
+                "runtime pointwise overrides require plain f32 tensors");
         }
-        if (tensor->dim != output->dim) {
+        if (!maximum_dimensions) {
+            maximum_dimensions = tensor->dim;
+        } else if (tensor->dim != *maximum_dimensions) {
             return unsupported(
                 path,
                 "runtime pointwise overrides require exact equal shapes without broadcasting");
         }
         return Status::ok();
     };
-    for (auto const& [port, reference] : operation->inputs) {
-        auto status = check(reference, "nodes[0].inputs." + port);
-        if (status.is_bad()) return status;
-    }
-    auto status = check(operation->outputs.at("OUT_0"),
-                        "nodes[0].outputs.OUT_0");
-    if (status.is_bad()) return status;
-    if (std::any_of(graph.tensors.begin(), graph.tensors.end(),
-                    [](auto const& entry) {
-                        return entry.second.is_virtual;
-                    })) {
-        return unsupported("tensors",
-                           "runtime pointwise overrides do not use virtual workspace");
+    for (std::size_t node_index = 0; node_index < graph.nodes.size();
+         ++node_index) {
+        auto const& node = graph.nodes[node_index];
+        auto const node_path = "nodes[" + std::to_string(node_index) + "]";
+        if (node.tag != OperationTag::kPointwise) {
+            return unsupported(
+                node_path,
+                "runtime shape overrides require a POINTWISE-only graph");
+        }
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&node.attributes);
+        if (operation == nullptr || !operation->outputs.contains("OUT_0")) {
+            return fail(ErrorCode::kInvalidValue, node_path,
+                        "POINTWISE attributes are malformed");
+        }
+        for (auto const& [port, reference] : operation->inputs) {
+            auto status = check(reference, node_path + ".inputs." + port);
+            if (status.is_bad()) return status;
+        }
+        for (auto const& [port, reference] : operation->outputs) {
+            auto status = check(reference, node_path + ".outputs." + port);
+            if (status.is_bad()) return status;
+        }
     }
     return Status::ok();
 }
@@ -2918,9 +2913,36 @@ Status build_module(::mlir::MLIRContext& context,
         auto storage = ::mlir::memref::ViewOp::create(
             builder, location, storage_type, workspace_value, byte_shift,
             ::mlir::ValueRange{});
-        auto view = ::mlir::memref::ReinterpretCastOp::create(
-            builder, location, tensor_type(context, tensor), storage, 0,
-            tensor.dim, tensor.stride);
+        ::mlir::Value view;
+        if (metadata.override_shape_enabled) {
+            auto extent_source = entry->getArgument(0);
+            llvm::SmallVector<::mlir::Value> dynamic_sizes;
+            dynamic_sizes.reserve(tensor.dim.size());
+            for (std::size_t axis = 0; axis < tensor.dim.size(); ++axis) {
+                dynamic_sizes.push_back(::mlir::memref::DimOp::create(
+                    builder, location, extent_source,
+                    index_constant(builder, location,
+                                   static_cast<std::int64_t>(axis))));
+            }
+            llvm::SmallVector<::mlir::Value> packed_strides(tensor.dim.size());
+            auto stride = index_constant(builder, location, 1);
+            for (std::size_t axis = tensor.dim.size(); axis > 0; --axis) {
+                packed_strides[axis - 1] = stride;
+                stride = ::mlir::arith::MulIOp::create(
+                    builder, location, stride, dynamic_sizes[axis - 1]);
+            }
+            llvm::SmallVector<::mlir::OpFoldResult> size_operands(
+                dynamic_sizes.begin(), dynamic_sizes.end());
+            llvm::SmallVector<::mlir::OpFoldResult> stride_operands(
+                packed_strides.begin(), packed_strides.end());
+            view = ::mlir::memref::ReinterpretCastOp::create(
+                builder, location, tensor_type(context, tensor, true), storage,
+                builder.getIndexAttr(0), size_operands, stride_operands);
+        } else {
+            view = ::mlir::memref::ReinterpretCastOp::create(
+                builder, location, tensor_type(context, tensor), storage, 0,
+                tensor.dim, tensor.stride);
+        }
         values.emplace(uid, view);
     }
 

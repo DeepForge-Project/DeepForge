@@ -209,6 +209,55 @@ Json dynamic_pointwise_graph() {
     return document;
 }
 
+Json dynamic_pointwise_chain_graph() {
+    auto pointwise = [](std::string name, std::string mode, Json inputs,
+                        std::int64_t output) {
+        return Json{{"tag", "POINTWISE"},
+                    {"name", std::move(name)},
+                    {"inputs", std::move(inputs)},
+                    {"outputs", Json::object({{"OUT_0", output}})},
+                    {"compute_data_type", "FLOAT"},
+                    {"mode", std::move(mode)},
+                    {"axis", nullptr},
+                    {"relu_lower_clip", 0.0},
+                    {"relu_upper_clip", 1000.0},
+                    {"relu_lower_clip_slope", 0.0},
+                    {"swish_beta", nullptr},
+                    {"elu_alpha", nullptr},
+                    {"softplus_beta", nullptr}};
+    };
+    auto add = pointwise(
+        "dynamic_add_to_virtual", "ADD",
+        Json::object({{"IN_0", 201}, {"IN_1", 202}}), 204);
+    auto relu = pointwise("dynamic_relu_to_virtual", "RELU_FWD",
+                          Json::object({{"IN_0", 204}}), 205);
+    auto multiply = pointwise(
+        "dynamic_multiply_to_output", "MUL",
+        Json::object({{"IN_0", 205}, {"IN_1", 203}}), 206);
+    return Json{
+        {"context",
+         Json{{"name", "dynamic_pointwise_chain"},
+              {"compute_data_type", "FLOAT"},
+              {"intermediate_data_type", "FLOAT"},
+              {"io_data_type", "FLOAT"},
+              {"sm_count", -1},
+              {"is_dynamic_shape_enabled", true},
+              {"is_override_shape_enabled", true}}},
+        {"graph_uid", 2004},
+        {"json_version", "1.0"},
+        {"cudnn_backend_version", "cpu-test"},
+        {"cudnn_frontend_version", 12400},
+        {"nodes", Json::array({add, relu, multiply})},
+        {"tensors",
+         Json::object(
+             {{"201", tensor("A", 201, {4, 5}, {5, 1}, false)},
+              {"202", tensor("B", 202, {4, 5}, {5, 1}, false)},
+              {"203", tensor("C", 203, {4, 5}, {5, 1}, false)},
+              {"204", tensor("Add", 204, {4, 5}, {5, 1}, true)},
+              {"205", tensor("Relu", 205, {4, 5}, {5, 1}, true)},
+              {"206", tensor("Y", 206, {4, 5}, {5, 1}, false)}})}};
+}
+
 deepforge::import::Status parse_graph(
     Json const& document,
     deepforge::import::SerializedGraph& graph) {
@@ -607,6 +656,140 @@ int main() {
         tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
                     "override storage cannot exceed the compiled byte bound");
     }
+
+    deepforge::import::SerializedGraph dynamic_chain;
+    status = parse_graph(dynamic_pointwise_chain_graph(), dynamic_chain);
+    tests.good(status, "parse dynamic multi-node pointwise graph");
+    deepforge::compiler::CompilationResult dynamic_chain_compilation;
+    status = deepforge::compiler::compile_graph(
+        dynamic_chain, options, dynamic_chain_compilation);
+    tests.good(status, "compile dynamic multi-node pointwise graph");
+    if (status.is_good() && dynamic_chain_compilation.executable) {
+        auto const workspace_size =
+            dynamic_chain_compilation.executable->get_workspace_size();
+        tests.check(
+            dynamic_chain_compilation.metadata.arguments.size() == 4 &&
+                dynamic_chain_compilation.workspace.allocations.size() == 2 &&
+                workspace_size >= 160 &&
+                dynamic_chain_compilation.imported_mlir.find(
+                    "memref.reinterpret_cast") != std::string::npos,
+            "dynamic virtual tensors use bounded workspace views");
+
+        std::vector<float> chain_a(20, -77.0F);
+        std::vector<float> chain_b(20, -88.0F);
+        std::vector<float> chain_c(20, -66.0F);
+        std::vector<float> chain_y(20, -99.0F);
+        for (std::size_t row = 0; row < 2; ++row) {
+            for (std::size_t column = 0; column < 3; ++column) {
+                auto const offset = row * 4 + column;
+                chain_a[offset] = static_cast<float>(3 * row + column) - 4.0F;
+                chain_b[offset] = static_cast<float>(row + column);
+                chain_c[offset] = static_cast<float>(column + 1);
+            }
+        }
+        deepforge::runtime::VariantPack chain_pack{
+            {201, chain_a.data()},
+            {202, chain_b.data()},
+            {203, chain_c.data()},
+            {206, chain_y.data()}};
+        deepforge::runtime::OverrideUids chain_override_uids{201, 202, 203,
+                                                             206};
+        deepforge::runtime::OverrideShapes chain_override_shapes(
+            4, std::vector<std::int64_t>{2, 3});
+        deepforge::runtime::OverrideStrides chain_override_strides(
+            4, std::vector<std::int64_t>{4, 1});
+        AlignedBytes chain_workspace(static_cast<std::size_t>(workspace_size));
+        std::int64_t queried_workspace_size = -1;
+        status = dynamic_chain_compilation.executable->get_workspace_size(
+            nullptr, queried_workspace_size, chain_override_uids,
+            chain_override_shapes, chain_override_strides);
+        tests.check(status.is_good() &&
+                        queried_workspace_size == workspace_size,
+                    "dynamic pointwise chain keeps a maximum workspace bound");
+        status = dynamic_chain_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, chain_pack,
+            chain_workspace.pointer, chain_override_uids,
+            chain_override_shapes, chain_override_strides);
+        tests.good(status, "execute dynamic multi-node pointwise graph");
+        bool chain_matches = true;
+        for (std::size_t row = 0; row < 2; ++row) {
+            for (std::size_t column = 0; column < 3; ++column) {
+                auto const offset = row * 4 + column;
+                auto const expected =
+                    std::max(chain_a[offset] + chain_b[offset], 0.0F) *
+                    chain_c[offset];
+                chain_matches = chain_matches &&
+                                std::fabs(chain_y[offset] - expected) < 1.0e-6F;
+            }
+        }
+        chain_matches = chain_matches && chain_y[3] == -99.0F &&
+                        chain_y[7] == -99.0F && chain_y[8] == -99.0F;
+        tests.check(chain_matches,
+                    "dynamic virtual shapes propagate through the pointwise DAG");
+
+        std::vector<std::uint8_t> chain_artifact;
+        status = deepforge::compiler::serialize_artifact(
+            dynamic_chain_compilation, chain_artifact);
+        tests.good(status, "serialize dynamic pointwise-chain artifact");
+        std::unique_ptr<deepforge::runtime::Executable> chain_loaded;
+        status = deepforge::compiler::load_artifact_executable(
+            chain_artifact, chain_loaded);
+        tests.good(status, "load dynamic pointwise-chain artifact");
+        if (chain_loaded) {
+            std::fill(chain_y.begin(), chain_y.end(), -99.0F);
+            status = chain_loaded->execute(
+                nullptr, chain_pack, chain_workspace.pointer,
+                chain_override_uids, chain_override_shapes,
+                chain_override_strides);
+            tests.good(status, "execute loaded dynamic pointwise-chain artifact");
+            tests.check(chain_y[0] == 0.0F && chain_y[6] == 12.0F &&
+                            chain_y[7] == -99.0F,
+                        "loaded pointwise-chain artifact propagates descriptors");
+        }
+        for (std::size_t index = 0; index < chain_a.size(); ++index) {
+            chain_a[index] = static_cast<float>(index) - 8.0F;
+            chain_b[index] = 1.0F;
+            chain_c[index] = 2.0F;
+        }
+        std::fill(chain_y.begin(), chain_y.end(), -99.0F);
+        status = dynamic_chain_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, chain_pack,
+            chain_workspace.pointer);
+        tests.good(status,
+                   "execute dynamic pointwise chain at compiled maximum shape");
+        bool maximum_chain_matches = true;
+        for (std::size_t index = 0; index < chain_y.size(); ++index) {
+            auto const expected =
+                std::max(chain_a[index] + chain_b[index], 0.0F) *
+                chain_c[index];
+            maximum_chain_matches = maximum_chain_matches &&
+                                    chain_y[index] == expected;
+        }
+        tests.check(maximum_chain_matches,
+                    "empty overrides propagate maximum virtual dimensions");
+        status = dynamic_chain_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, chain_pack,
+            chain_workspace.pointer, {204}, {{2, 3}}, {{3, 1}});
+        tests.check(
+            status.code() == deepforge::import::ErrorCode::kInvalidVariantPack,
+            "callers cannot override an internal virtual tensor UID");
+    }
+
+    auto mismatched_virtual = dynamic_pointwise_chain_graph();
+    mismatched_virtual["tensors"]["204"]["dim"] = Json::array({4, 4});
+    mismatched_virtual["tensors"]["204"]["stride"] = Json::array({4, 1});
+    status = compile_document(mismatched_virtual);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "dynamic virtual tensors must share the external maximum shape");
+
+    auto mixed_override = dynamic_pointwise_chain_graph();
+    mixed_override["nodes"][2] =
+        reshape_node("override_reshape", 205, 206, {4, 5}, {5, 1});
+    status = compile_document(mixed_override);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "shape override rejects mixed pointwise and transform graphs");
 
     auto broadcast_override = dynamic_pointwise_graph();
     broadcast_override["tensors"]["102"]["dim"] = Json::array({1, 5});

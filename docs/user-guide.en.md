@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; one exact-shape f32 `POINTWISE` subset supports shape override arrays, and MATMUL supports extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; an exact-shape f32 `POINTWISE`-only DAG subset supports shape override arrays, and MATMUL supports extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -270,8 +270,12 @@ flattened leading coordinate `l`, the byte offset is:
 
 The UID map must point to the full padded physical byte span. Block-scale
 quantize writes logical scale coordinates and initializes every padding slot
-to numeric one: E4M3 `0x38` or E8M0 `0x7f`. `F8_128x4` on data tensors or undocumented ports, and
-the `INT8x32` and `F16x16` reorder formats, remain unsupported.
+to numeric one: E4M3 `0x38` or E8M0 `0x7f`. `F8_128x4` on data tensors or
+undocumented ports remains unsupported. `INT8x32` and `F16x16` are recognized
+but non-executable: pinned v1.24.0 has no modern serialized-Graph producer path
+that defines both a reachable operation port and its physical address mapping.
+Support requires that producer contract and a generated fixture rather than an
+inferred layout.
 
 SDPA uses rank-4 BHSD tensors. `SEQ_LEN_Q` and `SEQ_LEN_KV` are INT32
 `[B,1,1,1]`; probability dropout and dynamic RNG use one-element INT64 `Seed`
@@ -418,12 +422,13 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
-For a graph serialized with `is_override_shape_enabled=true`, the currently
-executable dynamic subset is exactly one `POINTWISE` node whose inputs and
-output are external, plain FLOAT tensors with identical compiled shapes. It
-does not allow broadcasting, virtual tensors, ragged offsets, or reordering.
-Compiled dimensions and byte spans are maxima. Supply the same Frontend
-v1.24.0 override arrays to workspace query and execution:
+For a graph serialized with `is_override_shape_enabled=true`, the executable
+dynamic subset is an ordered DAG containing only `POINTWISE` nodes. Every used
+tensor is plain FLOAT with the same compiled maximum shape; broadcasting,
+pass-by-value, ragged offsets, and reordering are excluded. Inputs and the one
+external output use the public UID map. Intermediate values may be virtual and
+use compiler-planned workspace. Supply the same Frontend v1.24.0 override
+arrays to workspace query and execution:
 
 ```cpp
 deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, y_uid};
@@ -448,8 +453,11 @@ Each shape must preserve rank, use positive dimensions no larger than the
 serialized maxima, and pair with positive, supported non-overlapping strides
 whose storage span fits the compiled byte bound. All final pointwise argument
 shapes must remain equal; a shrinking call therefore normally overrides every
-argument. An empty list executes the compiled maximum shape. The workspace
-query validates the same rules and is statically bounded for this subset.
+external argument. Virtual UIDs never appear in the override arrays. Their
+runtime shapes are propagated from the equal external shape and their packed
+views stay within workspace allocated for the serialized maxima. An empty list
+executes the compiled maximum shape. The workspace query validates the same
+rules and returns that static maximum workspace bound.
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static.
 

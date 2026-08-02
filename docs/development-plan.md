@@ -444,9 +444,18 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     value，不引入 artifact v6。Pointwise 不可覆盖性、artifact reload、normalization
     epsilon、INT64 RNG seed/offset、FP8 MATMUL control、错误 metadata、Release、ASan
     和 UBSan 覆盖该增量。
+17. 已完成：C6.9 多节点 exact-shape pointwise override。无 broadcast 的 plain-f32
+    纯 `POINTWISE` DAG 可将同一个 runtime shape 传播给 virtual 中间值；内部 packed
+    view 使用按序列化最大值分配的 workspace，virtual UID 不进入公开 override ABI。
+    Dynamic 执行、artifact reload、错误 graph/UID、Release、ASan 和 UBSan 覆盖该
+    增量，且不改变 artifact version。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为、上述 scale 子集以外的 reorder
-format。固定使用的 v1.24.0 serializer 无法表达 paged backward，该能力仅作为未来
+剩余 C6 功能工作是该 exact-shape pointwise 子集之外的 dynamic 行为。除 enum 转换
+外，固定 v1.24.0 中的 `F16x16` 只有 attribute round-trip 覆盖，可执行 `INT8x32`
+helper 只存在于 legacy backend/filter 路径；两者都没有可达的现代 serialized Graph
+port 加物理映射。它们是等待 producer 契约和生成 fixture 的兼容 gate，不应在本项目
+内推测布局。固定使用的
+v1.24.0 serializer 无法表达 paged backward，该能力仅作为未来
 schema 版本的兼容工作跟踪。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
 baseline policy 逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

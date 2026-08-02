@@ -222,8 +222,8 @@ non-packed strides, physical NCHW layout, grouped or depthwise convolution, and
 a GPU backend. Post-MVP C2-C5 independently added arbitrary positive strides,
 grouped convolution, bf16 on specialized ports, and the capability subsets in
 the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
-documented block/MXFP8 ports and runtime override for one exact-shape external
-f32 `POINTWISE` node. Standard and FP8 MATMUL also accept producer-serialized
+documented block/MXFP8 ports and runtime override for an exact-shape f32
+`POINTWISE`-only DAG with virtual intermediates. Standard and FP8 MATMUL also accept producer-serialized
 per-batch INT32 M/N/K extent tensors while retaining static allocation maxima.
 Runtime scalar pass-by-value inputs are accepted as external, input-only,
 all-one tensors whose host pointer is supplied by ordinary UID. Embedded/fused
@@ -233,8 +233,10 @@ private globals, disappear from public arguments, and persist in the existing
 artifact objects.
 Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
-tables, forward block masks, and forward/backward sink tokens. Broader dynamic
-behavior, other physical reorder metadata, threading, and broad fusion remain.
+tables, forward block masks, and forward/backward sink tokens. Dynamic behavior
+outside that pointwise subset, threading, and broad fusion remain. `INT8x32`
+and `F16x16` stay non-executable until a modern serialized-Graph producer defines
+both a reachable port and physical mapping.
 Paged backward cannot be represented by the pinned v1.24.0 serializer and is
 therefore future schema-version compatibility work.
 

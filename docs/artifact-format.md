@@ -115,9 +115,11 @@ v5 无需新增 metadata section 即可 reload graph-owned value。Reader 不得
 单元素 argument 推断任一 pass-by-value 形式。
 
 版本 `3` 将执行 shape 意图与 argument 的编译最大 shape/byte span 分开记录。policy
-`1` 表示 object 为 exact-shape pointwise override 子集生成了 dynamic memref
-descriptor 和 runtime loop bound；runtime 在调用前仍会验证每个 override。过渡期
-Conv adapter 拒绝所有 dynamic/override metadata。
+`1` 表示 object 为 exact-shape pointwise-DAG override 子集生成了 dynamic memref
+descriptor 和 runtime loop bound。Virtual 中间值不进入公开 argument table；object
+code 从公共 external runtime shape 派生其动态 packed workspace view。Runtime 在调用
+前仍会验证每个 external override。过渡期 Conv adapter 拒绝所有 dynamic/override
+metadata。
 
 版本 `4` 增加 argument storage policy。Ragged argument 记录
 `[B+1,1,1,1]` INT32/INT64 element-prefix tensor UID 和 `[B,1,1,1]` INT32

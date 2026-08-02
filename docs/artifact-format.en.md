@@ -128,9 +128,11 @@ infer either form from an unrelated ordinary one-element argument.
 Version `3` records execution-shape intent separately from each argument's
 compiled maximum shape and byte span. Policy `1` means the object contains
 dynamic memref descriptors and runtime loop bounds for the exact-shape
-pointwise override subset. The runtime still validates every override before
-invocation. The transitional Conv adapter rejects all dynamic and override
-metadata.
+pointwise-DAG override subset. Virtual intermediates are absent from the public
+argument table; object code derives their dynamic packed workspace views from
+the common external runtime shape. The runtime still validates every external
+override before invocation. The transitional Conv adapter rejects all dynamic
+and override metadata.
 
 Version `4` adds an argument storage policy. A ragged argument records the UID
 of its `[B+1,1,1,1]` INT32/INT64 element-prefix tensor and the UID of its

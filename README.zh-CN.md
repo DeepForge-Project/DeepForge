@@ -317,7 +317,7 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：`F8_128x4`、exact-pointwise shape override、MATMUL M/N/K extent override、runtime/embedded scalar pass-by-value、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
+| C6 | 进行中：`F8_128x4`、多节点 exact-pointwise DAG shape override、MATMUL M/N/K extent override、runtime/embedded scalar pass-by-value、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余该 pointwise 子集之外的 dynamic 行为 |
 | Optimize | 进行中：target-aware K-output unroll 已完成；外层 tiling、padding fusion、并行化继续由 benchmark 驱动 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

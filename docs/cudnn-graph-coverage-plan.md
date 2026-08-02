@@ -261,12 +261,18 @@ descriptor、Release、ASan 和 UBSan 覆盖该增量。
 tensor 一一对应校验、graph-owned private global、公开 argument 排除和现有 artifact
 object 持久化。Pointwise 不可覆盖性/reload、normalization epsilon、INT64 RNG
 control、FP8 MATMUL control、错误 metadata、Release、ASan 和 UBSan 构成验收集。
+第九个将 exact-shape runtime override 扩展为 plain-f32 纯 `POINTWISE` DAG。Virtual
+中间值使用序列化最大值限定的 workspace 内动态 shape packed view，不进入公开
+override array。多节点执行、artifact reload、错误 graph/UID、Release、ASan 和
+UBSan 构成验收集。
 
-**工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；加入已交付
-scale 子集外的 reorder format；随后独立评估 fusion、threading、其他 vector
-schedule 和各操作族 cost model。固定使用的 v1.24.0 serializer 没有 paged backward
-page-table 端口，因此该能力属于未来 schema 版本的兼容工作，不是当前契约下的实现
-任务。
+**工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；随后独立评估
+fusion、threading、其他 vector schedule 和各操作族 cost model。
+除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
+`INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成
+fixture，而不是推测实现。固定使用的
+v1.24.0 serializer 没有 paged backward page-table 端口，因此该能力属于未来 schema
+版本的兼容工作，不是当前契约下的实现任务。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能

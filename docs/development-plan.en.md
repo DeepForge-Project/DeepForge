@@ -491,9 +491,20 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     target objects without artifact v6. Pointwise non-overrideability, artifact
     reload, normalization epsilon, INT64 RNG seed/offset, FP8 MATMUL controls,
     malformed metadata, Release, ASan, and UBSan cover the increment.
+17. Completed C6.9 multi-node exact-shape pointwise override. A non-broadcasting
+    plain-f32 `POINTWISE`-only DAG may propagate one common runtime shape through
+    virtual intermediates. Internal packed views use workspace allocated for the
+    serialized maxima; virtual UIDs remain absent from the public override ABI.
+    Dynamic execution, artifact reload, malformed graph/UID cases, Release,
+    ASan, and UBSan cover the increment without an artifact-version change.
 
-The remaining C6 functional work is broader dynamic behavior and reorder
-formats outside that scale subset. Paged backward is not representable by the
+The remaining C6 functional work is dynamic behavior outside that exact-shape
+pointwise subset. Beyond enum conversion, `F16x16` has only attribute round-trip
+coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to
+the legacy backend/filter path; neither has a reachable modern serialized-Graph
+port plus physical mapping. They are
+compatibility gates awaiting a producer contract and generated fixture, not
+layouts to infer locally. Paged backward is not representable by the
 pinned v1.24.0 serializer and is tracked only as future schema-version
 compatibility work. Further benchmark-driven
 optimization remains owned by the Loop/Schedule layer: evaluate outer tiling,

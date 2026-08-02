@@ -227,7 +227,12 @@ in either order, with M divisible by 128, K divisible by 4, K stride 1, M
 stride K, and packed leading axes. This layout is enabled only for E4M3/E8M0
 scale input/output ports of block-scale conversion and for E8M0 MXFP8
 `Descale_*` inputs.
-Other ports and the `INT8x32`/`F16x16` reorder formats are rejected.
+Other ports and the `INT8x32`/`F16x16` reorder formats are rejected. Beyond
+enum/string conversion plumbing in pinned v1.24.0, `F16x16` is exercised only
+by attribute serialization round trips, while executable `INT8x32` sample and
+reorder-helper usage is confined to the legacy backend/filter path. Neither has
+a reachable modern serialized-Graph operation port with a defined physical
+address mapping, so DeepForge does not infer one from the enum name.
 FP8/MXFP8 attention rejects padding, dropout, ALiBi, block masks, sink tokens,
 and unlisted optional ports. Windowed forms that could produce fully masked
 rows are rejected. Backward consumes the supplied log-sum-exp `Stats`.
@@ -293,20 +298,23 @@ stream and is not claimed to reproduce cuDNN's GPU Philox bits.
 Comparison, logical, and `GEN_INDEX` pointwise results remain f32 `0`/`1` or
 f32 indices. C2-C6 operations can be mixed in one ordered DAG when every
 connecting port accepts the tensor type. C6 accepts both dynamic context flags.
-Runtime shape override is executable only for one non-broadcasting `POINTWISE`
-node whose arguments are external plain f32 tensors with equal compiled
-dimensions. Those dimensions are maxima; runtime dimensions must be positive
-and no larger, runtime strides must satisfy the supported positive non-overlap
-condition, and each storage span must fit its compiled bound. The dynamic flag
-alone is persisted without changing static descriptor semantics. Independently,
+Runtime shape override is executable for a non-broadcasting, `POINTWISE`-only
+ordered DAG whose used tensors are plain f32 with equal compiled dimensions.
+External arguments are read-only inputs plus one write-only output; virtual
+intermediates receive the common runtime shape through statically bounded packed
+workspace views. Compiled dimensions are maxima; runtime dimensions must be
+positive and no larger, runtime strides must satisfy the supported positive
+non-overlap condition, and each external storage span must fit its compiled
+bound. The dynamic flag alone is persisted without changing static descriptor
+semantics. Independently,
 MATMUL and MATMUL_FP8 accept optional external plain INT32 M/N/K inputs whose
 rank matches C, whose trailing dimensions are `[1,1]`, and whose batch
 dimensions broadcast to C. Values select the output and reduction extents
 within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
-ragged tensors outside the documented
-standard-f32 SDPA subset, and physical reorder handling outside the documented
-`F8_128x4` scale subset are deferred. New artifacts use format v5 for ragged
+ragged tensors outside the documented standard-f32 SDPA subset, and physical
+reorder contracts not emitted by the pinned modern Graph producer are deferred.
+New artifacts use format v5 for ragged
 storage references and logical-sequence divisors; v1-v4 remain readable, with
 v4 divisors defaulted to one.
 

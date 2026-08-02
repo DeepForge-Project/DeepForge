@@ -381,7 +381,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, exact-pointwise shape override, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
+| C6 | In progress: `F8_128x4`, multi-node exact-pointwise DAG shape override, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; dynamic behavior outside that pointwise subset remains |
 | Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

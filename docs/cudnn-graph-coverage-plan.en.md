@@ -288,13 +288,22 @@ globals, public-argument exclusion, and persistence in existing artifact
 objects. Pointwise non-overrideability and reload, normalization epsilon,
 INT64 RNG controls, FP8 MATMUL controls, malformed metadata, Release, ASan, and
 UBSan form its acceptance set.
+The ninth expands exact-shape runtime override to a plain-f32 `POINTWISE`-only
+DAG. Virtual intermediates use dynamically shaped packed views inside a
+workspace bounded by serialized maxima; they do not enter the public override
+arrays. Multi-node execution, artifact reload, malformed graph/UID cases,
+Release, ASan, and UBSan form its acceptance set.
 
 **Work:** expand dynamic behavior beyond the delivered pointwise and MATMUL
-subsets; add reorder formats outside the delivered scale subset; then evaluate
-fusion, threading, additional vector schedules, and family-specific cost models
-independently. The pinned v1.24.0 serializer exposes no paged-backward
-page-table ports, so that capability is compatibility work for a future schema
-version rather than an implementation task under the current contract.
+subsets; then evaluate fusion, threading, additional vector schedules, and
+family-specific cost models
+independently. Beyond enum conversion, `F16x16` has no executable producer
+mapping in pinned v1.24.0, and executable `INT8x32` helper usage is legacy
+backend-only; both await a modern producer contract and generated fixture
+instead of an inferred implementation. The pinned v1.24.0
+serializer exposes no paged-backward page-table ports, so that capability is
+compatibility work for a future schema version rather than an implementation
+task under the current contract.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within

@@ -14,7 +14,7 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；一个 exact-shape f32 `POINTWISE` 子集支持 shape override array，MATMUL 支持 extent-override tensor 端口 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG 子集支持 shape override array，MATMUL 支持 extent-override tensor 端口 |
 | 通用 Tensor | rank 1-64 f32 data、显式 UID；allocation 仍为静态；文档指定的 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；文档指定的标准 f32 SDPA tensor 可使用 ragged batch-prefix storage；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
@@ -250,8 +250,10 @@ M padding 到 128 的倍数，K padding 到 4 的倍数；K axis stride 为 1，
 UID map 必须提供覆盖完整 padded 物理 byte span 的 pointer。Block-scale quantize
 写入逻辑 scale coordinate，并将全部 padding slot 初始化为数值 one：E4M3 为
 `0x38`，E8M0 为 `0x7f`。
-data tensor 或未声明端口上的 `F8_128x4`，以及 `INT8x32`、`F16x16` reorder format
-仍不支持。
+data tensor 或未声明端口上的 `F8_128x4` 仍不支持。`INT8x32`、`F16x16` 可识别但
+不可执行：固定的 v1.24.0 没有现代 serialized Graph producer 路径同时定义可达的
+operation port 和物理地址映射。必须先有该 producer 契约和生成 fixture，不能根据
+枚举名推测布局。
 
 SDPA 使用 rank-4 BHSD tensor。`SEQ_LEN_Q`/`SEQ_LEN_KV` 为 INT32
 `[B,1,1,1]`；probability dropout 和 dynamic RNG 使用单元素 INT64 `Seed`/`Offset`
@@ -395,11 +397,11 @@ auto status = deepforge::compiler::load_artifact_executable(
     "conv2d.dfo", executable, &info);
 ```
 
-对序列化时设置 `is_override_shape_enabled=true` 的图，当前动态执行子集精确限定为
-一个 `POINTWISE` node，且输入输出都必须是编译 shape 相同的 external plain FLOAT
-tensor；不支持 broadcast、virtual tensor、ragged offset 或 reorder。编译 dimension
-和 byte span 是上界。workspace query 与 execute 使用 Frontend v1.24.0 相同的
-override array：
+对序列化时设置 `is_override_shape_enabled=true` 的图，动态执行子集限定为只包含
+`POINTWISE` node 的有序 DAG。全部已用 tensor 必须是编译最大 shape 相同的 plain
+FLOAT；不支持 broadcast、pass-by-value、ragged offset 或 reorder。输入和唯一 external
+输出通过公开 UID map 提供，中间值可为 virtual 并使用编译器规划的 workspace。
+workspace query 与 execute 使用 Frontend v1.24.0 相同的 override array：
 
 ```cpp
 deepforge::runtime::OverrideUids override_uids{a_uid, b_uid, y_uid};
@@ -422,9 +424,11 @@ if (status.is_good()) {
 三个 override array 的数量必须相同，UID 必须唯一且属于 external argument。每个
 shape 必须保持 rank，dimension 为正且不超过序列化上界；stride 必须为正、满足当前
 支持的不重叠条件，storage span 不能超过编译 byte bound。最终所有 pointwise
-argument shape 必须仍相同，因此缩小 shape 时通常要覆盖全部 argument。空 override
-list 按编译最大 shape 执行。workspace query 执行相同校验，且当前子集的 workspace
-仍是静态上界。仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，
+external argument shape 必须仍相同，因此缩小 shape 时通常要覆盖全部 external
+argument。Virtual UID 不出现在 override array 中；其 runtime shape 从相等的 external
+shape 传播，packed view 保持在按序列化最大 shape 分配的 workspace 内。空 override
+list 按编译最大 shape 执行。workspace query 执行相同校验并返回静态最大 workspace
+上界。仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，
 该信息会写入 plan 和 `.dfo` metadata，但执行 descriptor 保持静态。
 
 MATMUL extent override 是独立的 serialized node input，不使用上面的 shape override

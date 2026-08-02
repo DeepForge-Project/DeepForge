@@ -72,9 +72,10 @@ N/OH/OW/K tiling belongs to the Optimize phase and must demonstrate a benchmark
 benefit. R/S/C are reduction dimensions; a C tile cannot be treated as a K
 vector lane.
 
-A future cost model is evaluated in the Loop/Schedule portion of the Optimize
-phase, not in the importer or runtime. It consumes target facts and produces an
-explicit schedule. The current Stage A makes no cost-model decision.
+The active cost model runs later in the Loop/Schedule portion, not in the
+importer, Stage A, or runtime. It consumes target facts and produces an explicit
+K-output unroll schedule for the optimized Conv path. Outer tiling remains
+deferred.
 
 The MVP input to `deepforge-lower-direct-conv` must remain a named
 `linalg.conv_2d_nhwc_fhwc`. Before enabling
@@ -146,11 +147,12 @@ size, or lifetime of memref allocations.
 
 ### C2. Direct Conv Lowering
 
-Consume the bufferized `linalg.conv_2d_nhwc_fhwc` directly. The canonical loop
-order is `n, oh, ow, k, r, s, c`, with one accumulator per output. This is a
-controlled C++ lowering function rather than an arbitrarily composable
-command-line pass. It accepts only the named Conv2D operation already validated
-against the support matrix.
+Consume the bufferized `linalg.conv_2d_nhwc_fhwc` directly. The logical loop
+order is `n, oh, ow, k, r, s, c`. A SIMD schedule may strip-mine K by `KU` and
+carry `KU` independent accumulators so one X load serves adjacent outputs; a
+step-one loop handles `K mod KU`. This is a controlled C++ lowering function
+rather than an arbitrarily composable command-line pass. It accepts only the
+named Conv2D operation already validated against the support matrix.
 
 ### C3. Auxiliary Linalg-to-Loops
 
@@ -161,8 +163,9 @@ static packed Conv2D body does not depend on generic-pass pattern recognition.
 ### C4. Canonicalization
 
 Run canonicalization after auxiliary loop lowering. The current MLIR pipeline
-does not explicitly unroll R/S and makes no promise about backend unrolling.
-Future unrolling must preserve the numeric contract and demonstrate a benchmark
+explicitly unrolls independent K outputs selected by the cost model, but does
+not unroll R/S and makes no promise about backend unrolling. Any additional
+unrolling must preserve the numeric contract and demonstrate a benchmark
 benefit.
 
 ### C5. `deepforge-vectorize-conv-reduction`
@@ -178,15 +181,16 @@ VF=1 : scalar variant
 The required computation is:
 
 ```text
-vacc = fma(load X[...,c_vec], load W[k,...,c_vec], vacc)
-sum  = vector.reduction(add, vacc)
-Y[...,k] = sum + scalar_tail
+x = load X[...,c_vec]
+for u in [0,KU):
+  vacc[u] = fma(x, load W[k_base+u,...,c_vec], vacc[u])
+  Y[...,k_base+u] = vector.reduction(add, vacc[u]) + scalar_tail[u]
 ```
 
-`load W[..., k_vec]` is forbidden unless a separate weight-pack pass and new
-ABI and ownership contract are introduced. The current implementation embeds
-this logic directly in AVX2 and AVX-512 direct Conv lowering. The scalar variant
-uses a dedicated scalar reduction path.
+K is not a vector lane: `vacc[u]` is a separate C-lane vector. A true
+`load W[..., k_vec]` remains forbidden unless a weight-pack pass and new ABI and
+ownership contract are introduced. The scalar variant uses a dedicated scalar
+reduction path.
 
 ## 6. Stage D: Complete LLVM Conversion
 

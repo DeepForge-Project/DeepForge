@@ -209,12 +209,15 @@ Status lower_scalar_conv(mlir::func::FuncOp function,
 
 Status lower_vector_conv(mlir::func::FuncOp function,
                          Conv2DCompileMetadata const& metadata,
-                         std::int64_t vector_width) {
+                         std::int64_t vector_width,
+                         std::int64_t output_channel_unroll) {
     llvm::SmallVector<mlir::linalg::Conv2DNhwcFhwcOp> convs;
     function.walk([&](mlir::linalg::Conv2DNhwcFhwcOp conv) {
         convs.push_back(conv);
     });
-    if (convs.size() != 1 || vector_width <= 1) {
+    if (convs.size() != 1 || vector_width <= 1 ||
+        output_channel_unroll <= 0 ||
+        output_channel_unroll > metadata.y_shape[3]) {
         return invalid_ir("expected exactly one vectorizable Conv2D operation");
     }
     auto conv = convs.front();
@@ -269,14 +272,152 @@ Status lower_vector_conv(mlir::func::FuncOp function,
     auto vector_zero = mlir::vector::BroadcastOp::create(
         builder, loc, vector_type, zero);
 
-    llvm::SmallVector<mlir::Value> outer_lbs(4, c0);
+    auto emit_output_block =
+        [&](mlir::OpBuilder& block_builder, mlir::Location block_loc,
+            mlir::Value n, mlir::Value oh, mlir::Value ow,
+            mlir::Value k_base, std::int64_t block_size) {
+            llvm::SmallVector<mlir::Value> output_channels;
+            output_channels.reserve(static_cast<std::size_t>(block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                output_channels.push_back(
+                    index == 0
+                        ? k_base
+                        : mlir::arith::AddIOp::create(
+                              block_builder, block_loc, k_base,
+                              make_index(block_builder, block_loc, index)));
+            }
+
+            llvm::SmallVector<mlir::Value> initial_values;
+            initial_values.reserve(static_cast<std::size_t>(2 * block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                initial_values.push_back(vector_zero);
+            }
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                initial_values.push_back(zero);
+            }
+
+            auto r_upper = make_index(block_builder, block_loc,
+                                      metadata.w_shape[1]);
+            auto s_upper = make_index(block_builder, block_loc,
+                                      metadata.w_shape[2]);
+            auto c_upper = make_index(block_builder, block_loc,
+                                      metadata.w_shape[3]);
+            auto c_vector_upper = make_index(
+                block_builder, block_loc,
+                (metadata.w_shape[3] / vector_width) * vector_width);
+
+            auto r_loop = mlir::scf::ForOp::create(
+                block_builder, block_loc, c0, r_upper, c1, initial_values);
+            block_builder.setInsertionPointToStart(r_loop.getBody());
+            auto s_loop = mlir::scf::ForOp::create(
+                block_builder, block_loc, c0, s_upper, c1,
+                r_loop.getRegionIterArgs());
+            block_builder.setInsertionPointToStart(s_loop.getBody());
+
+            auto r = r_loop.getInductionVar();
+            auto s = s_loop.getInductionVar();
+            auto h = mlir::arith::AddIOp::create(block_builder, block_loc, oh,
+                                                r);
+            auto w = mlir::arith::AddIOp::create(block_builder, block_loc, ow,
+                                                s);
+
+            llvm::SmallVector<mlir::Value> vector_initials;
+            vector_initials.reserve(static_cast<std::size_t>(block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                vector_initials.push_back(
+                    s_loop.getRegionIterArgs()[static_cast<std::size_t>(index)]);
+            }
+            auto c_vector_loop = mlir::scf::ForOp::create(
+                block_builder, block_loc, c0, c_vector_upper, vf,
+                vector_initials);
+            block_builder.setInsertionPointToStart(c_vector_loop.getBody());
+            auto c_vector = c_vector_loop.getInductionVar();
+            llvm::SmallVector<mlir::Value> x_indices{n, h, w, c_vector};
+            auto x_vector = mlir::vector::LoadOp::create(
+                block_builder, block_loc, vector_type, input, x_indices);
+            llvm::SmallVector<mlir::Value> next_vectors;
+            next_vectors.reserve(static_cast<std::size_t>(block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                llvm::SmallVector<mlir::Value> w_indices{
+                    output_channels[static_cast<std::size_t>(index)], r, s,
+                    c_vector};
+                auto w_vector = mlir::vector::LoadOp::create(
+                    block_builder, block_loc, vector_type, weight, w_indices);
+                next_vectors.push_back(mlir::vector::FMAOp::create(
+                    block_builder, block_loc, x_vector, w_vector,
+                    c_vector_loop.getRegionIterArgs()[
+                        static_cast<std::size_t>(index)]));
+            }
+            mlir::scf::YieldOp::create(block_builder, block_loc, next_vectors);
+
+            block_builder.setInsertionPointAfter(c_vector_loop);
+            llvm::SmallVector<mlir::Value> scalar_initials;
+            scalar_initials.reserve(static_cast<std::size_t>(block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                scalar_initials.push_back(s_loop.getRegionIterArgs()[
+                    static_cast<std::size_t>(block_size + index)]);
+            }
+            auto c_tail_loop = mlir::scf::ForOp::create(
+                block_builder, block_loc, c_vector_upper, c_upper, c1,
+                scalar_initials);
+            block_builder.setInsertionPointToStart(c_tail_loop.getBody());
+            auto c_tail = c_tail_loop.getInductionVar();
+            llvm::SmallVector<mlir::Value> x_tail_indices{n, h, w, c_tail};
+            auto x_scalar = mlir::memref::LoadOp::create(
+                block_builder, block_loc, input, x_tail_indices);
+            llvm::SmallVector<mlir::Value> next_scalars;
+            next_scalars.reserve(static_cast<std::size_t>(block_size));
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                llvm::SmallVector<mlir::Value> w_tail_indices{
+                    output_channels[static_cast<std::size_t>(index)], r, s,
+                    c_tail};
+                auto w_scalar = mlir::memref::LoadOp::create(
+                    block_builder, block_loc, weight, w_tail_indices);
+                auto product = mlir::arith::MulFOp::create(
+                    block_builder, block_loc, x_scalar, w_scalar);
+                next_scalars.push_back(mlir::arith::AddFOp::create(
+                    block_builder, block_loc,
+                    c_tail_loop.getRegionIterArgs()[
+                        static_cast<std::size_t>(index)],
+                    product));
+            }
+            mlir::scf::YieldOp::create(block_builder, block_loc, next_scalars);
+
+            block_builder.setInsertionPointToEnd(s_loop.getBody());
+            llvm::SmallVector<mlir::Value> s_results;
+            s_results.reserve(static_cast<std::size_t>(2 * block_size));
+            s_results.append(c_vector_loop.getResults().begin(),
+                             c_vector_loop.getResults().end());
+            s_results.append(c_tail_loop.getResults().begin(),
+                             c_tail_loop.getResults().end());
+            mlir::scf::YieldOp::create(block_builder, block_loc, s_results);
+            block_builder.setInsertionPointToEnd(r_loop.getBody());
+            mlir::scf::YieldOp::create(block_builder, block_loc,
+                                       s_loop.getResults());
+
+            block_builder.setInsertionPointAfter(r_loop);
+            for (std::int64_t index = 0; index < block_size; ++index) {
+                auto reduced = mlir::vector::ReductionOp::create(
+                    block_builder, block_loc,
+                    mlir::vector::CombiningKind::ADD,
+                    r_loop.getResults()[static_cast<std::size_t>(index)],
+                    r_loop.getResults()[
+                        static_cast<std::size_t>(block_size + index)]);
+                mlir::memref::StoreOp::create(
+                    block_builder, block_loc, reduced, output,
+                    llvm::SmallVector<mlir::Value>{
+                        n, oh, ow,
+                        output_channels[static_cast<std::size_t>(index)]});
+            }
+        };
+
+    llvm::SmallVector<mlir::Value> outer_lbs(3, c0);
     llvm::SmallVector<mlir::Value> outer_ubs{
         make_index(builder, loc, metadata.y_shape[0]),
         make_index(builder, loc, metadata.y_shape[1]),
         make_index(builder, loc, metadata.y_shape[2]),
-        make_index(builder, loc, metadata.y_shape[3]),
     };
-    llvm::SmallVector<mlir::Value> outer_steps(4, c1);
+    llvm::SmallVector<mlir::Value> outer_steps(3, c1);
     auto outer = mlir::scf::buildLoopNest(
         builder, loc, outer_lbs, outer_ubs, outer_steps,
         [&](mlir::OpBuilder& body_builder, mlir::Location body_loc,
@@ -284,83 +425,39 @@ Status lower_vector_conv(mlir::func::FuncOp function,
             auto n = ivs[0];
             auto oh = ivs[1];
             auto ow = ivs[2];
-            auto k = ivs[3];
-            auto r_upper = make_index(body_builder, body_loc,
-                                      metadata.w_shape[1]);
-            auto s_upper = make_index(body_builder, body_loc,
-                                      metadata.w_shape[2]);
-            auto c_upper = make_index(body_builder, body_loc,
-                                      metadata.w_shape[3]);
-            auto c_vector_upper = make_index(
-                body_builder, body_loc,
-                (metadata.w_shape[3] / vector_width) * vector_width);
+            auto k_upper = make_index(body_builder, body_loc,
+                                      metadata.y_shape[3]);
+            if (output_channel_unroll == 1) {
+                auto k_loop = mlir::scf::ForOp::create(
+                    body_builder, body_loc, c0, k_upper, c1);
+                body_builder.setInsertionPointToStart(k_loop.getBody());
+                emit_output_block(body_builder, body_loc, n, oh, ow,
+                                  k_loop.getInductionVar(), 1);
+                body_builder.setInsertionPointAfter(k_loop);
+                return;
+            }
 
-            auto r_loop = mlir::scf::ForOp::create(
-                body_builder, body_loc, c0, r_upper, c1,
-                mlir::ValueRange{vector_zero, zero});
-            body_builder.setInsertionPointToStart(r_loop.getBody());
-            auto s_loop = mlir::scf::ForOp::create(
-                body_builder, body_loc, c0, s_upper, c1,
-                r_loop.getRegionIterArgs());
-            body_builder.setInsertionPointToStart(s_loop.getBody());
+            auto const full_channel_count =
+                (metadata.y_shape[3] / output_channel_unroll) *
+                output_channel_unroll;
+            auto k_main_upper =
+                make_index(body_builder, body_loc, full_channel_count);
+            auto k_step = make_index(body_builder, body_loc,
+                                     output_channel_unroll);
+            auto k_main = mlir::scf::ForOp::create(
+                body_builder, body_loc, c0, k_main_upper, k_step);
+            body_builder.setInsertionPointToStart(k_main.getBody());
+            emit_output_block(body_builder, body_loc, n, oh, ow,
+                              k_main.getInductionVar(),
+                              output_channel_unroll);
+            body_builder.setInsertionPointAfter(k_main);
 
-            auto r = r_loop.getInductionVar();
-            auto s = s_loop.getInductionVar();
-            auto h = mlir::arith::AddIOp::create(body_builder, body_loc, oh, r);
-            auto w = mlir::arith::AddIOp::create(body_builder, body_loc, ow, s);
-
-            auto c_vector_loop = mlir::scf::ForOp::create(
-                body_builder, body_loc, c0, c_vector_upper, vf,
-                mlir::ValueRange{s_loop.getRegionIterArgs()[0]});
-            body_builder.setInsertionPointToStart(c_vector_loop.getBody());
-            auto c_vector = c_vector_loop.getInductionVar();
-            llvm::SmallVector<mlir::Value> x_indices{n, h, w, c_vector};
-            llvm::SmallVector<mlir::Value> w_indices{k, r, s, c_vector};
-            auto x_vector = mlir::vector::LoadOp::create(
-                body_builder, body_loc, vector_type, input, x_indices);
-            auto w_vector = mlir::vector::LoadOp::create(
-                body_builder, body_loc, vector_type, weight, w_indices);
-            auto next_vector = mlir::vector::FMAOp::create(
-                body_builder, body_loc, x_vector, w_vector,
-                c_vector_loop.getRegionIterArgs()[0]);
-            mlir::scf::YieldOp::create(body_builder, body_loc,
-                                       mlir::ValueRange{next_vector});
-
-            body_builder.setInsertionPointAfter(c_vector_loop);
-            auto c_tail_loop = mlir::scf::ForOp::create(
-                body_builder, body_loc, c_vector_upper, c_upper, c1,
-                mlir::ValueRange{s_loop.getRegionIterArgs()[1]});
-            body_builder.setInsertionPointToStart(c_tail_loop.getBody());
-            auto c_tail = c_tail_loop.getInductionVar();
-            llvm::SmallVector<mlir::Value> x_tail_indices{n, h, w, c_tail};
-            llvm::SmallVector<mlir::Value> w_tail_indices{k, r, s, c_tail};
-            auto x_scalar = mlir::memref::LoadOp::create(
-                body_builder, body_loc, input, x_tail_indices);
-            auto w_scalar = mlir::memref::LoadOp::create(
-                body_builder, body_loc, weight, w_tail_indices);
-            auto product = mlir::arith::MulFOp::create(
-                body_builder, body_loc, x_scalar, w_scalar);
-            auto next_tail = mlir::arith::AddFOp::create(
-                body_builder, body_loc, c_tail_loop.getRegionIterArgs()[0],
-                product);
-            mlir::scf::YieldOp::create(body_builder, body_loc,
-                                       mlir::ValueRange{next_tail});
-
-            body_builder.setInsertionPointToEnd(s_loop.getBody());
-            mlir::scf::YieldOp::create(
-                body_builder, body_loc,
-                mlir::ValueRange{c_vector_loop.getResults()[0],
-                                 c_tail_loop.getResults()[0]});
-            body_builder.setInsertionPointToEnd(r_loop.getBody());
-            mlir::scf::YieldOp::create(body_builder, body_loc,
-                                       s_loop.getResults());
-            body_builder.setInsertionPointAfter(r_loop);
-            auto reduced = mlir::vector::ReductionOp::create(
-                body_builder, body_loc, mlir::vector::CombiningKind::ADD,
-                r_loop.getResults()[0], r_loop.getResults()[1]);
-            mlir::memref::StoreOp::create(
-                body_builder, body_loc, reduced, output,
-                llvm::SmallVector<mlir::Value>{n, oh, ow, k});
+            auto k_tail = mlir::scf::ForOp::create(
+                body_builder, body_loc, k_main_upper, k_upper, c1);
+            body_builder.setInsertionPointToStart(k_tail.getBody());
+            emit_output_block(body_builder, body_loc, n, oh, ow,
+                              k_tail.getInductionVar(), 1);
+            body_builder.setInsertionPointAfter(k_tail);
         });
     (void)outer;
     conv.erase();
@@ -386,13 +483,25 @@ bool has_illegal_source_ops(mlir::ModuleOp module, std::string& name) {
 
 Status lower_conv2d_variant(mlir::ModuleOp module,
                             Conv2DCompileMetadata const& metadata,
-                            runtime::CpuVariant variant) {
+                            runtime::CpuVariant variant,
+                            Conv2DSchedule const& schedule) {
     if (!module) {
         return fail(ErrorCode::kInvalidArgument, "module", "module is null");
     }
     if (!is_supported_variant(variant)) {
         return fail(ErrorCode::kInvalidArgument, "variant",
                     "unknown CPU variant");
+    }
+    auto const expected_vector_width =
+        variant == runtime::CpuVariant::kScalar
+            ? 1
+            : (variant == runtime::CpuVariant::kAvx2 ? 8 : 16);
+    if (schedule.vector_width != expected_vector_width ||
+        schedule.output_channel_unroll <= 0 ||
+        (variant == runtime::CpuVariant::kScalar &&
+         schedule.output_channel_unroll != 1)) {
+        return fail(ErrorCode::kInvalidArgument, "schedule",
+                    "schedule is incompatible with the CPU variant");
     }
     auto function = module.lookupSymbol<mlir::func::FuncOp>(
         metadata.function_name);
@@ -407,8 +516,8 @@ Status lower_conv2d_variant(mlir::ModuleOp module,
         status = lower_scalar_conv(function, metadata);
     } else {
         status = lower_vector_conv(
-            function, metadata,
-            variant == runtime::CpuVariant::kAvx2 ? 8 : 16);
+            function, metadata, schedule.vector_width,
+            schedule.output_channel_unroll);
     }
     if (status.is_bad()) {
         return status;

@@ -135,6 +135,23 @@ Frontend/JSON header。
 export PATH="$PWD/install/bin:$PATH"
 ```
 
+sanitizer build 使用相同的依赖发现和测试路径：
+
+```bash
+./scripts/build.sh --sanitizer address --build-dir build-asan
+./scripts/build.sh --sanitizer undefined --build-dir build-ubsan
+```
+
+使用下面的命令运行全新的 importer-only、Release、ASan、UBSan 和 schedule A/B
+验收矩阵：
+
+```bash
+./scripts/release-check.sh --jobs 2
+```
+
+LeakSanitizer 需要 ptrace 支持；受限的本机环境可设置
+`ASAN_OPTIONS=detect_leaks=0`，CI 中仍启用 leak detection。
+
 当前安装规则只发布 `deepforge-compile` 和 `deepforge-benchmark`。库 header、
 静态库和 CMake package 尚未作为稳定 SDK 安装；嵌入式 API 应通过源码树的
 CMake target 使用。
@@ -431,12 +448,16 @@ backward 都支持它；backward 可输出同 shape 的 external plain `DSINK_TO
 
 ```bash
 DEEPFORGE_BENCHMARK=build/tools/deepforge-benchmark
-"$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
+"$DEEPFORGE_BENCHMARK" \
+  --profile=all --iterations=3 --schedule=both
 ```
 
 profile 可选 `small`、`medium`、`large`、`all`，iterations 范围为 `[1,1000]`。
-CSV 输出包含编译耗时、单次执行耗时、GFLOP/s，以及相对 scalar 结果的最大绝对和
-相对误差。benchmark 是回归基线，不是跨机器可直接比较的性能承诺。
+schedule policy 可选 `auto`（默认）、`baseline` 或 `both`。CSV 输出包含 policy、
+实际选择的 `direct-c-vf<VF>-ku<KU>` 名称、编译耗时、单次执行耗时、GFLOP/s，以及
+相对 scalar 结果的最大绝对和相对误差。cost model 仅用于原有优化的静态 packed f32
+Conv 路径；通用 graph 报告 `generic-reference`。benchmark 是回归基线，不是跨机器
+可直接比较的性能承诺。
 
 ## 10. 常见错误
 

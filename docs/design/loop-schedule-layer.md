@@ -4,9 +4,10 @@
 
 ## 1. 职责
 
-本层把已经 bufferize 的 Linalg Conv2D 变成显式 SCF 循环，并为 SIMD 变体应用
-C-reduction 向量化。Schedule 是受控的 C++ lowering 阶段，不创建第二种
-Schedule IR。当前 MVP 不做外层 tiling 或显式 R/S unroll。
+本层把已经 bufferize 的 Linalg Conv2D 变成显式 SCF 循环，为 SIMD 变体应用
+C-reduction 向量化，并可展开相互独立的 K 输出以复用 X load。Schedule 是受控的
+C++ lowering 阶段，不创建第二种 Schedule IR。当前实现不做外层 tiling 或显式
+R/S unroll。
 
 MVP 先做单线程 direct convolution。外层并行化和 OpenMP 等待有独立的同步、
 线程池和 workspace 设计后再引入。
@@ -39,10 +40,11 @@ MVP 的 schedule 顺序固定为：
 bufferized linalg.conv_2d_nhwc_fhwc
   -> deepforge-workspace-plan
   -> clone scalar / AVX2 / AVX-512 modules
+  -> 为每个 target variant 选择 direct-Conv schedule
   -> direct Conv lowering (consume the named Conv op)
        scalar: scalar SCF reduction
-       AVX2:   vector<8xf32> + scalar C tail
-       AVX512: vector<16xf32> + scalar C tail
+       AVX2:   vector<8xf32> + scalar C tail + 可选 K-output unroll
+       AVX512: vector<16xf32> + scalar C tail + 可选 K-output unroll
   -> convert-linalg-to-loops (remaining fill/copy/pad ops)
   -> canonicalize
 ```
@@ -54,69 +56,92 @@ Direct Conv lowering 按已验证的 indexing maps 直接生成 SCF scalar/vecto
 
 ## 4. 正确的 C-reduction 向量化
 
-cuDNN packed filter 的 C 维是连续的，所以 MVP 沿 C 做 SIMD。每次只计算一个
-输出 K，不能把向量 lane 当成 K：
+cuDNN packed filter 的 C 维是连续的，所以 SIMD lane 表示 C。一个 schedule 可以
+为相邻的 `KU` 个 K 输出维护独立 accumulator，并在它们之间复用一次 X load；这是
+output-loop unroll，不是 K-vectorization：
 
 ```text
-for n, oh, ow, k:
-  vacc = vector.splat(0.0)       // vector<VFxf32>
-  tail_acc = 0.0                 // f32
+for n, oh, ow:
+  for k_base = 0 to floor(K/KU)*KU step KU:
+    vacc[0:KU] = vector.splat(0.0)  // KU 个 vector<VFxf32>
+    tail_acc[0:KU] = 0.0            // KU 个独立 f32
 
-  for r, s:
-    for c_vec = 0 to C - VF step VF:
-      x_vec = load X[n, oh+r, ow+s, c_vec : VF contiguous f32]
-      w_vec = load W[k, r, s, c_vec : VF contiguous f32]
-      vacc = vector.fma(x_vec, w_vec, vacc)
+    for r, s:
+      for c_vec = 0 to C - VF step VF:
+        x_vec = load X[n, oh+r, ow+s, c_vec : VF contiguous f32]
+        for u = 0 to KU:
+          w_vec = load W[k_base+u, r, s, c_vec : VF contiguous f32]
+          vacc[u] = vector.fma(x_vec, w_vec, vacc[u])
 
-    for c = floor(C/VF)*VF to C:
-      tail_acc += X[n, oh+r, ow+s, c] * W[k, r, s, c]
+      for c = floor(C/VF)*VF to C:
+        x = X[n, oh+r, ow+s, c]
+        for u = 0 to KU:
+          tail_acc[u] += x * W[k_base+u, r, s, c]
 
-  acc = vector.reduction(add, vacc) + tail_acc
-  store Y[n, oh, ow, k] = acc
+    for u = 0 to KU:
+      Y[n, oh, ow, k_base+u] = vector.reduce_add(vacc[u]) + tail_acc[u]
+
+  使用同一 body 和 KU=1 处理 K mod KU 个输出
 ```
 
 关键不变量：
 
 1. `x_vec` 和 `w_vec` 的 lane `i` 表示同一个 C 索引；
-2. `vacc` 在所有 R/S/C block 间持续累加；
-3. reduction 结果是一个 output scalar；
+2. 每个 `vacc[u]` 相互独立，并在所有 R/S/C block 间持续累加；
+3. 每个 reduction 结果都是一个 output scalar，SIMD lane 永不表示 K；
 4. C tail 使用标量 cleanup，不读越界，不需要 masked load；
-5. K 不要求是 VF 的倍数，因为 K 仍是标量循环。
+5. K 不要求是 `KU` 的倍数，step-one cleanup loop 处理尾部。
 
-如果未来改为 K-vectorization，必须先把 filter 从 `[K,R,S,C]` 显式 pack 成
+如果未来改为真正的 K-lane-vectorization，必须先把 filter 从 `[K,R,S,C]` 显式 pack 成
 `[R,S,C,K]`，并将 pack buffer 的 ownership、cache 和执行成本写入新契约。
 仅交换 indexing map 会产生错误结果。
 
 ## 5. MLIR 形态
 
-实际 variant IR 使用四层 outer `scf.for`、R/S 的 `scf.for iter_args`、完整 C block
-loop、标量 C tail、`vector.fma` 和 `vector.reduction <add>`。可用
-`deepforge-compile --dump-ir=llvm:<path>` 保存完整转换后 module；转换前的 loop
-形态由 compiler E2E 测试直接检查。`vector.load` 不附加 runtime 无法证明的
-64-byte alignment；X/W/Y 的公开要求只有 `alignof(float)`。
+scalar variant 使用四层 step-one outer `scf.for`。SIMD variant 使用三层 N/OH/OW
+loop、步长为 `KU` 的 K main loop 和 step-one K cleanup loop。R/S 通过 `iter_args`
+携带 `KU` 组 vector/scalar accumulator；C loop 含 `vector.fma`、scalar cleanup，
+每个输出有一个 `vector.reduction <add>`。可用
+`deepforge-compile --dump-ir=llvm:<path>` 保存完整转换后 module。`vector.load` 不附加
+runtime 无法证明的 64-byte alignment；X/W/Y 的公开要求只有 `alignof(float)`。
 
 ## 6. Tiling 和展开（Optimize 阶段）
 
-当前 MVP 的 N/OH/OW/K 循环步长都是 1，没有生效的 tile 参数，也没有显式 R/S
-unroll。C tail 由 SIMD lowering 生成；N/OH/OW/K 使用精确静态 upper bound，因此
-不存在当前实现中的 tile tail。
+N/OH/OW 保持 step-one loop，当前没有生效的 tile 参数或显式 R/S unroll。SIMD
+lowering 生成精确的 C 和 K cleanup loop；所有 upper bound 都是静态值，不需要
+masked 或越界访问。
 
 后续候选 tiling/unroll 必须逐项通过正确性矩阵和绑核 benchmark。cost model 可以
 使用 cache size、cache line 和向量寄存器压力估算工作集，但不能生成 L1/L2/L3
 address space，也不能把数据“放入”某级 cache。软件 prefetch 当前关闭。
 
-### 6.1 Cost model 的归属和状态
+### 6.1 生效的 Cost Model
 
-cost model 归属于编译期的 Loop/Schedule 层，因为它的输出是 schedule 决策：tile
-size、loop order 和可选 unroll factor。Target 配置只提供 cache capacity、cache
-line、vector width、register budget 等硬件事实，benchmark 用于验证或校准候选评分。
+首个生效的 cost model 位于编译期 Loop/Schedule 层，并明确只服务于原有优化的静态、
+连续 f32 单 `CONV_FPROP` 路径。通用 C2-C6 graph 仍使用 `generic-reference`；importer、
+runtime 和 Machine Dialect 都不选择性能 schedule。
 
-MVP **尚未启用实际 cost model**；当前 schedule 固定且不做外层 tiling。运行时的
-CPUID/XGETBV 分发只筛选并选择可安全执行的 ISA 变体，是 capability check，不是
-性能 cost model；Machine Dialect 也不拥有这一决策。
+模型按 target 固定 `VF` 为 `1`、`8` 或 `16`，并考虑
+`KU in {1,2,4,8}`。scalar 和 `baseline` policy 只允许 `KU=1`。SIMD auto policy 中，
+候选须满足 `KU <= K`，且 `2*KU+4` 不超过 target vector register budget（AVX2 为
+`16`，AVX-512 为 `32`）。确定性的估算公式为：
 
-未来实现后，模型必须输出显式、可检查的 schedule；没有合法候选时回退到当前未
-分块 schedule。它不能改变 Graph 语义、公开 ABI、workspace ownership 或数值契约。
+```text
+channel_steps = R*S*(floor(C/VF) + C mod VF)
+input_loads   = (floor(K/KU) + K mod KU) * channel_steps
+weight_loads  = K * channel_steps
+score         = 2*input_loads + weight_loads + 16*KU
+```
+
+公共的 N/OH/OW 因子不影响候选排序，因此省略。评分鼓励 X-load 复用，同时计入
+register/IR 压力。baseline 始终是候选，score 相同时保留较小 schedule，因此不存在
+无候选导致编译失败。选择结果以 `direct-c-vf<VF>-ku<KU>` 暴露在
+`CompilationResult::variants` 和 benchmark CSV 中；
+`CompileOptions::schedule_policy = kBaseline` 提供稳定的 A/B 和诊断回退。
+
+CPUID/XGETBV runtime dispatch 仍只是 capability check，不是性能模型。模型不改变
+Graph 语义、公开 ABI、workspace ownership、artifact format 或数值容差。cache
+tiling、padding fusion 和 threading 仍需由后续 benchmark 驱动。
 
 ## 7. 依赖与合法性
 

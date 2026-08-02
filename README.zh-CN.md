@@ -6,13 +6,15 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前四个 C6 增量已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前五个 C6 增量已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
 的 `.dfo` artifact、CLI、benchmark 和 sanitizer 测试均已打通。v1.24.0 全部
 39 个 serialized tag 都已有明确声明并经过测试的 CPU 执行子集；这些子集严格
 小于 cuDNN backend 允许的完整配置空间。
+优化 Conv 路径已具有可检查、target-aware 的 K-output unroll cost model，并保留
+固定 baseline 回退。
 
 **MVP**：静态、连续、f32 的单个 Conv2D FWD，目标为 x86-64，提供标量、
 AVX2 和 AVX-512 三个代码变体。Machine Dialect、AMX、bf16、多线程及多算子
@@ -130,7 +132,7 @@ MVP Conv: Tensor + Linalg    通用 C2-C6: MemRef + SCF + Math
         +----------------------+----------+
                                v
 MemRef + Affine/SCF + Vector Dialect
-        |  direct Conv2D schedule, C-reduction vectorization
+        |  direct Conv2D cost model, C-vectorization, K-output unroll
         v
 LLVM Dialect
         |  translate to LLVM IR, LLVM target code generation
@@ -155,7 +157,7 @@ DeepForge 逻辑集中在 import/support validation、语义 lowering、workspac
 | [总体架构](docs/design/overview.md) | 组件边界、IR 全景和关键决策 |
 | [Tensor 层](docs/design/tensor-layer.md) | cuDNN Graph 导入、形状和 padding |
 | [Linalg 层](docs/design/linalg-layer.md) | `linalg.conv_2d_nhwc_fhwc` 语义和布局 |
-| [Loop+Schedule 层](docs/design/loop-schedule-layer.md) | Direct Conv SCF 循环、归约向量化和延后 tiling 边界 |
+| [Loop+Schedule 层](docs/design/loop-schedule-layer.md) | Direct Conv SCF 循环、归约向量化、生效的 cost model 和延后 tiling 边界 |
 | [Machine Dialect](docs/design/machine-dialect.md) | 延后原因和重新引入条件 |
 | [Vector+LLVM 层](docs/design/vector-llvm-layer.md) | 完整 LLVM lowering 与 CPU 变体 |
 | [Pass Pipeline](docs/design/pass-pipeline.md) | MVP pass 顺序、前后置条件和合法性检查 |
@@ -189,7 +191,9 @@ DeepForge 逻辑集中在 import/support validation、语义 lowering、workspac
 
 ```bash
 ./scripts/build.sh --build-type Debug --build-dir build-debug
+./scripts/build.sh --sanitizer address --build-dir build-asan
 ./scripts/build.sh --jobs 8 --no-tests
+./scripts/release-check.sh --jobs 2
 ./scripts/build.sh --help
 ```
 
@@ -246,7 +250,8 @@ build/tools/deepforge-compile test/fixtures/conv2d_f32_c17.json \
   -o build/conv2d.dfo
 
 build/tools/deepforge-compile --inspect build/conv2d.dfo
-build/tools/deepforge-benchmark --profile=all --iterations=3
+build/tools/deepforge-benchmark \
+  --profile=all --iterations=3 --schedule=both
 ```
 
 `--emit=llvm-ir --variant=scalar|avx2|avx512` 可直接输出对应 LLVM IR。
@@ -298,8 +303,8 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：`F8_128x4`、exact-pointwise runtime shape override 及标准 f32 SDPA ragged/packed/block-mask/sink metadata 已完成；剩余更广 dynamic/reorder、优化和发布验收 |
-| Optimize | 待 benchmark 驱动：外层 tiling、padding fusion、并行化 |
+| C6 | 进行中：`F8_128x4`、exact-pointwise runtime shape override、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
+| Optimize | 进行中：target-aware K-output unroll 已完成；外层 tiling、padding fusion、并行化继续由 benchmark 驱动 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 
 ## 参考

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepForge/Compiler/Conv2DImporter.h"
+#include "DeepForge/Compiler/Schedule.h"
 #include "DeepForge/Import/Status.h"
 #include "DeepForge/Runtime/Executable.h"
 
@@ -13,7 +14,8 @@ namespace deepforge::compiler {
 [[nodiscard]] import::Status lower_conv2d_variant(
     ::mlir::ModuleOp module,
     Conv2DCompileMetadata const& metadata,
-    runtime::CpuVariant variant);
+    runtime::CpuVariant variant,
+    Conv2DSchedule const& schedule);
 
 // Convert the loop/vector form to LLVM dialect and verify that no source
 // dialect remains.

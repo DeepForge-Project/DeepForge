@@ -147,6 +147,17 @@ int main(int argc, char** argv) {
                 "AVX2 object is emitted");
     tests.check(!compilation.variants[2].object.empty(),
                 "AVX-512 object is emitted");
+    tests.check(
+        std::all_of(
+            compilation.variants.begin(), compilation.variants.end(),
+            [&](deepforge::compiler::VariantCode const& code) {
+                auto expected = deepforge::compiler::select_conv2d_schedule(
+                    compilation.metadata, code.variant,
+                    options.schedule_policy);
+                return code.schedule ==
+                       deepforge::compiler::conv2d_schedule_name(expected);
+            }),
+        "auto schedules are exposed in compilation result");
     tests.check(compilation.metadata.arguments.size() == 3 &&
                     compilation.metadata.arguments[0].uid ==
                         compilation.metadata.x_uid &&
@@ -251,6 +262,58 @@ int main(int argc, char** argv) {
     tests.check(compilation.executable->supports_variant(
                     compilation.executable->selected_variant()),
                 "automatic CPU dispatch selects a supported variant");
+
+    auto automatic_output = y;
+    auto baseline_options = options;
+    baseline_options.emit_object = false;
+    baseline_options.emit_llvm_ir = false;
+    baseline_options.schedule_policy =
+        deepforge::compiler::Conv2DSchedulePolicy::kBaseline;
+    deepforge::compiler::CompilationResult baseline_compilation;
+    status = deepforge::compiler::compile_file(
+        std::filesystem::path(argv[1]), baseline_options,
+        baseline_compilation);
+    tests.good(status, "compile with baseline schedule policy");
+    if (status.is_good() && baseline_compilation.executable) {
+        constexpr std::array<std::string_view, 3> expected_schedules{
+            "direct-c-vf1-ku1", "direct-c-vf8-ku1",
+            "direct-c-vf16-ku1"};
+        for (std::size_t index = 0; index < expected_schedules.size(); ++index) {
+            tests.check(baseline_compilation.variants[index].schedule ==
+                            expected_schedules[index],
+                        "baseline schedule is exposed in compilation result");
+        }
+        tests.check(baseline_compilation.executable->get_workspace_size() ==
+                        workspace_size,
+                    "schedule policy does not change workspace ownership");
+        deepforge::runtime::VariantPack baseline_pack{
+            {baseline_compilation.metadata.x_uid, x.data()},
+            {baseline_compilation.metadata.w_uid, w.data()},
+            {baseline_compilation.metadata.y_uid, y.data()}};
+        for (auto variant : variants) {
+            if (!baseline_compilation.executable->supports_variant(variant)) {
+                continue;
+            }
+            std::fill(y.begin(), y.end(), -91.0F);
+            status = baseline_compilation.executable->execute_variant(
+                variant, nullptr, baseline_pack, workspace.pointer);
+            tests.good(status, std::string("baseline JIT execution: ") +
+                                  std::string(deepforge::runtime::
+                                                  cpu_variant_name(variant)));
+            bool matches = true;
+            for (std::size_t index = 0; index < y.size(); ++index) {
+                auto tolerance =
+                    1.0e-4F + 1.0e-3F * std::fabs(automatic_output[index]);
+                if (!std::isfinite(y[index]) ||
+                    std::fabs(y[index] - automatic_output[index]) > tolerance) {
+                    matches = false;
+                    break;
+                }
+            }
+            tests.check(matches,
+                        "baseline and auto schedules satisfy numeric tolerance");
+        }
+    }
 
     auto missing = pack;
     missing.erase(compilation.metadata.w_uid);

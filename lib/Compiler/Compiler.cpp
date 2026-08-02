@@ -321,6 +321,7 @@ Status compile_foundational_graph(mlir::MLIRContext& context,
         code.variant = variant;
         code.symbol = public_symbol;
         code.required_features = target_spec(variant).feature_name;
+        code.schedule = "generic-reference";
         symbols[index] = public_symbol;
         if (options.capture_mlir) {
             code.mlir = print_module(*variant_module);
@@ -419,7 +420,10 @@ Status compile_graph(import::SerializedGraph const& graph,
                                   "planned Conv2D function is absent");
         }
         function.setSymName(variant_metadata.function_name);
-        status = lower_conv2d_variant(*variant_module, variant_metadata, variant);
+        auto const schedule = select_conv2d_schedule(
+            variant_metadata, variant, options.schedule_policy);
+        status = lower_conv2d_variant(*variant_module, variant_metadata, variant,
+                                      schedule);
         if (status.is_bad()) {
             return status;
         }
@@ -433,6 +437,7 @@ Status compile_graph(import::SerializedGraph const& graph,
         code.symbol = variant_metadata.function_name;
         symbols[index] = code.symbol;
         code.required_features = target_spec(variant).feature_name;
+        code.schedule = conv2d_schedule_name(schedule);
         if (options.capture_mlir) {
             code.mlir = print_module(*variant_module);
         }

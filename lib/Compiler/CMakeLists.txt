@@ -4,6 +4,7 @@ add_library(deepforge_compiler STATIC
     FoundationalGraph.cpp
     Numeric.cpp
     NormalizationGraph.cpp
+    Schedule.cpp
     ScalarLowering.cpp
     SequenceGraph.cpp
     SpecializedAttention.cpp

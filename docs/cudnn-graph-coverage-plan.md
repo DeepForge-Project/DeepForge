@@ -232,7 +232,7 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中，四个独立验收增量已完成。第一个为 block-scale conversion 的
+**状态**：进行中，五个独立验收增量已完成。第一个为 block-scale conversion 的
 E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 `F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
 `POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
@@ -246,10 +246,14 @@ backward tensor，校验 backward max-total hint，支持 K/V page table 各自�
 存储，并实现标准 f32 forward block mask 及 forward/backward sink token/dSink。
 Artifact v5 记录 page-table block divisor；独立 reference、有限差分、非连续压缩
 mask、精确分配、错误 metadata、reload 和 sanitizer 构成该增量的验收集。
+第五个为原有优化的静态 packed f32 Conv 路径加入首个生效的 Loop/Schedule cost
+model。它选择 target-aware K-output unroll，保留 baseline 回退，暴露 schedule 名称，
+并通过决策、tail、数值、绑核 A/B、Release、ASan 和 UBSan 检查。通用 C2-C6 graph
+仍使用 reference schedule。
 
 **工作内容**：将动态行为扩展到已交付 pointwise 子集之外；加入 Frontend
 serialization 暴露的 paged backward；加入已交付 scale 子集外的 reorder format；
-随后增加 fusion、threading、vector schedule 和各操作族 cost model。
+随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能
@@ -279,8 +283,8 @@ Fixture 覆盖每个 tag 和 attribute 分支，包括错误和未支持组合�
 相关的误差界；integer/boolean 要求精确相等；NaN、infinity、signed zero、
 saturation 和 RNG 可复现性都有专门测试。
 
-未来可以增加可选 GPU job，用 cuDNN Frontend v1.24.0 生成 producer fixture，并把
-已支持 graph 与真实 cuDNN 做差分比较。该 job 只用于兼容性和发布验证，不是 CPU
+fixture 字段和公开 execute signature 直接对照固定版本的开源 Frontend 源码。
+运行 CUDA/cuDNN producer 或比较 GPU 结果不属于 DeepForge CPU release gate，也不是
 构建、测试、安装或运行依赖。
 
 ## 8. 主要风险

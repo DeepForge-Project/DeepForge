@@ -157,8 +157,9 @@ model and validate every MVP boundary once.
 
 - check in a minimal JSON fixture validated against the pinned serializer
   shape, and use vendored nlohmann/json 3.11.3 to encode it as UBJSON;
-- reserve a producer-generated cross-check fixture for a separate CUDA/cuDNN
-  environment without making it a CPU build, CI, or runtime prerequisite;
+- validate fixture fields and public execute call shapes directly against the
+  pinned open-source Frontend source; a CUDA/cuDNN producer is not a project
+  build, CI, runtime, or release prerequisite;
 - test JSON/UBJSON canonical-model equivalence;
 - cover missing or duplicate UIDs, truncated or trailing UBJSON, invalid schema,
   unknown nodes, non-f32 data, dynamic shapes, non-packed strides, non-unit
@@ -431,9 +432,9 @@ P0-P6 and post-MVP C0-C5 completed in this order:
 
 1. Installed and verified LLVM/MLIR `llvmorg-22.1.8` and recorded P0 tools.
 2. Fixed the Conv2D JSON fixture against Frontend `v1.24.0` serializer source
-   and generated equivalent UBJSON with the vendored parser. An official
-   producer cross-check remains a release gate, not a CPU-only development
-   blocker.
+   and generated equivalent UBJSON with the vendored parser. Source-level
+   serialization and execute-signature conformance is the CPU release gate; no
+   CUDA/cuDNN producer is required.
 3. Implemented the P1 canonical model, strict JSON/UBJSON importer, and 59 test
    checks.
 4. Implemented P2 destination-passing MLIR import, verification, and metadata.
@@ -467,11 +468,16 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     tokens with dSink. Artifact v5 persists packed sequence divisors; reference,
     finite-difference, exact-allocation, malformed-metadata, reload, Release,
     ASan, and UBSan tests cover the increment.
+13. Completed C6.5's first active Loop/Schedule cost model for the optimized
+    static packed f32 Conv path. It selects legal target-aware K-output unroll
+    factors, exposes the decision, retains a baseline policy, reuses X loads
+    across independent accumulators, and is covered by decision, tail, numeric,
+    benchmark A/B, Release, ASan, and UBSan gates.
 
 The remaining C6 functional work is broader dynamic behavior, paged backward,
-reorder formats outside that scale subset, optimization, and release
-qualification. Benchmark-driven optimization remains owned by the
-Loop/Schedule layer: establish repeatable pinned-core measurements first, then
-evaluate outer tiling, padding fusion, and multithreading independently.
+and reorder formats outside that scale subset. Further benchmark-driven
+optimization remains owned by the Loop/Schedule layer: evaluate outer tiling,
+padding fusion, and multithreading independently against the preserved
+baseline policy.
 Optimizations must not change the frozen serialization, ABI, workspace
 ownership, numeric, or artifact contracts.

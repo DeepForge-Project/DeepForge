@@ -103,6 +103,18 @@ else()
 endif()
 add_test(NAME deepforge-variant-matrix COMMAND deepforge_variant_matrix_test)
 
+add_executable(deepforge_schedule_test
+    ScheduleTest.cpp
+)
+target_link_libraries(deepforge_schedule_test PRIVATE DeepForge::Compiler)
+if(MSVC)
+    target_compile_options(deepforge_schedule_test PRIVATE /W4)
+else()
+    target_compile_options(deepforge_schedule_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deepforge-schedule COMMAND deepforge_schedule_test)
+
 add_executable(deepforge_foundational_ops_test
     FoundationalOpsTest.cpp
 )

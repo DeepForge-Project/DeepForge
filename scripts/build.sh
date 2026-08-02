@@ -12,6 +12,7 @@ Options:
   --importer-only       Build the CPU-only importer without MLIR.
   --build-dir DIR       Build directory (default: build or build-importer).
   --build-type TYPE     CMake build type (default: Release).
+  --sanitizer TYPE      Sanitizer: none, address/asan, or undefined/ubsan.
   --generator NAME      CMake generator (default: Ninja).
   --jobs N              Limit parallel build jobs.
   --no-tests            Do not build or run the test suite.
@@ -43,6 +44,7 @@ source_dir=$(cd -- "$script_dir/.." && pwd)
 mode=full
 build_dir=${DEEPFORGE_BUILD_DIR:-}
 build_type=${DEEPFORGE_BUILD_TYPE:-Release}
+sanitizer=${DEEPFORGE_SANITIZER:-none}
 generator=${DEEPFORGE_GENERATOR:-Ninja}
 jobs=${DEEPFORGE_BUILD_JOBS:-}
 build_tests=${DEEPFORGE_BUILD_TESTS:-ON}
@@ -77,6 +79,11 @@ while (($# > 0)); do
         --generator)
             (($# >= 2)) || die "--generator requires a name"
             generator=$2
+            shift 2
+            ;;
+        --sanitizer)
+            (($# >= 2)) || die "--sanitizer requires a value"
+            sanitizer=$2
             shift 2
             ;;
         --jobs)
@@ -115,9 +122,20 @@ while (($# > 0)); do
     esac
 done
 
+case "${sanitizer,,}" in
+    none) sanitizer=none ;;
+    address|asan) sanitizer=address ;;
+    undefined|ubsan) sanitizer=undefined ;;
+    *) die "--sanitizer must be none, address/asan, or undefined/ubsan" ;;
+esac
+
 if [[ -z "$build_dir" ]]; then
     if [[ "$mode" == importer ]]; then
         build_dir=build-importer
+    elif [[ "$sanitizer" == address ]]; then
+        build_dir=build-asan
+    elif [[ "$sanitizer" == undefined ]]; then
+        build_dir=build-ubsan
     else
         build_dir=build
     fi
@@ -183,6 +201,7 @@ cmake_args=(
     "-DCMAKE_BUILD_TYPE=$build_type"
     "-DDEEPFORGE_BUILD_TESTS=$build_tests"
     "-DDEEPFORGE_BUILD_TOOLS=$build_tools"
+    "-DDEEPFORGE_SANITIZER=$sanitizer"
 )
 
 if [[ "$mode" == importer ]]; then

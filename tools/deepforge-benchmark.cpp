@@ -40,6 +40,7 @@ constexpr std::array<Profile, 3> kProfiles{{
 
 struct Options {
     std::string_view profile = "all";
+    std::string_view schedule = "auto";
     int iterations = 3;
 };
 
@@ -56,7 +57,8 @@ struct AlignedBytes {
 
 void usage(std::ostream& stream) {
     stream << "usage: deepforge-benchmark "
-              "[--profile=small|medium|large|all] [--iterations=N]\n";
+              "[--profile=small|medium|large|all] "
+              "[--schedule=auto|baseline|both] [--iterations=N]\n";
 }
 
 bool parse_options(int argc, char** argv, Options& options) {
@@ -67,6 +69,16 @@ bool parse_options(int argc, char** argv, Options& options) {
             if (options.profile != "small" && options.profile != "medium" &&
                 options.profile != "large" && options.profile != "all") {
                 std::cerr << "invalid profile: " << options.profile << '\n';
+                return false;
+            }
+            continue;
+        }
+        if (argument.starts_with("--schedule=")) {
+            options.schedule =
+                argument.substr(std::string_view("--schedule=").size());
+            if (options.schedule != "auto" && options.schedule != "baseline" &&
+                options.schedule != "both") {
+                std::cerr << "invalid schedule: " << options.schedule << '\n';
                 return false;
             }
             continue;
@@ -190,10 +202,13 @@ bool compare(std::vector<float> const& actual,
     return true;
 }
 
-int benchmark(Profile profile, int iterations) {
+int benchmark(Profile profile, int iterations,
+              deepforge::compiler::Conv2DSchedulePolicy schedule_policy,
+              std::string_view policy_name) {
     deepforge::compiler::CompileOptions options;
     options.emit_object = false;
     options.emit_llvm_ir = false;
+    options.schedule_policy = schedule_policy;
     deepforge::compiler::CompilationResult compilation;
     auto compile_start = std::chrono::steady_clock::now();
     auto status = deepforge::compiler::compile_graph(make_graph(profile), options,
@@ -282,8 +297,10 @@ int benchmark(Profile profile, int iterations) {
         volatile float checksum =
             std::accumulate(y.begin(), y.end(), 0.0F);
         (void)checksum;
-        std::cout << profile.name << ','
+        auto const variant_index = static_cast<std::size_t>(variant);
+        std::cout << profile.name << ',' << policy_name << ','
                   << deepforge::runtime::cpu_variant_name(variant) << ','
+                  << compilation.variants[variant_index].schedule << ','
                   << profile.n << 'x' << profile.h << 'x' << profile.w << 'x'
                   << profile.c << "_k" << profile.k << "_r" << profile.r << 'x'
                   << profile.s << ',' << compilation.workspace.size_bytes << ','
@@ -308,11 +325,21 @@ int run(int argc, char** argv) {
         usage(std::cerr);
         return 2;
     }
-    std::cout << "profile,variant,shape,workspace_bytes,iterations,compile_ms,"
-                 "execute_ms,gflops,max_abs,max_rel\n";
+    std::cout << "profile,policy,variant,schedule,shape,workspace_bytes,"
+                 "iterations,compile_ms,execute_ms,gflops,max_abs,max_rel\n";
     for (auto profile : kProfiles) {
         if (options.profile == "all" || options.profile == profile.name) {
-            if (benchmark(profile, options.iterations) != 0) {
+            if ((options.schedule == "baseline" || options.schedule == "both") &&
+                benchmark(profile, options.iterations,
+                          deepforge::compiler::
+                              Conv2DSchedulePolicy::kBaseline,
+                          "baseline") != 0) {
+                return 1;
+            }
+            if ((options.schedule == "auto" || options.schedule == "both") &&
+                benchmark(profile, options.iterations,
+                          deepforge::compiler::Conv2DSchedulePolicy::kAuto,
+                          "auto") != 0) {
                 return 1;
             }
         }

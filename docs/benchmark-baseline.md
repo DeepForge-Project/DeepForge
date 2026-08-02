@@ -9,12 +9,14 @@
 direct-convolution 基线，不是供应商库对比。
 
 ```bash
-build/tools/deepforge-benchmark --profile=all --iterations=5
+build/tools/deepforge-benchmark \
+  --profile=all --iterations=5 --schedule=both
 ```
 
-每行输出 profile、变体、shape、workspace、迭代数、编译时间、平均执行时间、
-GFLOP/s、相对 scalar 的最大绝对/相对误差。CTest 只运行 small/1 iteration smoke；
-性能数值不作为不稳定的 pass/fail 阈值。
+`--schedule` 可选 `auto`（默认）、`baseline` 或 `both`。每行输出 profile、policy、
+variant、实际 schedule、shape、workspace、迭代数、编译时间、平均执行时间、GFLOP/s
+以及相对 scalar 的最大绝对/相对误差。CTest 只运行 small/1 iteration smoke；性能
+数值不作为不稳定的 pass/fail 阈值。
 
 ## 2. Profile
 
@@ -45,3 +47,22 @@ turbo，也未隔离系统负载。DeepForge 为 `RelWithDebInfo`，工具链为
 结果说明 SIMD lowering 已产生实际收益，但 small profile 的 AVX-512 启动和水平归约
 成本高于 AVX2。后续 tiling、padding fusion 和并行化应以重复、绑核后的 benchmark
 变化为依据，不应仅凭 ISA 宽度推断收益。
+
+## 4. 2026-08-02 C6.5 Schedule A/B
+
+本次使用同一 Intel Xeon 6986P-C 主机的 Release build，通过 `taskset -c 0` 将单线程
+进程绑定到 logical CPU 0，每项执行 10 次。`baseline` 固定 `KU=1`；`auto` 在这些
+profile 上为 AVX2 选择 `KU=4`、为 AVX-512 选择 `KU=8`。scalar 在两种 policy 下均为
+`VF=1,KU=1`。
+
+| Profile | Variant | Baseline schedule | Auto schedule | Baseline GFLOP/s | Auto GFLOP/s | 比值 |
+|---|---|---|---|---:|---:|---:|
+| small | AVX2 | `vf8-ku1` | `vf8-ku4` | 8.690 | 13.033 | 1.500x |
+| small | AVX-512 | `vf16-ku1` | `vf16-ku8` | 3.226 | 5.882 | 1.824x |
+| medium | AVX2 | `vf8-ku1` | `vf8-ku4` | 22.171 | 38.428 | 1.733x |
+| medium | AVX-512 | `vf16-ku1` | `vf16-ku8` | 26.684 | 41.127 | 1.541x |
+| large | AVX2 | `vf8-ku1` | `vf8-ku4` | 21.300 | 34.179 | 1.605x |
+| large | AVX-512 | `vf16-ku1` | `vf16-ku8` | 30.009 | 33.789 | 1.126x |
+
+最大绝对/相对误差与 baseline schedule 相同。这只是在本机对候选模型的一次验证，
+不是跨主机性能保证，也不能替代 runtime ISA feature check。

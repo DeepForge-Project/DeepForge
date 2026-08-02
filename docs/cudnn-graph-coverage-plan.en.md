@@ -250,7 +250,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Four independently validated increments are complete.
+**Status:** in progress. Five independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -269,11 +269,16 @@ standard-f32 forward block masks plus forward/backward sink tokens and dSink.
 Artifact v5 records the page-table block divisor. Independent references,
 finite differences, non-contiguous compressed masks, exact allocations,
 malformed metadata, reload, and sanitizer coverage form its acceptance set.
+The fifth adds the first active Loop/Schedule cost model to the original
+optimized static packed f32 Conv path. It selects target-aware K-output unroll,
+retains baseline fallback, exposes schedule names, and passes decision, tail,
+numeric, pinned-core A/B, Release, ASan, and UBSan checks. Generic C2-C6 graphs
+remain on their reference schedule.
 
 **Work:** expand dynamic behavior beyond the delivered pointwise subset; add
 paged backward where Frontend serialization exposes it; add reorder formats
-outside the delivered scale subset; then add fusion, threading, vector
-schedules, and family-specific cost models.
+outside the delivered scale subset; then evaluate fusion, threading, additional
+vector schedules, and family-specific cost models independently.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within
@@ -308,10 +313,10 @@ attention use scale-aware bounds; exact integer/boolean operations require
 exact equality; NaN, infinity, signed zero, saturation, and RNG reproducibility
 receive explicit tests.
 
-An optional GPU job may generate producer fixtures with cuDNN Frontend v1.24.0
-and compare supported graphs against real cuDNN. That job is a compatibility
-and release-validation tool only. CUDA/cuDNN remains absent from CPU build,
-test, install, and runtime dependencies.
+Fixture fields and public execute signatures are checked directly against the
+pinned open-source Frontend source. Running a CUDA/cuDNN producer or comparing
+GPU results is outside the DeepForge CPU release gate and is not a build, test,
+install, or runtime dependency.
 
 ## 8. Principal Risks
 

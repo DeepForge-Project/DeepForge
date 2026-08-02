@@ -8,13 +8,15 @@ subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
 **Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
-the first four C6 increments are implemented. The end-to-end path
+the first five C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
 artifacts, CLI tools, benchmarks, and sanitizer coverage. All 39 serialized
 v1.24.0 tags have declared and tested CPU execution subsets. These subsets are
 strictly narrower than the complete set of legal cuDNN backend configurations.
+The optimized Conv path now has an inspectable target-aware K-output unroll
+cost model with a fixed baseline fallback.
 
 **MVP scope:** one static, contiguous, f32 Conv2D forward operation targeting
 x86-64, with scalar, AVX2, and AVX-512 code variants. Dynamic shapes, grouped
@@ -164,7 +166,7 @@ MVP Conv: Tensor + Linalg    Generic C2-C6: MemRef + SCF + Math
         +----------------------+----------+
                                v
 MemRef + Affine/SCF + Vector Dialect
-        |  direct Conv2D schedule, C-reduction vectorization
+        |  direct Conv2D cost model, C-vectorization, K-output unroll
         v
 LLVM Dialect
         |  translate to LLVM IR, LLVM target code generation
@@ -190,7 +192,7 @@ Machine Dialect.
 | [Architecture Overview](docs/design/overview.en.md) | Components, IR stages, and major design decisions |
 | [Tensor Layer](docs/design/tensor-layer.en.md) | Serialized Graph import, shape conversion, and padding |
 | [Linalg Layer](docs/design/linalg-layer.en.md) | `linalg.conv_2d_nhwc_fhwc` semantics and layouts |
-| [Loop and Schedule Layer](docs/design/loop-schedule-layer.en.md) | Direct Conv loops, reduction vectorization, cost-model ownership, and deferred tiling |
+| [Loop and Schedule Layer](docs/design/loop-schedule-layer.en.md) | Direct Conv loops, reduction vectorization, active cost model, and deferred tiling |
 | [Machine Dialect](docs/design/machine-dialect.en.md) | Deferral rationale and criteria for reconsideration |
 | [Vector and LLVM Layer](docs/design/vector-llvm-layer.en.md) | Complete LLVM lowering and CPU variants |
 | [Pass Pipeline](docs/design/pass-pipeline.en.md) | MVP pass order, preconditions, and verification |
@@ -223,7 +225,9 @@ does not assume dependency locations. Common options:
 
 ```bash
 ./scripts/build.sh --build-type Debug --build-dir build-debug
+./scripts/build.sh --sanitizer address --build-dir build-asan
 ./scripts/build.sh --jobs 8 --no-tests
+./scripts/release-check.sh --jobs 2
 ./scripts/build.sh --help
 ```
 
@@ -295,7 +299,8 @@ build/tools/deepforge-compile test/fixtures/conv2d_f32_c17.json \
   -o build/conv2d.dfo
 
 build/tools/deepforge-compile --inspect build/conv2d.dfo
-build/tools/deepforge-benchmark --profile=all --iterations=3
+build/tools/deepforge-benchmark \
+  --profile=all --iterations=3 --schedule=both
 ```
 
 Use `--emit=llvm-ir --variant=scalar|avx2|avx512` to emit LLVM IR for one
@@ -357,8 +362,8 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, exact-pointwise runtime shape override, and standard f32 SDPA ragged/packed/block-mask/sink metadata complete; broader dynamic/reorder behavior, optimization, and release qualification remain |
-| Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
+| C6 | In progress: `F8_128x4`, exact-pointwise runtime shape override, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
+| Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 
 ## References

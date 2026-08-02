@@ -136,10 +136,10 @@ MVP 边界做一次性校验。
 
 **测试**：
 
-- 当前先入库一份按固定版本 Frontend serializer 形状校验的最小 JSON fixture，测试
-  使用 vendored nlohmann/json 3.11.3 将同一 JSON 编码为 UBJSON；后续可在独立的
-  CUDA/cuDNN 环境追加官方 producer 生成的 fixture，但 producer 不是 DeepForge CPU
-  build、CI 或 runtime 的前置依赖；
+- 当前先入库一份按固定版本 Frontend serializer 源码校验的最小 JSON fixture，测试
+  使用 vendored nlohmann/json 3.11.3 将同一 JSON 编码为 UBJSON；fixture 字段和公开
+  execute 调用形状直接对照固定的开源 Frontend 源码，CUDA/cuDNN producer 不是项目
+  build、CI、runtime 或 release 的前置依赖；
 - JSON/UBJSON canonical model 等价测试；
 - 缺 UID、重复 UID、截断/尾随 UBJSON、坏 schema、未知 node、非 f32、动态 shape、非
   packed stride、非 unit stride/dilation、output shape 错误和乘法溢出负例；
@@ -392,8 +392,8 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
 
 1. 已完成：安装并验证 LLVM/MLIR `llvmorg-22.1.8`，记录 P0 工具版本；
 2. 已完成：按 Frontend `v1.24.0` serializer 源码固化 Conv2D JSON fixture，并由
-   vendored parser 生成等价 UBJSON；官方 producer 交叉生成的 fixture 保留为 MVP
-   发布门，不阻塞 CPU-only 开发；
+   vendored parser 生成等价 UBJSON；CPU release gate 是 serialization 和 execute
+   signature 的源码级一致性，不要求 CUDA/cuDNN producer；
 3. 已完成：实现 P1 canonical model、strict JSON/UBJSON importer 和 59 项测试检查；
 4. 已完成：实现 P2 destination-passing MLIR importer/verifier 和 metadata 输出；
 5. 已完成：P3 One-Shot Bufferize、allocation materialization 和 workspace plan；
@@ -422,10 +422,13 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     mask 及带 dSink 的 forward/backward sink token。Artifact v5 持久化 packed
     sequence divisor；独立 reference、有限差分、精确分配、错误 metadata、reload、
     Release、ASan 和 UBSan 测试覆盖该增量。
+13. 已完成：C6.5 为优化的静态 packed f32 Conv 路径加入首个生效的 Loop/Schedule
+    cost model。它选择合法且 target-aware 的 K-output unroll factor，暴露选择结果，
+    保留 baseline policy，在独立 accumulator 间复用 X load，并由决策、tail、数值、
+    benchmark A/B、Release、ASan 和 UBSan gate 覆盖。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为、paged backward、上述 scale 子集以外
-的 reorder format、优化和发布验收。
-Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
-隔离负载的可重复测量，再逐项评估外层 tiling、padding fusion 和多线程。这些优化
+剩余 C6 功能工作包括更广泛的 dynamic 行为、paged backward 和上述 scale 子集以外
+的 reorder format。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
+baseline policy 逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact
 契约。

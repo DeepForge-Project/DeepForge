@@ -67,9 +67,9 @@ keep the named Conv op unchanged until One-Shot Bufferize
 必须由 benchmark 证明收益。R/S/C 是 reduction 维度，不能把 C tile 当作 K
 vector lane。
 
-未来 cost model 在 Optimize 阶段的 Loop/Schedule 部分执行：输入 target 硬件事实，
-输出显式 schedule。当前 Stage A 不运行 cost model，importer 和 runtime 也不承担该
-职责。
+生效的 cost model 在后续 Loop/Schedule 部分执行，不属于 importer、Stage A 或
+runtime。它输入 target 硬件事实，为优化 Conv 路径输出显式 K-output unroll
+schedule；外层 tiling 仍延后。
 
 `deepforge-lower-direct-conv` 的 MVP 输入必须仍是 named
 `linalg.conv_2d_nhwc_fhwc`；若未来开启 `linalg-generalize-named-ops`，必须先
@@ -138,10 +138,11 @@ scalar/vector value，不得新增或改变 memref allocation 的数量、大小
 
 ### C2. Direct Conv lowering
 
-直接消费 bufferized 的 `linalg.conv_2d_nhwc_fhwc`，规范化 loop 顺序为
-`n, oh, ow, k, r, s, c`，建立单输出 accumulator。实现为受控 C++ lowering
-函数，而不是可从命令行任意组合的注册 pass；它只处理 support matrix 中已验证的
-named Conv2D。
+直接消费 bufferized 的 `linalg.conv_2d_nhwc_fhwc`，逻辑 loop 顺序为
+`n, oh, ow, k, r, s, c`。SIMD schedule 可按 `KU` strip-mine K，并携带 `KU` 个
+独立 accumulator，使一次 X load 服务相邻输出；step-one loop 处理 `K mod KU`。
+实现为受控 C++ lowering 函数，而不是可从命令行任意组合的注册 pass；它只处理
+support matrix 中已验证的 named Conv2D。
 
 ### C3. Auxiliary Linalg-to-loops
 
@@ -151,9 +152,9 @@ padding materialization，生成 SCF loop。静态 packed Conv2D 的主 body 不
 
 ### C4. Canonicalize
 
-辅助 loop lowering 后运行 canonicalize。当前 MLIR pipeline 不显式展开 R/S，也
-不承诺某个后端 unroll 结果；以后增加 unroll 必须继续满足数值契约并由 benchmark
-验证。
+辅助 loop lowering 后运行 canonicalize。当前 MLIR pipeline 显式展开 cost model
+选择的独立 K 输出，但不展开 R/S，也不承诺某个后端 unroll 结果；增加其他 unroll
+必须继续满足数值契约并由 benchmark 验证。
 
 ### C5. `deepforge-vectorize-conv-reduction`
 
@@ -168,14 +169,15 @@ VF=1 : scalar variant
 向量计算必须是：
 
 ```text
-vacc = fma(load X[...,c_vec], load W[k,...,c_vec], vacc)
-sum  = vector.reduction(add, vacc)
-Y[...,k] = sum + scalar_tail
+x = load X[...,c_vec]
+for u in [0,KU):
+  vacc[u] = fma(x, load W[k_base+u,...,c_vec], vacc[u])
+  Y[...,k_base+u] = vector.reduction(add, vacc[u]) + scalar_tail[u]
 ```
 
-不允许 `load W[..., k_vec]`，除非另有显式 weight pack pass 和新的 ABI/ownership
-契约。当前实现把该逻辑直接集成在 AVX2/AVX-512 direct Conv lowering 中；scalar
-变体使用独立的标量 reduction 路径。
+K 不是 vector lane；`vacc[u]` 是独立的 C-lane vector。不允许真正的
+`load W[..., k_vec]`，除非另有显式 weight pack pass 和新的 ABI/ownership 契约。
+scalar 变体使用独立的标量 reduction 路径。
 
 ## 6. 阶段 D：完整 LLVM conversion
 

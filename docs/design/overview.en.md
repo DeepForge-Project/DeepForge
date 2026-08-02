@@ -194,11 +194,12 @@ Their vector widths are 1, 8, and 16. A `.dfo` records the exact target triple
 and required features, and its loader rejects native artifacts for a different
 host triple.
 
-There is no active performance cost model in the MVP. A future cost model is
-owned by the Loop/Schedule layer because it chooses tile sizes, loop order, and
-unroll factors. Target configuration supplies hardware facts, and benchmarks
-validate decisions. Runtime CPUID dispatch is a safety capability check, not a
-cost model. Cache profiles, software prefetch, and outer tiling remain in the
+The first active performance cost model is owned by the Loop/Schedule layer.
+For the optimized static packed f32 Conv path, it uses target vector width and
+register budget to select an inspectable K-output unroll factor, with a fixed
+baseline fallback. Generic C2-C6 graphs retain their reference schedule.
+Runtime CPUID dispatch is a safety capability check, not a cost model. Cache
+profiles, software prefetch, outer tiling, and threading remain in the
 benchmark-driven Optimize phase.
 
 ## 7. Ownership and Aliasing

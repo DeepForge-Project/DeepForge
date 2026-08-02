@@ -297,6 +297,13 @@ int main() {
                     compilation.variants[0].llvm_ir.find(
                         "deepforge_graph_scalar") != std::string::npos,
                 "standard MLIR and pointer-table adapter are emitted");
+    tests.check(
+        std::all_of(
+            compilation.variants.begin(), compilation.variants.end(),
+            [](deepforge::compiler::VariantCode const& code) {
+                return code.schedule == "generic-reference";
+            }),
+        "generic graph variants retain the reference schedule");
 
     std::vector<float> input(7);
     std::vector<float> output(8, -99.0F);

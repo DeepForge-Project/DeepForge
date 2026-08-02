@@ -11,13 +11,15 @@ single-threaded direct-convolution baseline, not a comparison against a vendor
 library.
 
 ```bash
-build/tools/deepforge-benchmark --profile=all --iterations=5
+build/tools/deepforge-benchmark \
+  --profile=all --iterations=5 --schedule=both
 ```
 
-Each output row contains profile, variant, shape, workspace size, iteration
-count, compile time, average execute time, GFLOP/s, and maximum absolute and
-relative differences from scalar. CTest runs only a one-iteration small smoke
-test. Performance numbers are not unstable pass/fail thresholds.
+`--schedule` accepts `auto` (default), `baseline`, or `both`. Each output row
+contains profile, policy, variant, selected schedule, shape, workspace size,
+iteration count, compile time, average execute time, GFLOP/s, and maximum
+absolute and relative differences from scalar. CTest runs only a one-iteration
+small smoke test. Performance numbers are not unstable pass/fail thresholds.
 
 ## 2. Profiles
 
@@ -50,3 +52,24 @@ SIMD lowering provides a real speedup, but AVX-512 startup and horizontal
 reduction cost exceeds AVX2 on the small profile. Future tiling, padding
 fusion, and parallelization decisions must use repeated pinned-core benchmark
 changes rather than inference from ISA width alone.
+
+## 4. C6.5 Schedule A/B, 2026-08-02
+
+This run used a Release build on the same Intel Xeon 6986P-C host, pinned the
+single-threaded process to logical CPU 0 with `taskset -c 0`, and used ten
+iterations. `baseline` fixes `KU=1`; `auto` selected `KU=4` for AVX2 and `KU=8`
+for AVX-512 on these profiles. Scalar remains `VF=1,KU=1` under both policies.
+
+| Profile | Variant | Baseline schedule | Auto schedule | Baseline GFLOP/s | Auto GFLOP/s | Ratio |
+|---|---|---|---|---:|---:|---:|
+| small | AVX2 | `vf8-ku1` | `vf8-ku4` | 8.690 | 13.033 | 1.500x |
+| small | AVX-512 | `vf16-ku1` | `vf16-ku8` | 3.226 | 5.882 | 1.824x |
+| medium | AVX2 | `vf8-ku1` | `vf8-ku4` | 22.171 | 38.428 | 1.733x |
+| medium | AVX-512 | `vf16-ku1` | `vf16-ku8` | 26.684 | 41.127 | 1.541x |
+| large | AVX2 | `vf8-ku1` | `vf8-ku4` | 21.300 | 34.179 | 1.605x |
+| large | AVX-512 | `vf16-ku1` | `vf16-ku8` | 30.009 | 33.789 | 1.126x |
+
+Maximum absolute and relative differences were unchanged from the baseline
+schedule. This is one local validation of the candidate model, not a portable
+performance guarantee or a reason to select an ISA without the runtime feature
+check.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepForge/Compiler/Bufferization.h"
+#include "DeepForge/Compiler/Schedule.h"
 #include "DeepForge/Import/SerializedGraphImporter.h"
 #include "DeepForge/Runtime/Executable.h"
 
@@ -21,12 +22,14 @@ struct CompileOptions {
     bool emit_object = true;
     bool emit_llvm_ir = true;
     bool capture_mlir = false;
+    Conv2DSchedulePolicy schedule_policy = Conv2DSchedulePolicy::kAuto;
 };
 
 struct VariantCode {
     runtime::CpuVariant variant = runtime::CpuVariant::kScalar;
     std::string symbol;
     std::string required_features;
+    std::string schedule;
     std::string mlir;
     std::string llvm_ir;
     std::vector<std::uint8_t> object;

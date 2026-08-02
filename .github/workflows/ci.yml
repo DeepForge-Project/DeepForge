@@ -79,7 +79,8 @@ jobs:
             --dump-ir=llvm:build/ci-llvm.mlir \
             -o build/ci-conv2d.dfo
           build/tools/deepforge-compile --inspect build/ci-conv2d.dfo
-          build/tools/deepforge-benchmark --profile=small --iterations=1
+          build/tools/deepforge-benchmark \
+            --profile=small --iterations=1 --schedule=both
       - uses: actions/upload-artifact@v6
         with:
           name: deepforge-x86-64-artifacts
@@ -98,12 +99,10 @@ jobs:
       matrix:
         include:
           - name: asan
-            cxx_flags: -fsanitize=address -fno-omit-frame-pointer
-            linker_flags: -fsanitize=address
+            sanitizer: address
             environment: ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
           - name: ubsan
-            cxx_flags: -fsanitize=undefined -fno-sanitize=vptr -fno-omit-frame-pointer
-            linker_flags: -fsanitize=undefined
+            sanitizer: undefined
             environment: UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
     steps:
       - uses: actions/checkout@v6
@@ -123,16 +122,12 @@ jobs:
           path: .deps/llvm-${{ env.LLVM_VERSION }}
           key: ${{ runner.os }}-x86_64-llvm-${{ env.LLVM_VERSION }}-gcc-release-v1
           fail-on-cache-miss: true
-      - name: Configure ${{ matrix.name }}
-        run: |
-          cmake -S . -B "build-${{ matrix.name }}" -G Ninja \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/.deps/llvm-${LLVM_VERSION};$GITHUB_WORKSPACE/.deps/cudnn-frontend" \
-            -DDEEPFORGE_BUILD_TESTS=ON \
-            -DDEEPFORGE_BUILD_TOOLS=OFF \
-            -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
-            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}"
       - name: Build and test ${{ matrix.name }}
+        env:
+          LLVM_INSTALL_PREFIX: ${{ github.workspace }}/.deps/llvm-${{ env.LLVM_VERSION }}
+          CUDNN_FRONTEND_SOURCE_DIR: ${{ github.workspace }}/.deps/cudnn-frontend
         run: |
-          cmake --build "build-${{ matrix.name }}" -j2
-          env ${{ matrix.environment }} \
-            ctest --test-dir "build-${{ matrix.name }}" --output-on-failure
+          env ${{ matrix.environment }} ./scripts/build.sh \
+            --build-dir "build-${{ matrix.name }}" \
+            --build-type RelWithDebInfo \
+            --sanitizer "${{ matrix.sanitizer }}" --no-tools --jobs 2

@@ -145,6 +145,23 @@ Optional installation:
 export PATH="$PWD/install/bin:$PATH"
 ```
 
+Sanitizer builds use the same dependency discovery and test path:
+
+```bash
+./scripts/build.sh --sanitizer address --build-dir build-asan
+./scripts/build.sh --sanitizer undefined --build-dir build-ubsan
+```
+
+Run the fresh importer-only, Release, ASan, UBSan, and schedule A/B
+qualification matrix with:
+
+```bash
+./scripts/release-check.sh --jobs 2
+```
+
+LeakSanitizer requires ptrace support. In a restricted local environment, use
+`ASAN_OPTIONS=detect_leaks=0`; CI keeps leak detection enabled.
+
 The current install rules publish only `deepforge-compile` and
 `deepforge-benchmark`. Library headers, static libraries, and a CMake package
 are not yet installed as a stable SDK. Use the source-tree CMake targets for
@@ -461,13 +478,18 @@ Runtime contract:
 
 ```bash
 DEEPFORGE_BENCHMARK=build/tools/deepforge-benchmark
-"$DEEPFORGE_BENCHMARK" --profile=all --iterations=3
+"$DEEPFORGE_BENCHMARK" \
+  --profile=all --iterations=3 --schedule=both
 ```
 
 Profiles are `small`, `medium`, `large`, or `all`; iterations must be in
-`[1,1000]`. CSV output includes compilation time, per-execution time, GFLOP/s,
-and maximum absolute and relative differences from the scalar result. The
-benchmark is a regression baseline, not a performance guarantee across hosts.
+`[1,1000]`. Schedule policy is `auto` (default), `baseline`, or `both`. CSV
+output includes the policy and selected `direct-c-vf<VF>-ku<KU>` name,
+compilation time, per-execution time, GFLOP/s, and maximum absolute and relative
+differences from the scalar result. The cost model applies only to the original
+optimized static packed f32 Conv path; generic graphs report
+`generic-reference`. The benchmark is a regression baseline, not a performance
+guarantee across hosts.
 
 ## 10. Troubleshooting
 

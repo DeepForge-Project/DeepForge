@@ -19,6 +19,30 @@ option(DEEPFORGE_BUILD_TESTS "Build DeepForge tests" OFF)
 option(DEEPFORGE_BUILD_TOOLS "Build DeepForge command-line tools" ON)
 option(DEEPFORGE_BUILD_IMPORTER "Build the CPU-only serialized Graph importer" ON)
 option(DEEPFORGE_ENABLE_MLIR "Enable the MLIR-dependent compiler components" ON)
+set(DEEPFORGE_SANITIZER "none" CACHE STRING
+    "Runtime sanitizer: none, address, or undefined")
+set_property(CACHE DEEPFORGE_SANITIZER PROPERTY STRINGS none address undefined)
+string(TOLOWER "${DEEPFORGE_SANITIZER}" DEEPFORGE_SANITIZER)
+
+if(NOT DEEPFORGE_SANITIZER MATCHES "^(none|address|undefined)$")
+    message(FATAL_ERROR
+        "DEEPFORGE_SANITIZER must be none, address, or undefined")
+endif()
+if(NOT DEEPFORGE_SANITIZER STREQUAL "none")
+    if(MSVC OR NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+        message(FATAL_ERROR
+            "DEEPFORGE_SANITIZER requires GCC or Clang compatible flags")
+    endif()
+    if(DEEPFORGE_SANITIZER STREQUAL "address")
+        set(DEEPFORGE_SANITIZER_FLAGS -fsanitize=address
+            -fno-omit-frame-pointer)
+    else()
+        set(DEEPFORGE_SANITIZER_FLAGS -fsanitize=undefined
+            -fno-sanitize=vptr -fno-omit-frame-pointer)
+    endif()
+    add_compile_options(${DEEPFORGE_SANITIZER_FLAGS})
+    add_link_options(${DEEPFORGE_SANITIZER_FLAGS})
+endif()
 
 # ---- Find MLIR (optional for the importer-only build) ----
 if(DEEPFORGE_ENABLE_MLIR)

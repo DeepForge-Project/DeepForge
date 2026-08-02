@@ -123,12 +123,13 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
 - overlap checks based on read/write access rather than Conv-specific names;
 - `.dfo` format version 2 containing a generic tensor/argument table and
   per-variant symbols. C6 later advanced the writer to version 3 for dynamic
-  policy metadata and version 4 for ragged storage references while retaining
-  prior-version read compatibility.
+  policy metadata, version 4 for ragged storage references, and version 5 for
+  packed logical-sequence divisors while retaining prior-version read
+  compatibility.
 
 The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic, and
-format-v3 shape-override artifacts. Current compilations write format v4.
-Unknown artifact versions remain hard errors.
+format-v3 shape-override and format-v4 ragged-storage artifacts. Current
+compilations write format v5. Unknown artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
 
@@ -249,7 +250,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Three independently validated increments are complete.
+**Status:** in progress. Four independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -261,12 +262,18 @@ static f32 SDPA forward with independently ragged Q/K/V/O and independently
 paged K/V. It validates prefix contents and compact spans at execution, guards
 invalid page IDs from addressing memory, persists storage references in
 artifact v4, and tests exact allocations, independent K/V page orderings,
-artifact reload, malformed metadata, Release, ASan, and UBSan.
+artifact reload, malformed metadata, Release, ASan, and UBSan. The fourth adds
+ragged forward row outputs and backward tensors, validates backward max-total
+hints, supports independently compacted K/V page tables, and implements
+standard-f32 forward block masks plus forward/backward sink tokens and dSink.
+Artifact v5 records the page-table block divisor. Independent references,
+finite differences, non-contiguous compressed masks, exact allocations,
+malformed metadata, reload, and sanitizer coverage form its acceptance set.
 
 **Work:** expand dynamic behavior beyond the delivered pointwise subset; add
-ragged/paged backward and packed metadata where Frontend serialization exposes
-them; add reorder formats outside the delivered scale subset; then add fusion,
-threading, vector schedules, and family-specific cost models.
+paged backward where Frontend serialization exposes it; add reorder formats
+outside the delivered scale subset; then add fusion, threading, vector
+schedules, and family-specific cost models.
 
 **Exit gate:** every in-scope capability-matrix row is validated; all sanitizer
 and compatibility suites pass; scalar and optimized variants agree within
@@ -348,8 +355,8 @@ The project owner accepted these defaults on 2026-07-31:
    legal data-type matrix in C5.
 3. **Shape order:** support arbitrary-rank static shapes first; defer dynamic,
    ragged, reorder, and paged metadata to C6.
-4. **Artifact compatibility:** retain readers for `.dfo` v1-v3 and write v4 for
-   new compilations after the compatible generic, dynamic-policy, and ragged
-   metadata migrations.
+4. **Artifact compatibility:** retain readers for `.dfo` v1-v4 and write v5 for
+   new compilations after the compatible generic, dynamic-policy, ragged, and
+   packed-sequence-divisor metadata migrations.
 5. **External validation:** keep CPU CI self-contained and eventually use an
    optional GPU runner for producer/differential release checks.

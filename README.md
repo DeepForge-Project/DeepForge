@@ -8,7 +8,7 @@ subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
 **Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
-the first three C6 increments are implemented. The end-to-end path
+the first four C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
@@ -136,13 +136,15 @@ non-broadcasting, plain f32 `POINTWISE` node: serialized dimensions are maxima,
 and the Frontend-shaped override arrays supply positive runtime dimensions and
 strides within the compiled storage bounds. The standalone dynamic-shape
 context flag is preserved as plan metadata but does not by itself make another
-operation dynamic. Static f32 SDPA forward additionally supports external
-ragged Q/K/V/O storage with validated element-prefix offsets and independently
-paged K/V caches with INT32 page tables; both forms require padding and explicit
-sequence lengths. Explicit aliasing, scalar pass-by-value, ragged/paged
-backward attention, packed page tables and row outputs, other tensor
-reordering, distributed peer statistics, and documented optional specialized
-attention features are not executable yet.
+operation dynamic. Static f32 SDPA supports external ragged forward data and
+row outputs, and ragged backward data and gradients, using validated
+element-prefix offsets. Forward also supports independently paged K/V caches,
+including compact INT32 page tables with independent prefixes, compressed
+UINT8 block masks, and per-query-head sink logits; backward can return the sink
+gradient. These storage forms require padding and explicit sequence lengths.
+Explicit aliasing, scalar pass-by-value, paged backward attention, other tensor
+reordering, distributed peer statistics, and optional features on the
+specialized FP8/MXFP8 attention paths are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
 nodes, layouts, execution metadata, or shapes are rejected with stable
@@ -355,7 +357,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, exact-pointwise runtime shape override, and static f32 SDPA forward ragged/paged storage complete; broader metadata, optimization, and release qualification remain |
+| C6 | In progress: `F8_128x4`, exact-pointwise runtime shape override, and standard f32 SDPA ragged/packed/block-mask/sink metadata complete; broader dynamic/reorder behavior, optimization, and release qualification remain |
 | Optimize | Pending benchmark-driven outer-loop tiling, padding fusion, and parallelism |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

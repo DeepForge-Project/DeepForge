@@ -169,6 +169,27 @@ std::size_t offset4(std::array<std::int64_t, 4> const& dimensions,
         ((a * dimensions[1] + b) * dimensions[2] + c) * dimensions[3] + d);
 }
 
+std::vector<float> pack_bshd(
+    std::vector<float> const& dense,
+    std::array<std::int64_t, 4> const& dimensions,
+    std::vector<std::int32_t> const& lengths) {
+    std::vector<float> packed;
+    for (std::int64_t batch = 0; batch < dimensions[0]; ++batch) {
+        for (std::int64_t sequence = 0;
+             sequence < lengths[static_cast<std::size_t>(batch)];
+             ++sequence) {
+            for (std::int64_t head = 0; head < dimensions[1]; ++head) {
+                for (std::int64_t embedding = 0;
+                     embedding < dimensions[3]; ++embedding) {
+                    packed.push_back(dense[offset4(
+                        dimensions, batch, head, sequence, embedding)]);
+                }
+            }
+        }
+    }
+    return packed;
+}
+
 std::uint64_t splitmix(std::uint64_t seed,
                        std::uint64_t offset,
                        std::uint64_t linear) {
@@ -282,6 +303,8 @@ struct AttentionCase {
     std::vector<float> v;
     std::vector<float> bias;
     std::vector<float> dropout_mask;
+    std::vector<std::uint8_t> block_mask;
+    std::vector<float> sink_token;
     std::vector<std::int32_t> seq_q{2};
     std::vector<std::int32_t> seq_kv{2};
     float attention_scale = 0.7F;
@@ -321,6 +344,7 @@ float alibi_slope(std::int64_t head, std::int64_t heads) {
 
 bool score_valid(AttentionCase const& configuration,
                  std::int64_t batch,
+                 std::int64_t head,
                  std::int64_t query,
                  std::int64_t key) {
     if (configuration.padding &&
@@ -343,6 +367,19 @@ bool score_valid(AttentionCase const& configuration,
     if (configuration.left_bound &&
         difference <= shift - *configuration.left_bound) {
         return false;
+    }
+    if (!configuration.block_mask.empty()) {
+        auto const query_tiles = (configuration.q_dim[2] - 1) / 128 + 1;
+        auto const key_tiles = (configuration.k_dim[2] - 1) / 128 + 1;
+        auto const key_bytes = (key_tiles + 7) / 8;
+        std::array<std::int64_t, 4> const mask_dim{
+            configuration.q_dim[0], configuration.q_dim[1], query_tiles,
+            key_bytes};
+        auto const key_tile = key / 128;
+        auto const byte = configuration.block_mask[offset4(
+            mask_dim, batch, head, query / 128, key_tile / 8)];
+        auto const bit = static_cast<std::uint8_t>(1U << (key_tile % 8));
+        if ((byte & bit) == 0) return false;
     }
     return true;
 }
@@ -373,11 +410,14 @@ AttentionReference attention_forward(AttentionCase const& configuration) {
             auto const kh = h / (h_q / configuration.k_dim[1]);
             auto const vh = h / (h_q / configuration.v_dim[1]);
             for (std::int64_t q = 0; q < s_q; ++q) {
-                auto maximum = -std::numeric_limits<float>::infinity();
+                auto maximum = configuration.sink_token.empty()
+                                   ? -std::numeric_limits<float>::infinity()
+                                   : configuration.sink_token[
+                                         static_cast<std::size_t>(h)];
                 std::vector<float> scores(static_cast<std::size_t>(s_kv),
                                           maximum);
                 for (std::int64_t k = 0; k < s_kv; ++k) {
-                    if (!score_valid(configuration, n, q, k)) continue;
+                    if (!score_valid(configuration, n, h, q, k)) continue;
                     double score = 0.0;
                     for (std::int64_t d = 0; d < d_qk; ++d) {
                         score += configuration.q[offset4(
@@ -399,9 +439,14 @@ AttentionReference attention_forward(AttentionCase const& configuration) {
                     maximum = std::max(maximum,
                                        scores[static_cast<std::size_t>(k)]);
                 }
-                double sum = 0.0;
+                double sum = configuration.sink_token.empty()
+                                 ? 0.0
+                                 : std::exp(
+                                       configuration.sink_token[
+                                           static_cast<std::size_t>(h)] -
+                                       maximum);
                 for (std::int64_t k = 0; k < s_kv; ++k) {
-                    if (!score_valid(configuration, n, q, k)) continue;
+                    if (!score_valid(configuration, n, h, q, k)) continue;
                     sum += std::exp(scores[static_cast<std::size_t>(k)] -
                                     maximum);
                 }
@@ -413,7 +458,7 @@ AttentionReference attention_forward(AttentionCase const& configuration) {
                     maximum + static_cast<float>(std::log(sum));
                 for (std::int64_t k = 0; k < s_kv; ++k) {
                     auto const score_index = offset4(score_dim, n, h, q, k);
-                    if (score_valid(configuration, n, q, k) && sum > 0.0) {
+                    if (score_valid(configuration, n, h, q, k) && sum > 0.0) {
                         result.probability[score_index] = static_cast<float>(
                             std::exp(scores[static_cast<std::size_t>(k)] -
                                      maximum) /
@@ -561,6 +606,121 @@ Json fully_ragged_sdpa_graph() {
                           std::move(tensors));
 }
 
+Json ragged_row_sdpa_graph() {
+    auto ragged = [](Json value, std::int64_t offset_uid,
+                     std::string offset_name) {
+        value["ragged_offset_uid"] = offset_uid;
+        value["ragged_offset_name"] = std::move(offset_name);
+        return value;
+    };
+    Json tensors = Json::object();
+    tensors["821"] = ragged(
+        strided_tensor("Q", 821, {2, 2, 3, 2}, {12, 2, 4, 1}), 831,
+        "Q_offsets");
+    tensors["822"] = ragged(
+        strided_tensor("K", 822, {2, 1, 3, 2}, {6, 2, 2, 1}), 832,
+        "K_offsets");
+    tensors["823"] = ragged(
+        strided_tensor("V", 823, {2, 1, 3, 2}, {6, 2, 2, 1}), 833,
+        "V_offsets");
+    tensors["824"] = tensor("SEQ_LEN_Q", 824, {2, 1, 1, 1}, "INT32");
+    tensors["825"] = tensor("SEQ_LEN_KV", 825, {2, 1, 1, 1}, "INT32");
+    tensors["826"] = ragged(
+        strided_tensor("O", 826, {2, 2, 3, 2}, {12, 2, 4, 1}), 834,
+        "O_offsets");
+    for (auto const& [uid, name] :
+         std::array<std::pair<std::int64_t, char const*>, 3>{
+             std::pair{827, "Stats"}, std::pair{828, "Max"},
+             std::pair{829, "Sum_exp"}}) {
+        tensors[std::to_string(uid)] = ragged(
+            strided_tensor(name, uid, {2, 2, 3, 1}, {6, 1, 2, 1}),
+            835, "Row_offsets");
+    }
+    tensors["831"] = tensor("Q_offsets", 831, {3, 1, 1, 1}, "INT64");
+    tensors["832"] = tensor("K_offsets", 832, {3, 1, 1, 1}, "INT32");
+    tensors["833"] = tensor("V_offsets", 833, {3, 1, 1, 1}, "INT64");
+    tensors["834"] = tensor("O_offsets", 834, {3, 1, 1, 1}, "INT32");
+    tensors["835"] = tensor("Row_offsets", 835, {3, 1, 1, 1}, "INT64");
+    auto node = forward_attention_node(
+        Json::object({{"Q", 821},
+                      {"K", 822},
+                      {"V", 823},
+                      {"SEQ_LEN_Q", 824},
+                      {"SEQ_LEN_KV", 825}}),
+        Json::object({{"O", 826},
+                      {"Stats", 827},
+                      {"Max", 828},
+                      {"Sum_exp", 829}}),
+        true, false, true, nullptr, nullptr, nullptr, "TOP_LEFT", 0.55F);
+    return graph_document(4011, "ragged_row_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json ragged_sdpa_backward_graph() {
+    auto ragged = [](Json value, std::int64_t offset_uid,
+                     std::string offset_name) {
+        value["ragged_offset_uid"] = offset_uid;
+        value["ragged_offset_name"] = std::move(offset_name);
+        return value;
+    };
+    Json tensors = Json::object();
+    auto qo = [&](std::string name, std::int64_t uid,
+                  std::int64_t offset_uid, std::string offset_name) {
+        return ragged(strided_tensor(std::move(name), uid, {2, 2, 3, 2},
+                                     {12, 2, 4, 1}),
+                      offset_uid, std::move(offset_name));
+    };
+    auto kv = [&](std::string name, std::int64_t uid,
+                  std::int64_t offset_uid, std::string offset_name) {
+        return ragged(strided_tensor(std::move(name), uid, {2, 1, 3, 2},
+                                     {6, 2, 2, 1}),
+                      offset_uid, std::move(offset_name));
+    };
+    tensors["901"] = qo("Q", 901, 921, "Q_offsets");
+    tensors["902"] = kv("K", 902, 922, "K_offsets");
+    tensors["903"] = kv("V", 903, 923, "V_offsets");
+    tensors["904"] = qo("O", 904, 924, "O_offsets");
+    tensors["905"] = qo("dO", 905, 924, "O_offsets");
+    tensors["906"] = ragged(
+        strided_tensor("Stats", 906, {2, 2, 3, 1}, {6, 1, 2, 1}),
+        925, "Stats_offsets");
+    tensors["907"] = tensor("SEQ_LEN_Q", 907, {2, 1, 1, 1}, "INT32");
+    tensors["908"] = tensor("SEQ_LEN_KV", 908, {2, 1, 1, 1}, "INT32");
+    tensors["909"] = qo("dQ", 909, 921, "Q_offsets");
+    tensors["910"] = kv("dK", 910, 922, "K_offsets");
+    tensors["911"] = kv("dV", 911, 923, "V_offsets");
+    tensors["921"] = tensor("Q_offsets", 921, {3, 1, 1, 1}, "INT64");
+    tensors["922"] = tensor("K_offsets", 922, {3, 1, 1, 1}, "INT32");
+    tensors["923"] = tensor("V_offsets", 923, {3, 1, 1, 1}, "INT64");
+    tensors["924"] = tensor("O_offsets", 924, {3, 1, 1, 1}, "INT32");
+    tensors["925"] = tensor("Stats_offsets", 925, {3, 1, 1, 1}, "INT64");
+    Json node{{"tag", "SDPA_BWD"},
+              {"name", "ragged_sdpa_backward"},
+              {"inputs",
+               Json::object({{"Q", 901},
+                             {"K", 902},
+                             {"V", 903},
+                             {"O", 904},
+                             {"dO", 905},
+                             {"Stats", 906},
+                             {"SEQ_LEN_Q", 907},
+                             {"SEQ_LEN_KV", 908}})},
+              {"outputs",
+               Json::object({{"dQ", 909}, {"dK", 910}, {"dV", 911}})},
+              {"alibi_mask", false},
+              {"padding_mask", true},
+              {"dropout_probability", nullptr},
+              {"attn_scale_value", 0.55},
+              {"left_bound", nullptr},
+              {"right_bound", nullptr},
+              {"diagonal_alignment", "TOP_LEFT"},
+              {"max_total_seq_len_q", 3},
+              {"max_total_seq_len_kv", 5},
+              {"is_deterministic_algorithm", false}};
+    return graph_document(4012, "ragged_sdpa_backward", Json::array({node}),
+                          std::move(tensors));
+}
+
 Json paged_sdpa_graph() {
     Json tensors = Json::object();
     tensors["701"] = tensor("Q", 701, {2, 1, 1, 2});
@@ -583,6 +743,115 @@ Json paged_sdpa_graph() {
         nullptr, "TOP_LEFT", 0.5F);
     node["max_seq_len_kv"] = 3;
     return graph_document(4009, "paged_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json block_mask_sdpa_graph() {
+    Json tensors = Json::object();
+    tensors["1101"] = tensor("Q", 1101, {1, 1, 129, 1});
+    tensors["1102"] = tensor("K", 1102, {1, 1, 1025, 1});
+    tensors["1103"] = tensor("V", 1103, {1, 1, 1025, 1});
+    tensors["1104"] = strided_tensor("Block_mask", 1104, {1, 1, 2, 2},
+                                      {8, 8, 4, 1}, "UINT8");
+    tensors["1105"] = tensor("O", 1105, {1, 1, 129, 1});
+    tensors["1106"] = tensor("Stats", 1106, {1, 1, 129, 1});
+    tensors["1107"] = tensor("Max", 1107, {1, 1, 129, 1});
+    tensors["1108"] = tensor("Sum_exp", 1108, {1, 1, 129, 1});
+    auto node = forward_attention_node(
+        Json::object({{"Q", 1101},
+                      {"K", 1102},
+                      {"V", 1103},
+                      {"Block_mask", 1104}}),
+        Json::object({{"O", 1105},
+                      {"Stats", 1106},
+                      {"Max", 1107},
+                      {"Sum_exp", 1108}}),
+        true, false, false, nullptr, nullptr, nullptr, "TOP_LEFT", 0.75F);
+    return graph_document(4013, "block_mask_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json sink_sdpa_graph() {
+    Json tensors = Json::object();
+    tensors["1201"] = tensor("Q", 1201, {2, 2, 2, 2});
+    tensors["1202"] = tensor("K", 1202, {2, 1, 3, 2});
+    tensors["1203"] = tensor("V", 1203, {2, 1, 3, 2});
+    tensors["1204"] = tensor("SINK_TOKEN", 1204, {1, 2, 1, 1});
+    tensors["1205"] = tensor("SEQ_LEN_Q", 1205, {2, 1, 1, 1}, "INT32");
+    tensors["1206"] = tensor("SEQ_LEN_KV", 1206, {2, 1, 1, 1}, "INT32");
+    tensors["1207"] = tensor("O", 1207, {2, 2, 2, 2});
+    tensors["1208"] = tensor("Stats", 1208, {2, 2, 2, 1});
+    tensors["1209"] = tensor("Max", 1209, {2, 2, 2, 1});
+    tensors["1210"] = tensor("Sum_exp", 1210, {2, 2, 2, 1});
+    tensors["1211"] = tensor("Dropout_mask", 1211, {2, 2, 2, 3});
+    tensors["1212"] = tensor("Dropout_scale", 1212, {1, 1, 1, 1});
+    auto node = forward_attention_node(
+        Json::object({{"Q", 1201},
+                      {"K", 1202},
+                      {"V", 1203},
+                      {"SINK_TOKEN", 1204},
+                      {"SEQ_LEN_Q", 1205},
+                      {"SEQ_LEN_KV", 1206},
+                      {"Dropout_mask", 1211},
+                      {"Dropout_scale", 1212}}),
+        Json::object({{"O", 1207},
+                      {"Stats", 1208},
+                      {"Max", 1209},
+                      {"Sum_exp", 1210}}),
+        true, false, true, nullptr, nullptr, nullptr, "TOP_LEFT", 0.6F);
+    return graph_document(4014, "sink_sdpa", Json::array({node}),
+                          std::move(tensors));
+}
+
+Json sink_sdpa_backward_graph() {
+    Json tensors = Json::object();
+    tensors["1221"] = tensor("Q", 1221, {2, 2, 2, 2});
+    tensors["1222"] = tensor("K", 1222, {2, 1, 3, 2});
+    tensors["1223"] = tensor("V", 1223, {2, 1, 3, 2});
+    tensors["1224"] = tensor("O", 1224, {2, 2, 2, 2});
+    tensors["1225"] = tensor("dO", 1225, {2, 2, 2, 2});
+    tensors["1226"] = tensor("Stats", 1226, {2, 2, 2, 1});
+    tensors["1227"] = tensor("SINK_TOKEN", 1227, {1, 2, 1, 1});
+    tensors["1228"] = tensor("SEQ_LEN_Q", 1228, {2, 1, 1, 1}, "INT32");
+    tensors["1229"] = tensor("SEQ_LEN_KV", 1229, {2, 1, 1, 1}, "INT32");
+    tensors["1230"] = tensor("dQ", 1230, {2, 2, 2, 2});
+    tensors["1231"] = tensor("dK", 1231, {2, 1, 3, 2});
+    tensors["1232"] = tensor("dV", 1232, {2, 1, 3, 2});
+    tensors["1233"] = tensor("DSINK_TOKEN", 1233, {1, 2, 1, 1});
+    tensors["1234"] = tensor("Dropout_mask", 1234, {2, 2, 2, 3});
+    tensors["1235"] = tensor("Dropout_scale", 1235, {1, 1, 1, 1});
+    tensors["1236"] = tensor("Dropout_scale_inv", 1236, {1, 1, 1, 1});
+    Json node{{"tag", "SDPA_BWD"},
+              {"name", "sink_sdpa_backward"},
+              {"inputs",
+               Json::object({{"Q", 1221},
+                             {"K", 1222},
+                             {"V", 1223},
+                             {"O", 1224},
+                             {"dO", 1225},
+                             {"Stats", 1226},
+                             {"SINK_TOKEN", 1227},
+                             {"SEQ_LEN_Q", 1228},
+                             {"SEQ_LEN_KV", 1229},
+                             {"Dropout_mask", 1234},
+                             {"Dropout_scale", 1235},
+                             {"Dropout_scale_inv", 1236}})},
+              {"outputs",
+               Json::object({{"dQ", 1230},
+                             {"dK", 1231},
+                             {"dV", 1232},
+                             {"DSINK_TOKEN", 1233}})},
+              {"alibi_mask", false},
+              {"padding_mask", true},
+              {"dropout_probability", nullptr},
+              {"attn_scale_value", 0.6},
+              {"left_bound", nullptr},
+              {"right_bound", nullptr},
+              {"diagonal_alignment", "TOP_LEFT"},
+              {"max_total_seq_len_q", nullptr},
+              {"max_total_seq_len_kv", nullptr},
+              {"is_deterministic_algorithm", false}};
+    return graph_document(4015, "sink_sdpa_backward", Json::array({node}),
                           std::move(tensors));
 }
 
@@ -700,6 +969,7 @@ struct AttentionGradients {
     std::vector<float> d_k;
     std::vector<float> d_v;
     std::vector<float> d_bias;
+    std::vector<float> d_sink;
 };
 
 AttentionGradients attention_backward(
@@ -716,6 +986,7 @@ AttentionGradients attention_backward(
     result.d_k.assign(configuration.k.size(), 0.0F);
     result.d_v.assign(configuration.v.size(), 0.0F);
     result.d_bias.assign(configuration.bias.size(), 0.0F);
+    result.d_sink.assign(configuration.sink_token.size(), 0.0F);
     for (std::int64_t n = 0; n < b; ++n) {
         for (std::int64_t h = 0; h < h_q; ++h) {
             auto const kh = h / (h_q / configuration.k_dim[1]);
@@ -725,6 +996,17 @@ AttentionGradients attention_backward(
                 for (std::int64_t d = 0; d < d_v; ++d) {
                     auto const index = offset4(configuration.o_dim, n, h, q, d);
                     output_dot += forward.o[index] * d_o[index];
+                }
+                if (!result.d_sink.empty() &&
+                    (!configuration.padding ||
+                     q < configuration.seq_q[static_cast<std::size_t>(n)])) {
+                    auto const row = static_cast<std::size_t>(
+                        (n * h_q + h) * s_q + q);
+                    result.d_sink[static_cast<std::size_t>(h)] -=
+                        std::exp(configuration.sink_token[
+                                     static_cast<std::size_t>(h)] -
+                                 forward.stats[row]) *
+                        static_cast<float>(output_dot);
                 }
                 for (std::int64_t k = 0; k < s_kv; ++k) {
                     auto const score_index = offset4(score_dim, n, h, q, k);
@@ -742,7 +1024,9 @@ AttentionGradients attention_backward(
                                       (static_cast<float>(d_p) * mask -
                                        static_cast<float>(output_dot) *
                                            configuration.dropout_scale_inv);
-                    result.d_bias[offset4(dbias_dim, 0, h, 0, k)] += base;
+                    if (!result.d_bias.empty()) {
+                        result.d_bias[offset4(dbias_dim, 0, h, 0, k)] += base;
+                    }
                     auto const d_score = base * configuration.attention_scale;
                     for (std::int64_t d = 0; d < d_qk; ++d) {
                         result.d_q[offset4(configuration.q_dim, n, h, q, d)] +=
@@ -787,6 +1071,23 @@ std::vector<float> finite_difference_q(AttentionCase configuration,
         configuration.q[index] -= 2.0F * epsilon;
         auto const negative = attention_loss(configuration, d_o);
         configuration.q[index] += epsilon;
+        gradient[index] = static_cast<float>((positive - negative) /
+                                             (2.0 * epsilon));
+    }
+    return gradient;
+}
+
+std::vector<float> finite_difference_sink(AttentionCase configuration,
+                                          std::vector<float> const& d_o) {
+    constexpr float epsilon = 1.0e-3F;
+    std::vector<float> gradient(configuration.sink_token.size());
+    for (std::size_t index = 0; index < configuration.sink_token.size();
+         ++index) {
+        configuration.sink_token[index] += epsilon;
+        auto const positive = attention_loss(configuration, d_o);
+        configuration.sink_token[index] -= 2.0F * epsilon;
+        auto const negative = attention_loss(configuration, d_o);
+        configuration.sink_token[index] += epsilon;
         gradient[index] = static_cast<float>((positive - negative) /
                                              (2.0 * epsilon));
     }
@@ -1086,13 +1387,13 @@ void run_ragged_attention_tests(TestRunner& tests) {
 
     std::vector<std::uint8_t> artifact;
     status = deepforge::compiler::serialize_artifact(compilation, artifact);
-    tests.good(status, "serialize ragged artifact v4");
+    tests.good(status, "serialize ragged artifact v5");
     std::unique_ptr<deepforge::runtime::Executable> loaded;
     if (status.is_good()) {
         status = deepforge::compiler::load_artifact_executable(artifact,
                                                                loaded);
     }
-    tests.good(status, "load ragged artifact v4");
+    tests.good(status, "load ragged artifact v5");
     if (loaded) {
         std::fill(output.begin(), output.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr);
@@ -1140,25 +1441,6 @@ void run_ragged_attention_tests(TestRunner& tests) {
     packed_configuration.right_bound.reset();
     packed_configuration.attention_scale = 0.55F;
     auto packed_reference = attention_forward(packed_configuration);
-    auto pack_bshd = [](std::vector<float> const& dense,
-                        std::array<std::int64_t, 4> const& dimensions,
-                        std::vector<std::int32_t> const& lengths) {
-        std::vector<float> packed;
-        for (std::int64_t batch = 0; batch < dimensions[0]; ++batch) {
-            for (std::int64_t sequence = 0;
-                 sequence < lengths[static_cast<std::size_t>(batch)];
-                 ++sequence) {
-                for (std::int64_t head = 0; head < dimensions[1]; ++head) {
-                    for (std::int64_t embedding = 0;
-                         embedding < dimensions[3]; ++embedding) {
-                        packed.push_back(dense[offset4(
-                            dimensions, batch, head, sequence, embedding)]);
-                    }
-                }
-            }
-        }
-        return packed;
-    };
     auto packed_q = pack_bshd(packed_configuration.q,
                               packed_configuration.q_dim,
                               packed_configuration.seq_q);
@@ -1198,6 +1480,131 @@ void run_ragged_attention_tests(TestRunner& tests) {
         tests.good(status, "execute producer-stride ragged Q/K/V/O SDPA");
         tests.check(close_vectors(packed_o, packed_expected_o),
                     "BSHD-packed inner strides and independent prefixes match reference");
+    }
+
+    std::array<std::int64_t, 4> const row_dimensions{2, 2, 3, 1};
+    auto packed_stats = pack_bshd(packed_reference.stats, row_dimensions,
+                                  packed_configuration.seq_q);
+    auto packed_maximum = pack_bshd(packed_reference.maximum, row_dimensions,
+                                    packed_configuration.seq_q);
+    auto packed_sum = pack_bshd(packed_reference.sum_exp, row_dimensions,
+                                packed_configuration.seq_q);
+    std::vector<float> row_o(packed_expected_o.size(), -99.0F);
+    std::vector<float> row_stats(packed_stats.size(), -99.0F);
+    std::vector<float> row_maximum(packed_maximum.size(), -99.0F);
+    std::vector<float> row_sum(packed_sum.size(), -99.0F);
+    std::vector<std::int64_t> row_v_offsets{0, 6, 10};
+    std::vector<std::int32_t> row_o_offsets{0, 8, 12};
+    std::vector<std::int64_t> row_offsets{0, 4, 6};
+    deepforge::compiler::CompilationResult row_compilation;
+    status = compile_document(ragged_row_sdpa_graph(), row_compilation);
+    tests.good(status, "compile ragged SDPA row outputs");
+    if (status.is_good() && row_compilation.executable) {
+        deepforge::runtime::VariantPack row_pack{
+            {821, packed_q.data()},
+            {822, packed_k.data()},
+            {823, packed_v.data()},
+            {824, packed_configuration.seq_q.data()},
+            {825, packed_configuration.seq_kv.data()},
+            {826, row_o.data()},
+            {827, row_stats.data()},
+            {828, row_maximum.data()},
+            {829, row_sum.data()},
+            {831, q_offsets.data()},
+            {832, k_offsets.data()},
+            {833, row_v_offsets.data()},
+            {834, row_o_offsets.data()},
+            {835, row_offsets.data()}};
+        status = row_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, row_pack,
+            nullptr);
+        tests.good(status, "execute exact-allocation ragged row outputs");
+        tests.check(
+            close_vectors(row_o, packed_expected_o) &&
+                close_vectors(row_stats, packed_stats) &&
+                close_vectors(row_maximum, packed_maximum) &&
+                close_vectors(row_sum, packed_sum),
+            "packed O/Stats/Max/Sum_exp match dense attention reference");
+    }
+
+    std::vector<float> dense_d_o(packed_reference.o.size());
+    for (std::size_t index = 0; index < dense_d_o.size(); ++index) {
+        dense_d_o[index] =
+            static_cast<float>(static_cast<int>((index * 5) % 17) - 8) /
+            9.0F;
+    }
+    auto packed_gradients = attention_backward(
+        packed_configuration, packed_reference, dense_d_o);
+    auto packed_d_o = pack_bshd(dense_d_o, packed_configuration.o_dim,
+                                packed_configuration.seq_q);
+    auto expected_d_q = pack_bshd(
+        packed_gradients.d_q, packed_configuration.q_dim,
+        packed_configuration.seq_q);
+    auto expected_d_k = pack_bshd(
+        packed_gradients.d_k, packed_configuration.k_dim,
+        packed_configuration.seq_kv);
+    auto expected_d_v = pack_bshd(
+        packed_gradients.d_v, packed_configuration.v_dim,
+        packed_configuration.seq_kv);
+    std::vector<float> packed_d_q(expected_d_q.size(), -99.0F);
+    std::vector<float> packed_d_k(expected_d_k.size(), -99.0F);
+    std::vector<float> packed_d_v(expected_d_v.size(), -99.0F);
+    std::vector<std::int32_t> backward_o_offsets{0, 8, 12};
+    deepforge::compiler::CompilationResult backward_compilation;
+    status = compile_document(ragged_sdpa_backward_graph(),
+                              backward_compilation);
+    tests.good(status, "compile producer-stride ragged SDPA backward");
+    if (status.is_good() && backward_compilation.executable) {
+        deepforge::runtime::VariantPack backward_pack{
+            {901, packed_q.data()},
+            {902, packed_k.data()},
+            {903, packed_v.data()},
+            {904, packed_expected_o.data()},
+            {905, packed_d_o.data()},
+            {906, packed_stats.data()},
+            {907, packed_configuration.seq_q.data()},
+            {908, packed_configuration.seq_kv.data()},
+            {909, packed_d_q.data()},
+            {910, packed_d_k.data()},
+            {911, packed_d_v.data()},
+            {921, q_offsets.data()},
+            {922, k_offsets.data()},
+            {923, row_v_offsets.data()},
+            {924, backward_o_offsets.data()},
+            {925, row_offsets.data()}};
+        status = backward_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            backward_pack, nullptr);
+        tests.good(status, "execute exact-allocation ragged SDPA backward");
+        tests.check(close_vectors(packed_d_q, expected_d_q, 3.0e-4F) &&
+                        close_vectors(packed_d_k, expected_d_k, 3.0e-4F) &&
+                        close_vectors(packed_d_v, expected_d_v, 3.0e-4F),
+                    "packed backward Q/K/V gradients match dense reference");
+
+        std::vector<std::uint8_t> backward_artifact;
+        status = deepforge::compiler::serialize_artifact(
+            backward_compilation, backward_artifact);
+        tests.good(status, "serialize ragged backward artifact");
+        std::unique_ptr<deepforge::runtime::Executable> loaded_backward;
+        if (status.is_good()) {
+            status = deepforge::compiler::load_artifact_executable(
+                backward_artifact, loaded_backward);
+        }
+        tests.good(status, "load ragged backward artifact");
+        if (loaded_backward) {
+            std::fill(packed_d_q.begin(), packed_d_q.end(), -99.0F);
+            std::fill(packed_d_k.begin(), packed_d_k.end(), -99.0F);
+            std::fill(packed_d_v.begin(), packed_d_v.end(), -99.0F);
+            status = loaded_backward->execute(nullptr, backward_pack,
+                                              nullptr);
+            tests.good(status, "execute reloaded ragged SDPA backward");
+            tests.check(close_vectors(packed_d_q, expected_d_q, 3.0e-4F) &&
+                            close_vectors(packed_d_k, expected_d_k,
+                                          3.0e-4F) &&
+                            close_vectors(packed_d_v, expected_d_v,
+                                          3.0e-4F),
+                        "artifact preserves packed backward addressing");
+        }
     }
 }
 
@@ -1287,6 +1694,124 @@ void run_paged_attention_tests(TestRunner& tests) {
                     "both-paged inference follows Frontend Bias precedence");
     }
 
+    auto packed_graph = paged_sdpa_graph();
+    packed_graph["tensors"]["704"]["ragged_offset_uid"] = 709;
+    packed_graph["tensors"]["704"]["ragged_offset_name"] =
+        "Page_table_K_offsets";
+    packed_graph["tensors"]["705"]["ragged_offset_uid"] = 710;
+    packed_graph["tensors"]["705"]["ragged_offset_name"] =
+        "Page_table_V_offsets";
+    packed_graph["tensors"]["709"] =
+        tensor("Page_table_K_offsets", 709, {3, 1, 1, 1}, "INT64");
+    packed_graph["tensors"]["710"] =
+        tensor("Page_table_V_offsets", 710, {3, 1, 1, 1}, "INT32");
+    deepforge::compiler::CompilationResult packed_compilation;
+    status = compile_document(packed_graph, packed_compilation);
+    tests.good(status, "compile packed independently paged K/V SDPA");
+    if (status.is_good() && packed_compilation.executable) {
+        AttentionCase packed_configuration = configuration;
+        packed_configuration.seq_kv = {3, 1};
+        auto packed_reference = attention_forward(packed_configuration);
+        std::vector<std::int32_t> packed_page_k{2, 0, 1};
+        std::vector<std::int32_t> packed_page_v{1, 3, 2};
+        std::vector<std::int64_t> packed_page_k_offsets{0, 2, 3};
+        std::vector<std::int32_t> packed_page_v_offsets{0, 2, 3};
+        auto make_packed_container =
+            [&](std::vector<float> const& logical,
+                std::vector<std::int32_t> const& table,
+                auto const& offsets) {
+                std::vector<float> container(16, -17.0F);
+                for (std::int64_t batch = 0; batch < 2; ++batch) {
+                    auto const sequence_length =
+                        packed_configuration.seq_kv[
+                            static_cast<std::size_t>(batch)];
+                    for (std::int64_t sequence = 0;
+                         sequence < sequence_length; ++sequence) {
+                        auto const table_index =
+                            offsets[static_cast<std::size_t>(batch)] +
+                            sequence / 2;
+                        auto const page = table[static_cast<std::size_t>(
+                            table_index)];
+                        for (std::int64_t embedding = 0; embedding < 2;
+                             ++embedding) {
+                            container[offset4(container_dim, page, 0,
+                                              sequence % 2, embedding)] =
+                                logical[offset4(packed_configuration.k_dim,
+                                                batch, 0, sequence,
+                                                embedding)];
+                        }
+                    }
+                }
+                return container;
+            };
+        auto packed_k_container = make_packed_container(
+            packed_configuration.k, packed_page_k, packed_page_k_offsets);
+        auto packed_v_container = make_packed_container(
+            packed_configuration.v, packed_page_v, packed_page_v_offsets);
+        std::vector<float> packed_output(packed_reference.o.size(), -99.0F);
+        auto const page_metadata_is_packed = [&](std::int64_t uid,
+                                                 std::int64_t offset_uid) {
+            auto const argument = std::find_if(
+                packed_compilation.metadata.arguments.begin(),
+                packed_compilation.metadata.arguments.end(),
+                [&](auto const& candidate) { return candidate.uid == uid; });
+            return argument != packed_compilation.metadata.arguments.end() &&
+                   argument->storage_policy ==
+                       deepforge::compiler::TensorStoragePolicy::
+                           kRaggedBatchPrefix &&
+                   argument->ragged_offset_uid == offset_uid &&
+                   argument->ragged_sequence_uid == 707 &&
+                   argument->ragged_sequence_divisor == 2;
+        };
+        tests.check(page_metadata_is_packed(704, 709) &&
+                        page_metadata_is_packed(705, 710),
+                    "packed page metadata records prefix UIDs and block divisor");
+        deepforge::runtime::VariantPack packed_pack{
+            {701, packed_configuration.q.data()},
+            {702, packed_k_container.data()},
+            {703, packed_v_container.data()},
+            {704, packed_page_k.data()},
+            {705, packed_page_v.data()},
+            {706, packed_configuration.seq_q.data()},
+            {707, packed_configuration.seq_kv.data()},
+            {708, packed_output.data()},
+            {709, packed_page_k_offsets.data()},
+            {710, packed_page_v_offsets.data()}};
+        status = packed_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, packed_pack,
+            nullptr);
+        tests.good(status, "execute exact-allocation packed page tables");
+        tests.check(close_vectors(packed_output, packed_reference.o),
+                    "packed page tables match contiguous SDPA reference");
+
+        std::vector<std::uint8_t> packed_artifact;
+        status = deepforge::compiler::serialize_artifact(packed_compilation,
+                                                         packed_artifact);
+        tests.good(status, "serialize packed-page artifact v5");
+        std::unique_ptr<deepforge::runtime::Executable> loaded_packed;
+        if (status.is_good()) {
+            status = deepforge::compiler::load_artifact_executable(
+                packed_artifact, loaded_packed);
+        }
+        tests.good(status, "load packed-page artifact v5");
+        if (loaded_packed) {
+            std::fill(packed_output.begin(), packed_output.end(), -99.0F);
+            status = loaded_packed->execute(nullptr, packed_pack, nullptr);
+            tests.good(status, "execute reloaded packed page tables");
+            tests.check(close_vectors(packed_output, packed_reference.o),
+                        "artifact preserves packed page-table addressing");
+        }
+
+        packed_page_k_offsets = {0, 1, 3};
+        status = packed_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, packed_pack,
+            nullptr);
+        tests.check(
+            status.code() ==
+                deepforge::import::ErrorCode::kInvalidVariantPack,
+            "runtime rejects packed page segments shorter than block demand");
+    }
+
     page_k[0] = -1;
     page_k[1] = 99;
     page_v[0] = -1;
@@ -1297,6 +1822,189 @@ void run_paged_attention_tests(TestRunner& tests) {
     tests.good(status, "execute guarded invalid page IDs without an OOB access");
     tests.check(output[0] == 0.0F && output[1] == 0.0F,
                 "invalid page IDs produce guarded zero K/V loads");
+}
+
+void run_block_mask_tests(TestRunner& tests) {
+    AttentionCase configuration;
+    configuration.q_dim = {1, 1, 129, 1};
+    configuration.k_dim = {1, 1, 1025, 1};
+    configuration.v_dim = {1, 1, 1025, 1};
+    configuration.o_dim = {1, 1, 129, 1};
+    configuration.q.resize(129);
+    configuration.k.resize(1025);
+    configuration.v.resize(1025);
+    for (std::size_t index = 0; index < configuration.q.size(); ++index) {
+        configuration.q[index] =
+            static_cast<float>(static_cast<int>(index % 7) - 3) / 5.0F;
+    }
+    for (std::size_t index = 0; index < configuration.k.size(); ++index) {
+        configuration.k[index] =
+            static_cast<float>(static_cast<int>(index % 11) - 5) / 7.0F;
+        configuration.v[index] =
+            static_cast<float>(static_cast<int>(index % 17) - 8) / 6.0F;
+    }
+    configuration.block_mask = {0x00, 0x01, 0x01, 0x00};
+    configuration.bias.clear();
+    configuration.dropout_mask.clear();
+    configuration.dropout_scale = 1.0F;
+    configuration.dropout_scale_inv = 1.0F;
+    configuration.padding = false;
+    configuration.left_bound.reset();
+    configuration.right_bound.reset();
+    configuration.attention_scale = 0.75F;
+    auto reference = attention_forward(configuration);
+
+    deepforge::compiler::CompilationResult compilation;
+    auto status = compile_document(block_mask_sdpa_graph(), compilation);
+    tests.good(status, "compile UINT8 block-mask SDPA");
+    if (status.is_bad() || !compilation.executable) return;
+    std::vector<float> output(reference.o.size(), -99.0F);
+    std::vector<float> stats(reference.stats.size(), -99.0F);
+    std::vector<float> maximum(reference.maximum.size(), -99.0F);
+    std::vector<float> sum_exp(reference.sum_exp.size(), -99.0F);
+    std::vector<std::uint8_t> strided_block_mask{
+        0x00, 0x01, 0xff, 0xff, 0x01, 0x00};
+    deepforge::runtime::VariantPack pack{{1101, configuration.q.data()},
+                                         {1102, configuration.k.data()},
+                                         {1103, configuration.v.data()},
+                                         {1104, strided_block_mask.data()},
+                                         {1105, output.data()},
+                                         {1106, stats.data()},
+                                         {1107, maximum.data()},
+                                         {1108, sum_exp.data()}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
+    tests.good(status, "execute UINT8 block-mask SDPA");
+    tests.check(close_vectors(output, reference.o) &&
+                    close_vectors(stats, reference.stats) &&
+                    close_vectors(maximum, reference.maximum) &&
+                    close_vectors(sum_exp, reference.sum_exp),
+                "LSB-first block mask matches independent tiled reference");
+    tests.check(output.front() == configuration.v[1024] &&
+                    output[127] == configuration.v[1024] &&
+                    output.back() != configuration.v[1024],
+                "block-mask bytes select independent query and key tiles");
+}
+
+void run_sink_token_tests(TestRunner& tests) {
+    AttentionCase configuration;
+    configuration.q_dim = {2, 2, 2, 2};
+    configuration.k_dim = {2, 1, 3, 2};
+    configuration.v_dim = {2, 1, 3, 2};
+    configuration.o_dim = {2, 2, 2, 2};
+    configuration.q.resize(16);
+    configuration.k.resize(12);
+    configuration.v.resize(12);
+    for (std::size_t index = 0; index < configuration.q.size(); ++index) {
+        configuration.q[index] =
+            static_cast<float>(static_cast<int>(index % 9) - 4) / 6.0F;
+    }
+    for (std::size_t index = 0; index < configuration.k.size(); ++index) {
+        configuration.k[index] =
+            static_cast<float>(static_cast<int>((index * 3) % 13) - 6) /
+            8.0F;
+        configuration.v[index] =
+            static_cast<float>(static_cast<int>((index * 5) % 11) - 5) /
+            7.0F;
+    }
+    configuration.bias.clear();
+    configuration.dropout_mask.resize(24);
+    for (std::size_t index = 0; index < configuration.dropout_mask.size();
+         ++index) {
+        configuration.dropout_mask[index] =
+            (index % 4 == 1 || index % 7 == 0) ? 0.0F : 1.0F;
+    }
+    configuration.dropout_scale = 1.25F;
+    configuration.dropout_scale_inv = 0.8F;
+    configuration.sink_token = {0.35F, -0.4F};
+    configuration.padding = true;
+    configuration.seq_q = {2, 1};
+    configuration.seq_kv = {3, 2};
+    configuration.left_bound.reset();
+    configuration.right_bound.reset();
+    configuration.attention_scale = 0.6F;
+    auto reference = attention_forward(configuration);
+
+    deepforge::compiler::CompilationResult forward_compilation;
+    auto status = compile_document(sink_sdpa_graph(), forward_compilation);
+    tests.good(status, "compile sink-token SDPA forward");
+    if (status.is_bad() || !forward_compilation.executable) return;
+    std::vector<float> output(reference.o.size(), -99.0F);
+    std::vector<float> stats(reference.stats.size(), -99.0F);
+    std::vector<float> maximum(reference.maximum.size(), -99.0F);
+    std::vector<float> sum_exp(reference.sum_exp.size(), -99.0F);
+    std::array<float, 1> dropout_scale{configuration.dropout_scale};
+    std::array<float, 1> dropout_scale_inv{
+        configuration.dropout_scale_inv};
+    deepforge::runtime::VariantPack forward_pack{
+        {1201, configuration.q.data()},
+        {1202, configuration.k.data()},
+        {1203, configuration.v.data()},
+        {1204, configuration.sink_token.data()},
+        {1205, configuration.seq_q.data()},
+        {1206, configuration.seq_kv.data()},
+        {1211, configuration.dropout_mask.data()},
+        {1212, dropout_scale.data()},
+        {1207, output.data()},
+        {1208, stats.data()},
+        {1209, maximum.data()},
+        {1210, sum_exp.data()}};
+    status = forward_compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, forward_pack,
+        nullptr);
+    tests.good(status, "execute sink-token SDPA forward");
+    tests.check(close_vectors(output, reference.o) &&
+                    close_vectors(stats, reference.stats) &&
+                    close_vectors(maximum, reference.maximum) &&
+                    close_vectors(sum_exp, reference.sum_exp),
+                "sink token participates in normalization and row metadata");
+
+    std::vector<float> d_o(reference.o.size());
+    for (std::size_t index = 0; index < d_o.size(); ++index) {
+        d_o[index] =
+            static_cast<float>(static_cast<int>((index * 7) % 19) - 9) /
+            10.0F;
+    }
+    auto gradients = attention_backward(configuration, reference, d_o);
+    deepforge::compiler::CompilationResult backward_compilation;
+    status = compile_document(sink_sdpa_backward_graph(),
+                              backward_compilation);
+    tests.good(status, "compile sink-token SDPA backward");
+    if (status.is_bad() || !backward_compilation.executable) return;
+    std::vector<float> d_q(gradients.d_q.size(), -99.0F);
+    std::vector<float> d_k(gradients.d_k.size(), -99.0F);
+    std::vector<float> d_v(gradients.d_v.size(), -99.0F);
+    std::vector<float> d_sink(gradients.d_sink.size(), -99.0F);
+    deepforge::runtime::VariantPack backward_pack{
+        {1221, configuration.q.data()},
+        {1222, configuration.k.data()},
+        {1223, configuration.v.data()},
+        {1224, reference.o.data()},
+        {1225, d_o.data()},
+        {1226, reference.stats.data()},
+        {1227, configuration.sink_token.data()},
+        {1228, configuration.seq_q.data()},
+        {1229, configuration.seq_kv.data()},
+        {1234, configuration.dropout_mask.data()},
+        {1235, dropout_scale.data()},
+        {1236, dropout_scale_inv.data()},
+        {1230, d_q.data()},
+        {1231, d_k.data()},
+        {1232, d_v.data()},
+        {1233, d_sink.data()}};
+    status = backward_compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, backward_pack,
+        nullptr);
+    tests.good(status, "execute sink-token SDPA backward");
+    tests.check(close_vectors(d_q, gradients.d_q, 3.0e-4F) &&
+                    close_vectors(d_k, gradients.d_k, 3.0e-4F) &&
+                    close_vectors(d_v, gradients.d_v, 3.0e-4F) &&
+                    close_vectors(d_sink, gradients.d_sink, 3.0e-4F),
+                "sink backward gradients match independent reference");
+    tests.check(close_vectors(d_sink,
+                              finite_difference_sink(configuration, d_o),
+                              2.0e-3F),
+                "dSink matches finite differences without attention scaling");
 }
 
 void run_internal_dropout_tests(TestRunner& tests) {
@@ -1471,14 +2179,23 @@ void run_rejection_tests(TestRunner& tests) {
     tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
                 "SDPA rejects Stats inconsistent with generate_stats");
 
-    auto unsupported_block = feature_sdpa_graph();
-    unsupported_block["tensors"]["120"] =
-        tensor("Block_mask", 120, {1, 1, 1, 1});
-    unsupported_block["nodes"][0]["inputs"]["Block_mask"] = 120;
-    status = compile_document(unsupported_block, rejected);
-    tests.check(status.code() ==
-                    deepforge::import::ErrorCode::kUnsupportedOperation,
-                "SDPA reports block-mask deferral explicitly");
+    auto invalid_block_shape = block_mask_sdpa_graph();
+    invalid_block_shape["tensors"]["1104"]["dim"] = {1, 1, 2, 1};
+    status = compile_document(invalid_block_shape, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "SDPA rejects an incorrectly compressed block mask");
+
+    auto missing_sink = sink_sdpa_backward_graph();
+    missing_sink["nodes"][0]["inputs"].erase("SINK_TOKEN");
+    status = compile_document(missing_sink, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "DSINK_TOKEN requires the corresponding sink input");
+
+    auto invalid_sink_shape = sink_sdpa_graph();
+    invalid_sink_shape["tensors"]["1204"]["dim"] = {1, 1, 1, 1};
+    status = compile_document(invalid_sink_shape, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "sink token must provide one value per query head");
 
     auto invalid_ragged_shape = ragged_sdpa_graph();
     invalid_ragged_shape["tensors"]["605"]["dim"] = {2, 1, 1, 1};
@@ -1520,16 +2237,18 @@ void run_rejection_tests(TestRunner& tests) {
                     deepforge::import::ErrorCode::kUnsupportedOperation,
                 "paged SDPA requires padding and sequence metadata");
 
-    auto packed_page_table = paged_sdpa_graph();
-    packed_page_table["tensors"]["704"]["ragged_offset_uid"] = 709;
-    packed_page_table["tensors"]["704"]["ragged_offset_name"] =
-        "Page_table_K_offsets";
-    packed_page_table["tensors"]["709"] =
-        tensor("Page_table_K_offsets", 709, {3, 1, 1, 1}, "INT64");
-    status = compile_document(packed_page_table, rejected);
+    auto dense_max_total = feature_sdpa_backward_graph();
+    dense_max_total["nodes"][0]["max_total_seq_len_q"] = 2;
+    status = compile_document(dense_max_total, rejected);
     tests.check(status.code() ==
                     deepforge::import::ErrorCode::kUnsupportedOperation,
-                "SDPA reports packed page-table deferral explicitly");
+                "max-total sequence hints require ragged backward storage");
+
+    auto invalid_max_total = ragged_sdpa_backward_graph();
+    invalid_max_total["nodes"][0]["max_total_seq_len_kv"] = 7;
+    status = compile_document(invalid_max_total, rejected);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "ragged backward rejects max-total values beyond B*Skv");
 
     auto invalid_bottom_right = feature_sdpa_graph();
     invalid_bottom_right["nodes"][0]["diagonal_alignment"] = "BOTTOM_RIGHT";
@@ -1549,6 +2268,8 @@ int main() {
     run_feature_attention_tests(tests);
     run_ragged_attention_tests(tests);
     run_paged_attention_tests(tests);
+    run_block_mask_tests(tests);
+    run_sink_token_tests(tests);
     run_internal_dropout_tests(tests);
     run_alibi_tests(tests);
     run_bottom_right_tests(tests);

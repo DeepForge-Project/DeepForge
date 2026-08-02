@@ -115,12 +115,12 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
 - 支持任意 graph signature 和 workspace view 的生成式 adapter；
 - 基于读写属性而不是 Conv 固定名称的 overlap 检查；
 - `.dfo` format v2，保存通用 tensor/argument table 和各 CPU variant symbol；C6
-  后续为 dynamic policy metadata 将 writer 升到 v3，再为 ragged storage reference
-  升到 v4，并保持旧版本读取兼容。
+  后续为 dynamic policy metadata 将 writer 升到 v3，为 ragged storage reference
+  升到 v4，再为 packed logical-sequence divisor 升到 v5，并保持旧版本读取兼容。
 
-兼容规则继续读取 format-v1 Conv2D、format-v2 generic 和 format-v3 shape-override
-artifact；当前新编译 graph 写 format v4。未知 artifact version 仍然直接报错，不能
-静默解释。
+兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override 和
+format-v4 ragged-storage artifact；当前新编译 graph 写 format v5。未知 artifact
+version 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
 
@@ -232,7 +232,7 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中，三个独立验收增量已完成。第一个为 block-scale conversion 的
+**状态**：进行中，四个独立验收增量已完成。第一个为 block-scale conversion 的
 E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 `F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
 `POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
@@ -241,12 +241,15 @@ E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 拒绝。第三个为静态 f32 SDPA forward 实现独立 ragged Q/K/V/O 和独立 paged K/V；
 执行前校验 prefix 内容和紧凑 span，阻止非法 page ID 参与内存寻址，以 artifact v4
 持久化 storage reference，并测试精确分配、独立 K/V page ordering、artifact reload、
-错误 metadata 以及 Release/ASan/UBSan。
+错误 metadata 以及 Release/ASan/UBSan。第四个加入 ragged forward row output 和
+backward tensor，校验 backward max-total hint，支持 K/V page table 各自独立紧凑
+存储，并实现标准 f32 forward block mask 及 forward/backward sink token/dSink。
+Artifact v5 记录 page-table block divisor；独立 reference、有限差分、非连续压缩
+mask、精确分配、错误 metadata、reload 和 sanitizer 构成该增量的验收集。
 
-**工作内容**：将动态行为扩展到已交付 pointwise 子集之外；加入 ragged/paged
-backward 和 Frontend serialization 暴露的 packed metadata；加入已交付 scale 子集
-外的 reorder format；随后增加 fusion、threading、vector schedule 和各操作族 cost
-model。
+**工作内容**：将动态行为扩展到已交付 pointwise 子集之外；加入 Frontend
+serialization 暴露的 paged backward；加入已交付 scale 子集外的 reorder format；
+随后增加 fusion、threading、vector schedule 和各操作族 cost model。
 
 **退出条件**：范围内 capability matrix 全部达到已验证状态；sanitizer 和兼容性
 测试全部通过；scalar 与 optimized variant 在每种操作的容差内一致；中英文性能
@@ -318,7 +321,7 @@ saturation 和 RNG 可复现性都有专门测试。
    矩阵。
 3. **Shape 顺序**：先支持任意 rank 的静态 shape；dynamic、ragged、reorder 和
    paged metadata 延后到 C6。
-4. **Artifact 兼容**：在 generic、dynamic-policy 和 ragged metadata 兼容迁移后，
-   保留 `.dfo` v1-v3 reader，新编译结果写 v4。
+4. **Artifact 兼容**：在 generic、dynamic-policy、ragged 和 packed-sequence-divisor
+   metadata 兼容迁移后，保留 `.dfo` v1-v4 reader，新编译结果写 v5。
 5. **外部验证**：CPU CI 保持自包含，未来使用可选 GPU runner 做 producer 和差分
    发布验证。

@@ -228,7 +228,8 @@ Status resolve_ragged_size(
     auto const offset_pointer = pointers.at(offset->uid);
     auto const sequence_pointer = pointers.at(sequence->uid);
     auto const batches = argument.dimensions[0];
-    auto const maximum_sequence = argument.dimensions[2];
+    auto const maximum_sequence =
+        argument.dimensions[2] * argument.ragged_sequence_divisor;
     auto read_offset = [&](std::int64_t batch) {
         return load_signed_element(
             offset_pointer, offset->data_type,
@@ -264,13 +265,17 @@ Status resolve_ragged_size(
                         "runtime sequence length exceeds the ragged logical "
                         "bound");
         }
+        auto const storage_sequence =
+            sequence_length / argument.ragged_sequence_divisor +
+            (sequence_length % argument.ragged_sequence_divisor != 0 ? 1
+                                                                     : 0);
         std::uint64_t required_span = 0;
-        if (sequence_length != 0) {
+        if (storage_sequence != 0) {
             required_span = 1;
             for (std::size_t axis = 1; axis < argument.dimensions.size();
                  ++axis) {
                 auto const extent = static_cast<std::uint64_t>(
-                    (axis == 2 ? sequence_length
+                    (axis == 2 ? storage_sequence
                                : argument.dimensions[axis]) -
                     1);
                 auto const stride =

@@ -1126,14 +1126,46 @@ Status analyze_graph(SerializedGraph const& graph,
 
     std::map<std::int64_t, Usage> usage;
     std::map<std::int64_t, std::int64_t> ragged_sequence_uids;
+    std::map<std::int64_t, std::int64_t> ragged_sequence_divisors;
     auto const ragged_port_supported = [](OperationTag tag, bool input,
                                           std::string_view port) {
-        if (tag != OperationTag::kSdpa) {
-            return false;
+        if (tag == OperationTag::kSdpa) {
+            return input ? (port == "Q" || port == "K" || port == "V" ||
+                            port == "Page_table_K" ||
+                            port == "Page_table_V")
+                         : (port == "O" || port == "Stats" ||
+                            port == "Max" || port == "Sum_exp");
         }
-        return input ? (port == "Q" || port == "K" || port == "V" ||
-                        port == "Page_table_K" || port == "Page_table_V")
-                     : port == "O";
+        if (tag == OperationTag::kSdpaBwd) {
+            return input ? (port == "Q" || port == "K" || port == "V" ||
+                            port == "O" || port == "dO" ||
+                            port == "Stats")
+                         : (port == "dQ" || port == "dK" || port == "dV");
+        }
+        return false;
+    };
+    auto const ragged_sequence_port = [](OperationTag tag, bool input,
+                                         std::string_view port)
+        -> std::optional<std::string_view> {
+        if (tag == OperationTag::kSdpa) {
+            if (!input || port == "Q") return "SEQ_LEN_Q";
+            if (port == "K" || port == "V" || port == "Page_table_K" ||
+                port == "Page_table_V") {
+                return "SEQ_LEN_KV";
+            }
+        }
+        if (tag == OperationTag::kSdpaBwd) {
+            if ((input && (port == "Q" || port == "O" || port == "dO" ||
+                           port == "Stats")) ||
+                (!input && port == "dQ")) {
+                return "SEQ_LEN_Q";
+            }
+            if ((input && (port == "K" || port == "V")) ||
+                (!input && (port == "dK" || port == "dV"))) {
+                return "SEQ_LEN_KV";
+            }
+        }
+        return std::nullopt;
     };
     for (std::size_t node_index = 0; node_index < graph.nodes.size();
          ++node_index) {
@@ -1159,8 +1191,7 @@ Status analyze_graph(SerializedGraph const& graph,
                 return unsupported(
                     "nodes[" + std::to_string(node_index) + "].inputs." +
                         port,
-                    "ragged storage is currently limited to SDPA forward "
-                    "Q/K/V ports");
+                    "ragged storage is unsupported on this operation port");
             }
             if (!is_specialized_operation(node.tag) &&
                 tensor->data_type != import::DataType::kFloat32 &&
@@ -1186,8 +1217,7 @@ Status analyze_graph(SerializedGraph const& graph,
                 return unsupported(
                     "nodes[" + std::to_string(node_index) + "].outputs." +
                         port,
-                    "ragged storage is currently limited to the SDPA "
-                    "forward O port");
+                    "ragged storage is unsupported on this operation port");
             }
             if (!is_specialized_operation(node.tag) &&
                 tensor->data_type != import::DataType::kFloat32) {
@@ -1227,22 +1257,26 @@ Status analyze_graph(SerializedGraph const& graph,
                 info.last_consumer, static_cast<std::uint64_t>(node_index));
             auto const& tensor = graph.tensors.at(uid);
             if (tensor.ragged_offset_uid) {
-                auto const sequence_port = port == "Q" ? "SEQ_LEN_Q"
-                                                        : "SEQ_LEN_KV";
+                auto const sequence_port =
+                    ragged_sequence_port(node.tag, true, port);
+                if (!sequence_port) {
+                    return fail(ErrorCode::kInvalidValue, tensor.name,
+                                "ragged input has no sequence association");
+                }
                 auto const sequence_reference =
-                    operation->inputs.find(sequence_port);
+                    operation->inputs.find(std::string(*sequence_port));
                 if (sequence_reference == operation->inputs.end()) {
                     return fail(
                         ErrorCode::kInvalidValue,
                         "nodes[" + std::to_string(node_index) +
-                            "].inputs." + sequence_port,
+                            "].inputs." + std::string(*sequence_port),
                         "ragged attention requires sequence-length metadata");
                 }
                 std::int64_t sequence_uid = 0;
                 status = reference_uid(
                     sequence_reference->second,
                     "nodes[" + std::to_string(node_index) + "].inputs." +
-                        sequence_port,
+                        std::string(*sequence_port),
                     sequence_uid);
                 if (status.is_bad()) return status;
                 auto const [sequence_it, inserted] =
@@ -1251,7 +1285,33 @@ Status analyze_graph(SerializedGraph const& graph,
                     return unsupported(
                         tensor.name,
                         "one ragged tensor cannot use different sequence "
-                        "metadata across operations");
+                            "metadata across operations");
+                }
+                std::int64_t divisor = 1;
+                if (node.tag == OperationTag::kSdpa &&
+                    (port == "Page_table_K" || port == "Page_table_V")) {
+                    auto const container_port =
+                        port == "Page_table_K" ? "K" : "V";
+                    auto const container_reference =
+                        operation->inputs.find(container_port);
+                    auto const* container =
+                        container_reference == operation->inputs.end()
+                            ? nullptr
+                            : graph.find_tensor(container_reference->second);
+                    if (container == nullptr || container->dim.size() != 4) {
+                        return fail(ErrorCode::kInvalidShape, tensor.name,
+                                    "packed page table has no rank-4 "
+                                    "container association");
+                    }
+                    divisor = container->dim[2];
+                }
+                auto const [divisor_it, divisor_inserted] =
+                    ragged_sequence_divisors.emplace(uid, divisor);
+                if (!divisor_inserted && divisor_it->second != divisor) {
+                    return unsupported(
+                        tensor.name,
+                        "one ragged tensor cannot use different sequence "
+                        "divisors across operations");
                 }
                 auto& offset_info = usage[*tensor.ragged_offset_uid];
                 offset_info.read = true;
@@ -1274,21 +1334,27 @@ Status analyze_graph(SerializedGraph const& graph,
             info.producer = static_cast<std::uint64_t>(node_index);
             auto const& tensor = graph.tensors.at(uid);
             if (tensor.ragged_offset_uid) {
+                auto const sequence_port =
+                    ragged_sequence_port(node.tag, false, port);
+                if (!sequence_port) {
+                    return fail(ErrorCode::kInvalidValue, tensor.name,
+                                "ragged output has no sequence association");
+                }
                 auto const sequence_reference =
-                    operation->inputs.find("SEQ_LEN_Q");
+                    operation->inputs.find(std::string(*sequence_port));
                 if (sequence_reference == operation->inputs.end()) {
                     return fail(
                         ErrorCode::kInvalidValue,
                         "nodes[" + std::to_string(node_index) +
-                            "].inputs.SEQ_LEN_Q",
-                        "ragged attention output requires query-length "
+                            "].inputs." + std::string(*sequence_port),
+                        "ragged attention output requires sequence-length "
                         "metadata");
                 }
                 std::int64_t sequence_uid = 0;
                 status = reference_uid(
                     sequence_reference->second,
                     "nodes[" + std::to_string(node_index) +
-                        "].inputs.SEQ_LEN_Q",
+                        "].inputs." + std::string(*sequence_port),
                     sequence_uid);
                 if (status.is_bad()) return status;
                 auto const [sequence_it, inserted] =
@@ -1351,6 +1417,11 @@ Status analyze_graph(SerializedGraph const& graph,
                 TensorStoragePolicy::kRaggedBatchPrefix;
             argument.ragged_offset_uid = *tensor.ragged_offset_uid;
             argument.ragged_sequence_uid = sequence->second;
+            auto const divisor = ragged_sequence_divisors.find(uid);
+            argument.ragged_sequence_divisor =
+                divisor == ragged_sequence_divisors.end()
+                    ? 1
+                    : divisor->second;
         }
         if (!execution_storage_bytes(tensor, argument.size_bytes)) {
             return fail(ErrorCode::kDimensionOverflow, tensor.name,

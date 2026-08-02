@@ -461,10 +461,16 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     checks, compact alias spans, independent page tables, safe invalid-page
     addressing, artifact v4 persistence/reload, and malformed metadata are
     covered by Release, ASan, and UBSan tests.
+12. Completed C6.4 standard-f32 SDPA metadata: ragged forward row outputs and
+    backward arguments, max-total validation hints, independently packed K/V
+    page tables, compressed forward block masks, and forward/backward sink
+    tokens with dSink. Artifact v5 persists packed sequence divisors; reference,
+    finite-difference, exact-allocation, malformed-metadata, reload, Release,
+    ASan, and UBSan tests cover the increment.
 
-The remaining C6 functional work is broader dynamic behavior, backward/packed
-ragged and paged metadata, reorder formats outside that scale subset,
-optimization, and release qualification. Benchmark-driven optimization remains owned by the
+The remaining C6 functional work is broader dynamic behavior, paged backward,
+reorder formats outside that scale subset, optimization, and release
+qualification. Benchmark-driven optimization remains owned by the
 Loop/Schedule layer: establish repeatable pinned-core measurements first, then
 evaluate outer tiling, padding fusion, and multithreading independently.
 Optimizations must not change the frozen serialization, ABI, workspace

@@ -359,6 +359,9 @@ struct AttentionDescription {
     std::int64_t seq_kv_uid = 0;
     std::int64_t page_k_uid = 0;
     std::int64_t page_v_uid = 0;
+    std::int64_t block_mask_uid = 0;
+    std::int64_t sink_uid = 0;
+    std::int64_t dsink_uid = 0;
     std::int64_t rng_dump_uid = 0;
     TensorDesc const* q = nullptr;
     TensorDesc const* k = nullptr;
@@ -376,6 +379,9 @@ struct AttentionDescription {
     TensorDesc const* seq_kv = nullptr;
     TensorDesc const* page_k = nullptr;
     TensorDesc const* page_v = nullptr;
+    TensorDesc const* block_mask = nullptr;
+    TensorDesc const* sink = nullptr;
+    TensorDesc const* d_sink = nullptr;
     TensorDesc const* rng_dump = nullptr;
     std::vector<std::pair<std::int64_t, TensorDesc const*>> row_outputs;
     bool generate_stats = false;
@@ -551,6 +557,45 @@ Status decode_attention(OperationTag tag,
         status = require(true, "Bias", result.bias_uid, result.bias);
         if (status.is_bad()) return status;
     }
+    if (has_input(operation, "SINK_TOKEN")) {
+        status = require(true, "SINK_TOKEN", result.sink_uid, result.sink);
+        if (status.is_bad()) return status;
+    }
+    if (result.sink != nullptr) {
+        std::vector<std::int64_t> const expected{1, h_q, 1, 1};
+        if (result.sink->dim != expected) {
+            return fail(ErrorCode::kInvalidShape, path + ".SINK_TOKEN",
+                        "sink token must have dimensions [1,Hq,1,1]");
+        }
+        if (result.sink->is_virtual || result.sink->is_pass_by_value ||
+            result.sink->pass_by_value || result.sink->ragged_offset_uid ||
+            result.sink->reordering_type != "NONE") {
+            return unsupported(path + ".SINK_TOKEN",
+                               "sink token must be an external plain FLOAT "
+                               "tensor");
+        }
+    }
+    if (result.backward && has_output(operation, "DSINK_TOKEN")) {
+        if (result.sink == nullptr) {
+            return fail(ErrorCode::kInvalidValue, path + ".DSINK_TOKEN",
+                        "sink gradient requires a SINK_TOKEN input");
+        }
+        status = require(false, "DSINK_TOKEN", result.dsink_uid,
+                         result.d_sink);
+        if (status.is_bad()) return status;
+        if (result.d_sink->dim != result.sink->dim) {
+            return fail(ErrorCode::kInvalidShape, path + ".DSINK_TOKEN",
+                        "sink gradient must have dimensions [1,Hq,1,1]");
+        }
+        if (result.d_sink->is_virtual || result.d_sink->is_pass_by_value ||
+            result.d_sink->pass_by_value ||
+            result.d_sink->ragged_offset_uid ||
+            result.d_sink->reordering_type != "NONE") {
+            return unsupported(path + ".DSINK_TOKEN",
+                               "sink gradient must be an external plain "
+                               "FLOAT tensor");
+        }
+    }
     if (!result.backward && has_output(operation, "RNG_DUMP")) {
         status = require(false, "RNG_DUMP", result.rng_dump_uid,
                          result.rng_dump);
@@ -599,11 +644,10 @@ Status decode_attention(OperationTag tag,
                         path + "." + std::string(port),
                         "page table must have dimensions [B,1,P,1]");
         }
-        if (table->is_virtual || table->reordering_type != "NONE" ||
-            table->ragged_offset_uid) {
+        if (table->is_virtual || table->reordering_type != "NONE") {
             return unsupported(path + "." + std::string(port),
                                "page table must be an external plain INT32 "
-                               "tensor; packed page tables are deferred");
+                               "tensor");
         }
         return Status::ok();
     };
@@ -737,6 +781,28 @@ Status decode_attention(OperationTag tag,
         status = validate_ragged(*tensor, port);
         if (status.is_bad()) return status;
     }
+    if (result.backward) {
+        for (auto const& [tensor, port] :
+             std::array<std::pair<TensorDesc const*, std::string_view>, 5>{
+                 std::pair{result.d_o, std::string_view{"dO"}},
+                 std::pair{result.stats, std::string_view{"Stats"}},
+                 std::pair{result.d_q, std::string_view{"dQ"}},
+                 std::pair{result.d_k, std::string_view{"dK"}},
+                 std::pair{result.d_v, std::string_view{"dV"}}}) {
+            status = validate_ragged(*tensor, port);
+            if (status.is_bad()) return status;
+        }
+    } else {
+        for (auto const& [tensor, port] :
+             std::array<std::pair<TensorDesc const*, std::string_view>, 2>{
+                 std::pair{result.page_k, std::string_view{"Page_table_K"}},
+                 std::pair{result.page_v,
+                           std::string_view{"Page_table_V"}}}) {
+            if (tensor == nullptr) continue;
+            status = validate_ragged(*tensor, port);
+            if (status.is_bad()) return status;
+        }
+    }
 
     if (!read_bool_attribute(operation, "alibi_mask", result.alibi) ||
         !read_bool_attribute(operation, "padding_mask", result.padding) ||
@@ -785,6 +851,31 @@ Status decode_attention(OperationTag tag,
 
     std::vector<std::int64_t> const score_dimensions{
         b, h_q, s_q, result.s_kv};
+    if (!result.backward && has_input(operation, "Block_mask")) {
+        status = require_tensor(operation, graph, true, "Block_mask",
+                                DataType::kUInt8, path,
+                                result.block_mask_uid, result.block_mask);
+        if (status.is_bad()) return status;
+        auto const query_tiles = (s_q - 1) / 128 + 1;
+        auto const key_tiles = (result.s_kv - 1) / 128 + 1;
+        std::vector<std::int64_t> const expected{
+            b, h_q, query_tiles, (key_tiles + 7) / 8};
+        if (result.block_mask->dim != expected) {
+            return fail(
+                ErrorCode::kInvalidShape, path + ".Block_mask",
+                "block mask must have dimensions "
+                "[B,Hq,ceil(Sq/128),ceil(ceil(Skv/128)/8)]");
+        }
+        if (result.block_mask->is_virtual ||
+            result.block_mask->is_pass_by_value ||
+            result.block_mask->pass_by_value ||
+            result.block_mask->ragged_offset_uid ||
+            result.block_mask->reordering_type != "NONE") {
+            return unsupported(path + ".Block_mask",
+                               "block mask must be an external plain UINT8 "
+                               "tensor");
+        }
+    }
     if (result.bias != nullptr) {
         if (!broadcast_compatible(*result.bias, score_dimensions)) {
             return fail(ErrorCode::kInvalidShape, path + ".Bias",
@@ -814,7 +905,21 @@ Status decode_attention(OperationTag tag,
     auto const has_ragged = result.q->ragged_offset_uid ||
                             result.k->ragged_offset_uid ||
                             result.v->ragged_offset_uid ||
-                            result.o->ragged_offset_uid;
+                            result.o->ragged_offset_uid ||
+                            (result.d_o != nullptr &&
+                             result.d_o->ragged_offset_uid) ||
+                            (result.stats != nullptr &&
+                             result.stats->ragged_offset_uid) ||
+                            (result.d_q != nullptr &&
+                             result.d_q->ragged_offset_uid) ||
+                            (result.d_k != nullptr &&
+                             result.d_k->ragged_offset_uid) ||
+                            (result.d_v != nullptr &&
+                             result.d_v->ragged_offset_uid) ||
+                            (result.page_k != nullptr &&
+                             result.page_k->ragged_offset_uid) ||
+                            (result.page_v != nullptr &&
+                             result.page_v->ragged_offset_uid);
     if ((is_paged || has_ragged) && !result.padding) {
         return unsupported(path,
                            "paged and ragged SDPA require padding_mask=true "
@@ -893,15 +998,31 @@ Status decode_attention(OperationTag tag,
             return fail(ErrorCode::kInvalidValue, path,
                         "backward metadata attributes are malformed");
         }
-        if (max_q || max_kv) {
-            return unsupported(path,
-                               "packed max_total_seq_len metadata is deferred "
-                               "to C6");
-        }
-        if (has_input(operation, "SINK_TOKEN") ||
-            has_output(operation, "DSINK_TOKEN")) {
-            return unsupported(path, "sink-token attention is deferred to C6");
-        }
+        auto validate_max_total = [&](std::optional<std::int64_t> value,
+                                      std::int64_t sequence,
+                                      std::string_view name) -> Status {
+            if (!value) return Status::ok();
+            if (!has_ragged) {
+                return unsupported(
+                    path + "." + std::string(name),
+                    "max_total_seq_len metadata requires packed/ragged "
+                    "attention storage");
+            }
+            if (*value <= 0 ||
+                b > std::numeric_limits<std::int64_t>::max() / sequence ||
+                *value > b * sequence) {
+                return fail(ErrorCode::kInvalidValue,
+                            path + "." + std::string(name),
+                            "maximum total sequence length must be positive "
+                            "and within the nominal aggregate bound");
+            }
+            return Status::ok();
+        };
+        status = validate_max_total(max_q, s_q, "max_total_seq_len_q");
+        if (status.is_bad()) return status;
+        status = validate_max_total(max_kv, result.s_kv,
+                                    "max_total_seq_len_kv");
+        if (status.is_bad()) return status;
     } else {
         if (!read_bool_attribute(operation, "generate_stats",
                                  result.generate_stats)) {
@@ -919,6 +1040,8 @@ Status decode_attention(OperationTag tag,
                             path + "." + std::string(port),
                             "softmax row output must be [B,Hq,Sq,1]");
             }
+            item_status = validate_ragged(*tensor, port);
+            if (item_status.is_bad()) return item_status;
             result.row_outputs.emplace_back(uid, tensor);
             if (port == "Stats") {
                 result.stats_uid = uid;
@@ -964,9 +1087,8 @@ Status decode_attention(OperationTag tag,
         if (is_mxfp8) {
             return unsupported(path, "MXFP8 attention uses the specialized C5 path");
         }
-        for (auto port : {"Block_mask", "Descale_Q", "Descale_K",
-                          "Descale_V", "Descale_S", "Scale_S", "Scale_O",
-                          "SINK_TOKEN"}) {
+        for (auto port : {"Descale_Q", "Descale_K", "Descale_V",
+                          "Descale_S", "Scale_S", "Scale_O"}) {
             if (has_input(operation, port)) {
                 return unsupported(path,
                                    std::string(port) +
@@ -1634,8 +1756,9 @@ AttentionEmissionValues prepare_attention_values(
                                     TensorDesc const& tensor) {
     std::int64_t elements = 0;
     (void)checked_ragged_storage_elements(tensor, elements);
-    auto type = ::mlir::MemRefType::get(
-        {elements}, ::mlir::Float32Type::get(builder.getContext()));
+    auto source_type = llvm::cast<::mlir::MemRefType>(buffer.getType());
+    auto type = ::mlir::MemRefType::get({elements},
+                                        source_type.getElementType());
     return ::mlir::memref::ReinterpretCastOp::create(
         builder, location, type, buffer, 0,
         llvm::ArrayRef<std::int64_t>{elements},
@@ -1676,6 +1799,7 @@ AttentionEmissionValues prepare_attention_values(
     std::int64_t tensor_uid,
     TensorDesc const& tensor,
     std::int64_t page_uid,
+    TensorDesc const& page_table,
     llvm::SmallVector<::mlir::Value> const& logical_indices,
     std::map<std::int64_t, ::mlir::Value> const& values) {
     auto const block_size = tensor.dim[2];
@@ -1688,8 +1812,16 @@ AttentionEmissionValues prepare_attention_values(
     llvm::SmallVector<::mlir::Value> table_indices{
         logical_indices[0], index_constant(builder, location, 0), page_slot,
         index_constant(builder, location, 0)};
-    auto page_i32 = ::mlir::memref::LoadOp::create(
-        builder, location, values.at(page_uid), table_indices);
+    ::mlir::Value page_i32;
+    if (page_table.ragged_offset_uid) {
+        page_i32 = ::mlir::memref::LoadOp::create(
+            builder, location, values.at(page_uid),
+            ::mlir::ValueRange{ragged_element_index(
+                builder, location, page_table, table_indices, values)});
+    } else {
+        page_i32 = ::mlir::memref::LoadOp::create(
+            builder, location, values.at(page_uid), table_indices);
+    }
     auto page_i64 = extend_i32(builder, location, page_i32);
     auto nonnegative = ::mlir::arith::CmpIOp::create(
         builder, location, ::mlir::arith::CmpIPredicate::sge, page_i64,
@@ -1724,7 +1856,8 @@ AttentionEmissionValues prepare_attention_values(
     std::map<std::int64_t, ::mlir::Value> const& values) {
     if (page_table != nullptr) {
         return load_paged_attention_tensor(builder, location, tensor_uid,
-                                           tensor, page_uid, indices, values);
+                                           tensor, page_uid, *page_table,
+                                           indices, values);
     }
     if (tensor.ragged_offset_uid) {
         return ::mlir::memref::LoadOp::create(
@@ -1785,6 +1918,28 @@ void store_attention_tensor(
     }
     ::mlir::memref::StoreOp::create(builder, location, value,
                                     values.at(tensor_uid), indices);
+}
+
+void guarded_attention_store(
+    ::mlir::OpBuilder& builder,
+    ::mlir::Location location,
+    ::mlir::Value condition,
+    ::mlir::Value value,
+    std::int64_t tensor_uid,
+    TensorDesc const& tensor,
+    llvm::SmallVector<::mlir::Value> const& indices,
+    std::map<std::int64_t, ::mlir::Value> const& values) {
+    if (!tensor.ragged_offset_uid) {
+        store_attention_tensor(builder, location, value, tensor_uid, tensor,
+                               indices, values);
+        return;
+    }
+    auto if_op = ::mlir::scf::IfOp::create(
+        builder, location, ::mlir::TypeRange{}, condition, false);
+    builder.setInsertionPointToStart(if_op.thenBlock());
+    store_attention_tensor(builder, location, value, tensor_uid, tensor,
+                           indices, values);
+    builder.setInsertionPointAfter(if_op);
 }
 
 ::mlir::Value score_is_valid(
@@ -1858,6 +2013,37 @@ void store_attention_tensor(
                 builder, location, ::mlir::arith::CmpIPredicate::sgt,
                 difference, lower));
     }
+    if (attention.block_mask != nullptr) {
+        auto const tile = index_constant(builder, location, 128);
+        auto query_tile = ::mlir::arith::DivUIOp::create(
+            builder, location, score_indices[2], tile);
+        auto key_tile = ::mlir::arith::DivUIOp::create(
+            builder, location, score_indices[3], tile);
+        auto byte_index = ::mlir::arith::DivUIOp::create(
+            builder, location, key_tile,
+            index_constant(builder, location, 8));
+        llvm::SmallVector<::mlir::Value> mask_indices{
+            score_indices[0], score_indices[1], query_tile, byte_index};
+        auto byte = ::mlir::memref::LoadOp::create(
+            builder, location, values.at(attention.block_mask_uid),
+            mask_indices);
+        auto wide_byte = ::mlir::arith::ExtUIOp::create(
+            builder, location,
+            ::mlir::IntegerType::get(builder.getContext(), 64), byte);
+        auto bit_index = ::mlir::arith::RemUIOp::create(
+            builder, location, index_as_i64(builder, location, key_tile),
+            integer_constant(builder, location, 8));
+        auto selected_bit = ::mlir::arith::AndIOp::create(
+            builder, location,
+            ::mlir::arith::ShRUIOp::create(builder, location, wide_byte,
+                                            bit_index),
+            integer_constant(builder, location, 1));
+        auto enabled = ::mlir::arith::CmpIOp::create(
+            builder, location, ::mlir::arith::CmpIPredicate::ne,
+            selected_bit, integer_constant(builder, location, 0));
+        valid = ::mlir::arith::AndIOp::create(builder, location, valid,
+                                             enabled);
+    }
     return valid;
 }
 
@@ -1878,6 +2064,27 @@ void store_attention_tensor(
     auto in_range = ::mlir::arith::CmpIOp::create(
         builder, location, ::mlir::arith::CmpIPredicate::slt,
         index_as_i64(builder, location, indices[2]), seq_q);
+    return ::mlir::arith::AndIOp::create(builder, location, nonnegative,
+                                         in_range);
+}
+
+::mlir::Value key_position_is_valid(
+    ::mlir::OpBuilder& builder,
+    ::mlir::Location location,
+    AttentionDescription const& attention,
+    llvm::SmallVector<::mlir::Value> const& indices,
+    std::map<std::int64_t, ::mlir::Value> const& values) {
+    if (!attention.padding) {
+        return true_value(builder, location);
+    }
+    auto seq_kv = sequence_length(builder, location, indices[0],
+                                  attention.seq_kv_uid, values);
+    auto nonnegative = ::mlir::arith::CmpIOp::create(
+        builder, location, ::mlir::arith::CmpIPredicate::sge, seq_kv,
+        integer_constant(builder, location, 0));
+    auto in_range = ::mlir::arith::CmpIOp::create(
+        builder, location, ::mlir::arith::CmpIPredicate::slt,
+        index_as_i64(builder, location, indices[2]), seq_kv);
     return ::mlir::arith::AndIOp::create(builder, location, nonnegative,
                                          in_range);
 }
@@ -2002,10 +2209,21 @@ SoftmaxRow compute_softmax_row(
     AttentionEmissionValues const& emission_values,
     llvm::SmallVector<::mlir::Value> const& row_indices,
     std::map<std::int64_t, ::mlir::Value> const& values) {
+    ::mlir::Value sink;
+    ::mlir::Value initial_maximum = float_constant(
+        builder, location, -std::numeric_limits<float>::infinity());
+    if (attention.sink != nullptr) {
+        llvm::SmallVector<::mlir::Value> sink_indices{
+            index_constant(builder, location, 0), row_indices[1],
+            index_constant(builder, location, 0),
+            index_constant(builder, location, 0)};
+        sink = ::mlir::memref::LoadOp::create(
+            builder, location, values.at(attention.sink_uid), sink_indices);
+        initial_maximum = sink;
+    }
     auto maximum = reduce_extent(
         builder, location, attention.s_kv,
-        float_constant(builder, location,
-                       -std::numeric_limits<float>::infinity()),
+        initial_maximum,
         [&](::mlir::OpBuilder& reduction_builder,
             ::mlir::Location reduction_location, ::mlir::Value kv,
             ::mlir::Value accumulator) {
@@ -2018,9 +2236,15 @@ SoftmaxRow compute_softmax_row(
                 reduction_builder, reduction_location, accumulator,
                 item.score);
         });
+    ::mlir::Value initial_sum = float_constant(builder, location, 0.0F);
+    if (attention.sink != nullptr) {
+        initial_sum = ::mlir::math::ExpOp::create(
+            builder, location,
+            ::mlir::arith::SubFOp::create(builder, location, sink, maximum));
+    }
     auto sum = reduce_extent(
         builder, location, attention.s_kv,
-        float_constant(builder, location, 0.0F),
+        initial_sum,
         [&](::mlir::OpBuilder& reduction_builder,
             ::mlir::Location reduction_location, ::mlir::Value kv,
             ::mlir::Value accumulator) {
@@ -2084,8 +2308,9 @@ SoftmaxRow compute_softmax_row(
     llvm::SmallVector<::mlir::Value> stats_indices{
         score_indices[0], score_indices[1], score_indices[2],
         index_constant(builder, location, 0)};
-    auto stats = ::mlir::memref::LoadOp::create(
-        builder, location, values.at(attention.stats_uid), stats_indices);
+    auto stats = guarded_attention_load(
+        builder, location, item.valid, attention.stats_uid,
+        *attention.stats, nullptr, 0, stats_indices, values);
     auto probability = ::mlir::math::ExpOp::create(
         builder, location,
         ::mlir::arith::SubFOp::create(builder, location, item.score, stats));
@@ -2162,6 +2387,21 @@ Status emit_sdpa_forward(
                 builder, location, values.at(uid), *tensor);
         }
     }
+    for (auto const& [uid, tensor] : attention.row_outputs) {
+        if (tensor->ragged_offset_uid) {
+            execution_values[uid] = flatten_ragged_buffer(
+                builder, location, values.at(uid), *tensor);
+        }
+    }
+    for (auto const& [uid, tensor] :
+         std::array<std::pair<std::int64_t, TensorDesc const*>, 2>{
+             std::pair{attention.page_k_uid, attention.page_k},
+             std::pair{attention.page_v_uid, attention.page_v}}) {
+        if (tensor != nullptr && tensor->ragged_offset_uid) {
+            execution_values[uid] = flatten_ragged_buffer(
+                builder, location, values.at(uid), *tensor);
+        }
+    }
     auto emission_values =
         prepare_attention_values(builder, location, attention,
                                  execution_values);
@@ -2173,6 +2413,14 @@ Status emit_sdpa_forward(
     std::int64_t sum_uid = 0;
     bool const has_max = tensor_uid(operation, false, "Max", max_uid);
     bool const has_sum = tensor_uid(operation, false, "Sum_exp", sum_uid);
+    auto const row_tensor = [&](std::int64_t uid) -> TensorDesc const* {
+        auto const item = std::find_if(
+            attention.row_outputs.begin(), attention.row_outputs.end(),
+            [&](auto const& candidate) { return candidate.first == uid; });
+        return item == attention.row_outputs.end() ? nullptr : item->second;
+    };
+    auto const* max_tensor = has_max ? row_tensor(max_uid) : nullptr;
+    auto const* sum_tensor = has_sum ? row_tensor(sum_uid) : nullptr;
     if (attention.stats != nullptr || has_max || has_sum) {
         std::vector<std::int64_t> const row_dimensions{
             attention.q->dim[0], attention.q->dim[1], attention.q->dim[2]};
@@ -2187,26 +2435,31 @@ Status emit_sdpa_forward(
                 llvm::SmallVector<::mlir::Value> output_indices{
                     row_indices[0], row_indices[1], row_indices[2],
                     index_constant(body_builder, body_location, 0)};
+                auto valid = query_position_is_valid(
+                    body_builder, body_location, attention, output_indices,
+                    execution_values);
                 if (attention.stats != nullptr) {
                     auto stats = ::mlir::arith::AddFOp::create(
                         body_builder, body_location, row.maximum,
                         ::mlir::math::LogOp::create(body_builder,
                                                     body_location,
                                                     row.sum_exp));
-                    ::mlir::memref::StoreOp::create(
-                        body_builder, body_location, stats,
-                        execution_values.at(attention.stats_uid),
-                        output_indices);
+                    guarded_attention_store(
+                        body_builder, body_location, valid, stats,
+                        attention.stats_uid, *attention.stats, output_indices,
+                        execution_values);
                 }
                 if (has_max) {
-                    ::mlir::memref::StoreOp::create(
-                        body_builder, body_location, row.maximum,
-                        execution_values.at(max_uid), output_indices);
+                    guarded_attention_store(
+                        body_builder, body_location, valid, row.maximum,
+                        max_uid, *max_tensor, output_indices,
+                        execution_values);
                 }
                 if (has_sum) {
-                    ::mlir::memref::StoreOp::create(
-                        body_builder, body_location, row.sum_exp,
-                        execution_values.at(sum_uid), output_indices);
+                    guarded_attention_store(
+                        body_builder, body_location, valid, row.sum_exp,
+                        sum_uid, *sum_tensor, output_indices,
+                        execution_values);
                 }
             });
         if (status.is_bad()) return status;
@@ -2262,23 +2515,12 @@ Status emit_sdpa_forward(
                             reduction_builder, reduction_location,
                             weighted_probability, v_value));
                 });
-            if (attention.o->ragged_offset_uid) {
-                auto valid = query_position_is_valid(
-                    body_builder, body_location, attention, output_indices,
-                    execution_values);
-                auto if_op = ::mlir::scf::IfOp::create(
-                    body_builder, body_location, ::mlir::TypeRange{}, valid,
-                    false);
-                body_builder.setInsertionPointToStart(if_op.thenBlock());
-                store_attention_tensor(
-                    body_builder, body_location, result, attention.o_uid,
-                    *attention.o, output_indices, execution_values);
-                body_builder.setInsertionPointAfter(if_op);
-            } else {
-                store_attention_tensor(
-                    body_builder, body_location, result, attention.o_uid,
-                    *attention.o, output_indices, execution_values);
-            }
+            auto valid = query_position_is_valid(
+                body_builder, body_location, attention, output_indices,
+                execution_values);
+            guarded_attention_store(
+                body_builder, body_location, valid, result, attention.o_uid,
+                *attention.o, output_indices, execution_values);
         });
 }
 
@@ -2288,6 +2530,8 @@ Status emit_sdpa_forward(
     AttentionDescription const& attention,
     llvm::SmallVector<::mlir::Value> const& row_indices,
     std::map<std::int64_t, ::mlir::Value> const& values) {
+    auto row_valid = query_position_is_valid(builder, location, attention,
+                                              row_indices, values);
     return reduce_extent(
         builder, location, attention.o->dim[3],
         float_constant(builder, location, 0.0F),
@@ -2296,12 +2540,13 @@ Status emit_sdpa_forward(
             ::mlir::Value accumulator) {
             llvm::SmallVector<::mlir::Value> indices{
                 row_indices[0], row_indices[1], row_indices[2], embedding};
-            auto o = ::mlir::memref::LoadOp::create(
-                reduction_builder, reduction_location,
-                values.at(attention.o_uid), indices);
-            auto d_o = ::mlir::memref::LoadOp::create(
-                reduction_builder, reduction_location,
-                values.at(attention.do_uid), indices);
+            auto o = guarded_attention_load(
+                reduction_builder, reduction_location, row_valid,
+                attention.o_uid, *attention.o, nullptr, 0, indices, values);
+            auto d_o = guarded_attention_load(
+                reduction_builder, reduction_location, row_valid,
+                attention.do_uid, *attention.d_o, nullptr, 0, indices,
+                values);
             return ::mlir::arith::AddFOp::create(
                 reduction_builder, reduction_location, accumulator,
                 ::mlir::arith::MulFOp::create(
@@ -2321,6 +2566,8 @@ Status emit_sdpa_forward(
     auto const value_head = query_to_source_head(
         builder, location, score_indices[1], attention.q->dim[1],
         attention.v->dim[1]);
+    auto source_valid = score_is_valid(builder, location, attention,
+                                       score_indices, values);
     auto d_p = reduce_extent(
         builder, location, attention.v->dim[3],
         float_constant(builder, location, 0.0F),
@@ -2332,12 +2579,14 @@ Status emit_sdpa_forward(
                 embedding};
             llvm::SmallVector<::mlir::Value> v_indices{
                 score_indices[0], value_head, score_indices[3], embedding};
-            auto d_o = ::mlir::memref::LoadOp::create(
-                reduction_builder, reduction_location,
-                values.at(attention.do_uid), do_indices);
-            auto v = ::mlir::memref::LoadOp::create(
-                reduction_builder, reduction_location,
-                values.at(attention.v_uid), v_indices);
+            auto d_o = guarded_attention_load(
+                reduction_builder, reduction_location, source_valid,
+                attention.do_uid, *attention.d_o, nullptr, 0, do_indices,
+                values);
+            auto v = guarded_attention_load(
+                reduction_builder, reduction_location, source_valid,
+                attention.v_uid, *attention.v, nullptr, 0, v_indices,
+                values);
             return ::mlir::arith::AddFOp::create(
                 reduction_builder, reduction_location, accumulator,
                 ::mlir::arith::MulFOp::create(
@@ -2366,7 +2615,24 @@ Status emit_sdpa_backward(
     ::mlir::OpBuilder& builder,
     ::mlir::Location location,
     AttentionDescription const& attention,
-    std::map<std::int64_t, ::mlir::Value> const& values) {
+    std::map<std::int64_t, ::mlir::Value> const& input_values) {
+    auto values = input_values;
+    for (auto const& [uid, tensor] :
+         std::array<std::pair<std::int64_t, TensorDesc const*>, 9>{
+             std::pair{attention.q_uid, attention.q},
+             std::pair{attention.k_uid, attention.k},
+             std::pair{attention.v_uid, attention.v},
+             std::pair{attention.o_uid, attention.o},
+             std::pair{attention.do_uid, attention.d_o},
+             std::pair{attention.stats_uid, attention.stats},
+             std::pair{attention.dq_uid, attention.d_q},
+             std::pair{attention.dk_uid, attention.d_k},
+             std::pair{attention.dv_uid, attention.d_v}}) {
+        if (tensor->ragged_offset_uid) {
+            values[uid] = flatten_ragged_buffer(
+                builder, location, input_values.at(uid), *tensor);
+        }
+    }
     auto emission_values =
         prepare_attention_values(builder, location, attention, values);
     auto status = emit_rng_dump(builder, location, attention, emission_values,
@@ -2398,18 +2664,25 @@ Status emit_sdpa_backward(
                         emission_values.attention_scale);
                     llvm::SmallVector<::mlir::Value> k_indices{
                         output_indices[0], key_head, kv, output_indices[3]};
-                    auto k = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location,
-                        values.at(attention.k_uid), k_indices);
+                    auto source_valid = score_is_valid(
+                        reduction_builder, reduction_location, attention,
+                        score_indices, values);
+                    auto k = guarded_attention_load(
+                        reduction_builder, reduction_location, source_valid,
+                        attention.k_uid, *attention.k, nullptr, 0, k_indices,
+                        values);
                     return ::mlir::arith::AddFOp::create(
                         reduction_builder, reduction_location, accumulator,
                         ::mlir::arith::MulFOp::create(
                             reduction_builder, reduction_location, gradient,
                             k));
                 });
-            ::mlir::memref::StoreOp::create(
-                body_builder, body_location, result,
-                values.at(attention.dq_uid), output_indices);
+            auto valid = query_position_is_valid(
+                body_builder, body_location, attention, output_indices,
+                values);
+            guarded_attention_store(
+                body_builder, body_location, valid, result,
+                attention.dq_uid, *attention.d_q, output_indices, values);
         });
     if (status.is_bad()) return status;
 
@@ -2448,18 +2721,25 @@ Status emit_sdpa_backward(
                     llvm::SmallVector<::mlir::Value> q_indices{
                         output_indices[0], query_head, reduction_indices[1],
                         output_indices[3]};
-                    auto q = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location,
-                        values.at(attention.q_uid), q_indices);
+                    auto source_valid = score_is_valid(
+                        reduction_builder, reduction_location, attention,
+                        score_indices, values);
+                    auto q = guarded_attention_load(
+                        reduction_builder, reduction_location, source_valid,
+                        attention.q_uid, *attention.q, nullptr, 0, q_indices,
+                        values);
                     return ::mlir::arith::AddFOp::create(
                         reduction_builder, reduction_location, accumulator,
                         ::mlir::arith::MulFOp::create(
                             reduction_builder, reduction_location, gradient,
                             q));
                 });
-            ::mlir::memref::StoreOp::create(
-                body_builder, body_location, result,
-                values.at(attention.dk_uid), output_indices);
+            auto valid = key_position_is_valid(
+                body_builder, body_location, attention, output_indices,
+                values);
+            guarded_attention_store(
+                body_builder, body_location, valid, result,
+                attention.dk_uid, *attention.d_k, output_indices, values);
         });
     if (status.is_bad()) return status;
 
@@ -2504,18 +2784,25 @@ Status emit_sdpa_backward(
                     llvm::SmallVector<::mlir::Value> do_indices{
                         output_indices[0], query_head, reduction_indices[1],
                         output_indices[3]};
-                    auto d_o = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location,
-                        values.at(attention.do_uid), do_indices);
+                    auto source_valid = score_is_valid(
+                        reduction_builder, reduction_location, attention,
+                        score_indices, values);
+                    auto d_o = guarded_attention_load(
+                        reduction_builder, reduction_location, source_valid,
+                        attention.do_uid, *attention.d_o, nullptr, 0,
+                        do_indices, values);
                     return ::mlir::arith::AddFOp::create(
                         reduction_builder, reduction_location, accumulator,
                         ::mlir::arith::MulFOp::create(
                             reduction_builder, reduction_location,
                             weighted_probability, d_o));
                 });
-            ::mlir::memref::StoreOp::create(
-                body_builder, body_location, result,
-                values.at(attention.dv_uid), output_indices);
+            auto valid = key_position_is_valid(
+                body_builder, body_location, attention, output_indices,
+                values);
+            guarded_attention_store(
+                body_builder, body_location, valid, result,
+                attention.dv_uid, *attention.d_v, output_indices, values);
         });
     if (status.is_bad()) return status;
 
@@ -2575,6 +2862,68 @@ Status emit_sdpa_backward(
                     values.at(attention.dbias_uid), output_indices);
             });
     }
+    if (status.is_bad()) return status;
+
+    if (attention.d_sink != nullptr) {
+        status = emit_flat_loop(
+            builder, location, attention.d_sink->dim, "SDPA_BWD.dSink",
+            [&](::mlir::OpBuilder& body_builder,
+                ::mlir::Location body_location,
+                llvm::SmallVector<::mlir::Value> const& output_indices) {
+                auto result = reduce_extents(
+                    body_builder, body_location,
+                    {attention.q->dim[0], attention.q->dim[2]},
+                    float_constant(body_builder, body_location, 0.0F),
+                    [&](::mlir::OpBuilder& reduction_builder,
+                        ::mlir::Location reduction_location,
+                        ::mlir::ValueRange reduction_indices,
+                        ::mlir::Value accumulator) {
+                        llvm::SmallVector<::mlir::Value> row_indices{
+                            reduction_indices[0], output_indices[1],
+                            reduction_indices[1]};
+                        llvm::SmallVector<::mlir::Value> stats_indices{
+                            row_indices[0], row_indices[1], row_indices[2],
+                            index_constant(reduction_builder,
+                                           reduction_location, 0)};
+                        auto valid = query_position_is_valid(
+                            reduction_builder, reduction_location, attention,
+                            stats_indices, values);
+                        auto stats = guarded_attention_load(
+                            reduction_builder, reduction_location, valid,
+                            attention.stats_uid, *attention.stats, nullptr, 0,
+                            stats_indices, values);
+                        auto sink = ::mlir::memref::LoadOp::create(
+                            reduction_builder, reduction_location,
+                            values.at(attention.sink_uid), output_indices);
+                        auto probability = ::mlir::math::ExpOp::create(
+                            reduction_builder, reduction_location,
+                            ::mlir::arith::SubFOp::create(
+                                reduction_builder, reduction_location, sink,
+                                stats));
+                        ::mlir::Value contribution =
+                            ::mlir::arith::NegFOp::create(
+                                reduction_builder, reduction_location,
+                                ::mlir::arith::MulFOp::create(
+                                    reduction_builder, reduction_location,
+                                    probability,
+                                    output_gradient_dot(
+                                        reduction_builder,
+                                        reduction_location, attention,
+                                        row_indices, values)));
+                        contribution = ::mlir::arith::SelectOp::create(
+                            reduction_builder, reduction_location, valid,
+                            contribution,
+                            float_constant(reduction_builder,
+                                           reduction_location, 0.0F));
+                        return ::mlir::arith::AddFOp::create(
+                            reduction_builder, reduction_location,
+                            accumulator, contribution);
+                    });
+                ::mlir::memref::StoreOp::create(
+                    body_builder, body_location, result,
+                    values.at(attention.dsink_uid), output_indices);
+            });
+    }
     return status;
 }
 
@@ -2627,6 +2976,9 @@ bool is_sequence_metadata_input(OperationTag tag,
     if (tag == OperationTag::kSdpa &&
         (port == "Page_table_K" || port == "Page_table_V")) {
         return data_type == DataType::kInt32;
+    }
+    if (tag == OperationTag::kSdpa && port == "Block_mask") {
+        return data_type == DataType::kUInt8;
     }
     if (port == "Seed" || port == "Offset") {
         return data_type == DataType::kInt64;

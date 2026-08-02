@@ -153,7 +153,8 @@ import::Status validate_graph_compile_metadata(
         }
         if (argument.storage_policy == TensorStoragePolicy::kStrided &&
             (argument.ragged_offset_uid != 0 ||
-             argument.ragged_sequence_uid != 0)) {
+             argument.ragged_sequence_uid != 0 ||
+             argument.ragged_sequence_divisor != 1)) {
             return fail("strided argument carries ragged references");
         }
     }
@@ -176,8 +177,13 @@ import::Status validate_graph_compile_metadata(
         };
         auto const offset = find_uid(argument.ragged_offset_uid);
         auto const sequence = find_uid(argument.ragged_sequence_uid);
-        if (argument.data_type != import::DataType::kFloat32 ||
+        if ((argument.data_type != import::DataType::kFloat32 &&
+             argument.data_type != import::DataType::kInt32) ||
             argument.dimensions.size() != 4 ||
+            argument.ragged_sequence_divisor <= 0 ||
+            argument.dimensions[2] >
+                std::numeric_limits<std::int64_t>::max() /
+                    argument.ragged_sequence_divisor ||
             offset == metadata.arguments.end() ||
             sequence == metadata.arguments.end() ||
             (offset->data_type != import::DataType::kInt32 &&

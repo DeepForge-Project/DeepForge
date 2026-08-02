@@ -623,6 +623,7 @@ Status serialize_artifact(CompilationResult const& compilation,
                    static_cast<std::uint32_t>(argument.storage_policy));
         append_i64(bytes, argument.ragged_offset_uid);
         append_i64(bytes, argument.ragged_sequence_uid);
+        append_i64(bytes, argument.ragged_sequence_divisor);
         append_u64(bytes, argument.alignment);
         append_u64(bytes, argument.size_bytes);
         append_u32(bytes,
@@ -703,6 +704,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     if (version != kLegacyArtifactFormatVersion &&
         version != kStaticMetadataArtifactFormatVersion &&
         version != kShapeOverrideArtifactFormatVersion &&
+        version != kRaggedArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -729,6 +731,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         return parse_failure("target triple is invalid");
     }
     if (version == kShapeOverrideArtifactFormatVersion ||
+        version == kRaggedArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -764,7 +767,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                 !reader.read_u32(data_type) || !reader.read_u32(access)) {
                 return parse_failure("argument table entry is malformed");
             }
-            if (version == kArtifactFormatVersion &&
+            if ((version == kRaggedArtifactFormatVersion ||
+                 version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
                  !reader.read_i64(argument.ragged_sequence_uid) ||
@@ -772,6 +776,11 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                                       TensorStoragePolicy::
                                           kRaggedBatchPrefix))) {
                 return parse_failure("argument storage policy is malformed");
+            }
+            if (version == kArtifactFormatVersion &&
+                (!reader.read_i64(argument.ragged_sequence_divisor) ||
+                 argument.ragged_sequence_divisor <= 0)) {
+                return parse_failure("ragged sequence divisor is malformed");
             }
             if (!reader.read_u64(argument.alignment) ||
                 !reader.read_u64(argument.size_bytes) ||

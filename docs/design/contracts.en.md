@@ -331,45 +331,63 @@ The compiler emits dynamic memref dimensions and strides plus `memref.dim`
 loop bounds only for this policy. Runtime descriptors carry the resolved values
 to both in-process and artifact-loaded objects. Alias checks use the resolved
 byte spans. Workspace remains statically bounded, and the override workspace
-query performs the same validation as execution. Artifact formats `3` and `4`
-record both context flags and policy; the v1/v2 readers default them to
+query performs the same validation as execution. Artifact formats `3` through
+`5` record both context flags and policy; the v1/v2 readers default them to
 disabled.
 
-### 3.7 C6 Ragged And Paged SDPA Forward Extension
+### 3.7 C6 Standard f32 SDPA Metadata Extension
 
-This extension is limited to static f32 `SDPA` forward. It requires
-`padding_mask=true` and both INT32 `[B,1,1,1]` sequence-length inputs. It does
-not apply to `SDPA_BWD`, FP8/MXFP8 attention, or runtime shape overrides.
-Runtime lengths are caller preconditions in `[0,Sq]` and `[0,logical_Skv]`;
-ragged arguments additionally validate their corresponding values before
-dispatch.
+This extension is limited to static standard-f32 `SDPA`/`SDPA_BWD`; it does not
+apply to FP8/MXFP8 attention or runtime shape overrides. Ragged or paged storage
+requires `padding_mask=true` and both INT32 `[B,1,1,1]` sequence-length inputs.
+Runtime lengths are caller preconditions in `[0,Sq]` and
+`[0,logical_Skv]`; ragged arguments additionally validate their corresponding
+values before dispatch.
 
-Q, K, V, and O may independently use ragged storage. A ragged data tensor is an
-external plain rank-4 logical tensor whose `ragged_offset_uid` and
-`ragged_offset_name` identify one separate external plain INT32 or INT64 tensor
-with dimensions `[B+1,1,1,1]`. Prefix values are element offsets, start at
-zero, are nondecreasing, and do not exceed the compiled maximum storage span.
-Each segment must hold the runtime sequence extent and the data tensor's inner
-strided layout. Execution validates these rules before dispatch and uses the
-final prefix endpoint, rather than the conservative maximum, for alias checks.
+Forward Q/K/V/O/Stats/Max/Sum_exp and backward Q/K/V/O/dO/Stats/dQ/dK/dV may
+independently use ragged storage. Each is an external plain rank-4 logical
+tensor whose `ragged_offset_uid` and `ragged_offset_name` identify one separate
+external plain INT32 or INT64 `[B+1,1,1,1]` tensor. Prefix values are element
+offsets, start at zero, are nondecreasing, and do not exceed the compiled
+maximum storage span. Each segment must hold the runtime sequence extent and
+the data tensor's inner strided layout. Execution validates these rules before
+dispatch and uses the final prefix endpoint, rather than the conservative
+maximum, for alias checks. Backward `max_total_seq_len_q` and
+`max_total_seq_len_kv` require ragged storage and values in `(0,B*Sq]` and
+`(0,B*Skv]`; they are validation hints and do not alter the computation.
 
 K and V may independently use paged storage. A container has dimensions
-`[num_blocks,H,block_size,D]`, and its separate external plain INT32 table has
-dimensions `[B,1,page_slots,1]`. The logical K/V sequence is the positive
-`max_seq_len_kv` attribute when present; otherwise it is inferred from the
-unpaged peer, Bias, `RNG_DUMP`, or the minimum available page capacity, in that
-Frontend order. Capacity must cover the logical sequence. Page IDs are a caller
-precondition and must lie in
+`[num_blocks,H,block_size,D]`, and its separate INT32 table has logical
+dimensions `[B,1,page_slots,1]`. A page table may be external plain storage or
+use its own external INT32/INT64 `[B+1,1,1,1]` element prefix. Each compact
+batch segment must contain at least `ceil(SEQ_LEN_KV[b]/block_size)` entries.
+The logical K/V sequence is the positive `max_seq_len_kv` attribute when
+present; otherwise it is inferred from the unpaged peer, Bias, `RNG_DUMP`, or
+the minimum available page capacity, in that Frontend order. Capacity must
+cover the logical sequence. Page IDs are a caller precondition and must lie in
 `[0,num_blocks)`. Generated code substitutes a safe address and zero value for
 an invalid ID, so it cannot cause an out-of-bounds container access, but the
 result is outside the semantic contract.
 
 Ragged Q/O may be combined with paged K/V. An individual K or V container
-cannot be both paged and ragged. Packed/ragged page tables, ragged Stats/Max/
-Sum_exp outputs, backward ragged/paged execution, and packed total-sequence
-metadata remain deferred. Artifact format `4` persists the ragged storage
-policy and offset/sequence UIDs; the reader continues to accept v1-v3 and
-defaults their arguments to ordinary strided storage.
+cannot be both paged and ragged. Paged backward execution remains deferred.
+
+Forward `Block_mask` is an external plain UINT8 tensor with exact dimensions
+`[B,Hq,ceil(Sq/128),ceil(ceil(Skv/128)/8)]`. Each bit enables one 128-by-128
+query/key tile; key-tile bits are packed least-significant-bit first in each
+byte. The block mask composes with the other score-validity predicates.
+
+`SINK_TOKEN` is an external plain FLOAT `[1,Hq,1,1]` tensor supported by forward
+and backward. Its per-head value is an additional logit in every valid softmax
+row, contributing to row maximum and denominator but not to the V-weighted
+output. Backward may emit external plain `DSINK_TOKEN` with the same shape; it
+is the gradient reduced over valid batch/query rows and requires the matching
+sink input.
+
+Artifact format `5` persists the ragged storage policy, offset/sequence UIDs,
+and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
+one; compact page tables use the corresponding cache block size. The reader
+continues to accept v1-v4, with v4 divisors defaulted to one.
 
 ## 4. Public Execution Interface
 

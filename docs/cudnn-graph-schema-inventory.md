@@ -187,8 +187,9 @@ Pointwise mode 的输入元数被严格验证：
 | `SDPA_MXFP8_BWD` | 静态 transpose-oriented Q/K/dO 输入和 E8M0 block descale、f16/bf16/f32 gradient/amax；使用 f32 dS reference approximation；descale 使用 `NONE` 或 `F8_128x4` ordering |
 
 全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
-stride、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。data tensor 为
-f32；C4 额外允许在文档指定端口使用 INT32 sequence length 和 scalar INT64 RNG
+stride、`NONE` reorder，并且不是 pass-by-value tensor。Ragged metadata 仅在下述
+标准 f32 SDPA 显式子集中合法。data tensor 为 f32；C4 额外允许在文档指定端口使用
+INT32 sequence length 和 scalar INT64 RNG
 seed/offset。virtual 中间值使用规划的 workspace。Convolution group 数由
 `X.C / W.C` 推导，输出 channel 必须可被 group 数整除。
 
@@ -227,12 +228,17 @@ Validated SDPA 使用 rank-4 BHSD Q/K/V/O 和 unit embedding stride，K/V head �
 bottom-right causal 路径不与 bias、ALiBi 或 dropout 组合。ALiBi 要求
 `right_bound == 0`。Probability dropout 接收 scalar INT64 seed/offset，并可输出
 `RNG_DUMP`；custom dropout 接收 mask 和显式 scale，backward 还接收 scale inverse。
-静态 f32 forward 还接受独立 external ragged Q/K/V/O storage（INT32/INT64
-`[B+1,1,1,1]` element prefix）和独立 paged K/V container
-`[num_blocks,H,block_size,D]`（external INT32 `[B,1,page_slots,1]` table）。两种
-形式都要求 padding 和两个 sequence length，page ID 必须是合法 container block
-index；ragged Q/O 可与 paged K/V 组合。Backward ragged/paged、packed table/row
-output、block mask、sink token 和上述 C5 特殊可选能力仍延后。
+静态 f32 forward 还接受独立 external ragged Q/K/V/O/Stats/Max/Sum_exp storage，
+其 element prefix 为 INT32/INT64 `[B+1,1,1,1]`。Backward 的
+Q/K/V/O/dO/Stats/dQ/dK/dV 支持相同 storage，并接受经过校验的 max-total-sequence
+hint。Forward 的独立 paged K/V container 为 `[num_blocks,H,block_size,D]`；每个
+INT32 `[B,1,page_slots,1]` table 可为 plain storage 或由独立 element prefix 紧凑
+存储，runtime segment 需求为 `ceil(SEQ_LEN_KV/block_size)`。这些 storage 形式都
+要求 padding 和两个 sequence length，page ID 必须是合法 container block index；
+ragged Q/O 可与 paged K/V 组合。Forward 还支持精确压缩的 UINT8 128x128
+`Block_mask`。Forward/backward 均支持 external f32 `[1,Hq,1,1]` `SINK_TOKEN`，
+backward 可返回相同 shape 的 `DSINK_TOKEN`。Paged backward 和上述 C5 特殊可选
+能力仍延后。
 
 相同 seed/offset 的 CPU Bernoulli stream 在 DeepForge 各 CPU variant 间稳定且
 bit-identical；它属于 CPU 实现定义，不承诺复现 cuDNN GPU Philox 的 bit pattern。
@@ -244,9 +250,10 @@ Comparison、logical 和 `GEN_INDEX` 的结果仍以 f32 `0`/`1` 或 f32 index �
 tensor。编译 dimension 是上界；runtime dimension 必须为正且不超过该上界，
 runtime stride 必须满足当前支持的正且不重叠条件，每个 storage span 必须位于编译
 bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 descriptor 语义。
-显式 alias、其他动态 operation、SDPA forward 子集外的 ragged tensor 和文档所列
-`F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v4
-记录 ragged storage reference；v1-v3 继续按普通 strided storage 读取。
+显式 alias、其他动态 operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
+`F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v5
+记录 ragged storage reference 和逻辑 sequence divisor；v1-v4 继续可读，其中 v4
+divisor 默认为 1。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
 以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。

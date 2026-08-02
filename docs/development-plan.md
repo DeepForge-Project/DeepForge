@@ -417,9 +417,14 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     独立 ragged，K/V 可独立 paged；runtime prefix/content 校验、紧凑 alias span、
     独立 page table、非法 page 安全寻址、artifact v4 持久化/reload 和错误 metadata
     均通过 Release、ASan、UBSan 测试。
+12. 已完成：C6.4 标准 f32 SDPA metadata，包括 ragged forward row output/backward
+    argument、max-total 校验 hint、独立紧凑 K/V page table、压缩 forward block
+    mask 及带 dSink 的 forward/backward sink token。Artifact v5 持久化 packed
+    sequence divisor；独立 reference、有限差分、精确分配、错误 metadata、reload、
+    Release、ASan 和 UBSan 测试覆盖该增量。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为、backward/packed ragged/paged
-metadata、上述 scale 子集以外的 reorder format、优化和发布验收。
+剩余 C6 功能工作包括更广泛的 dynamic 行为、paged backward、上述 scale 子集以外
+的 reorder format、优化和发布验收。
 Benchmark 驱动的优化仍由 Loop/Schedule 层负责：先建立绑核、
 隔离负载的可重复测量，再逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

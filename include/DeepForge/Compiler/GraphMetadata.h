@@ -42,6 +42,7 @@ struct TensorArgumentMetadata {
     TensorStoragePolicy storage_policy = TensorStoragePolicy::kStrided;
     std::int64_t ragged_offset_uid = 0;
     std::int64_t ragged_sequence_uid = 0;
+    std::int64_t ragged_sequence_divisor = 1;
 
     bool operator==(TensorArgumentMetadata const&) const = default;
 };

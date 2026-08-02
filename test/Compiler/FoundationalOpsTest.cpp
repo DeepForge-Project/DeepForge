@@ -481,7 +481,7 @@ int main() {
                         dynamic_info.metadata.override_policy ==
                             deepforge::compiler::ShapeOverridePolicy::
                                 kPointwiseExact,
-                    "artifact v4 preserves dynamic override metadata");
+                    "artifact v5 preserves dynamic override metadata");
         std::unique_ptr<deepforge::runtime::Executable> dynamic_loaded;
         status = deepforge::compiler::load_artifact_executable(
             dynamic_artifact, dynamic_loaded);

@@ -198,7 +198,8 @@ execution subset:
 
 All validated generic rows require static, positive, explicitly UID-assigned
 tensors and f32 graph context types, positive non-overlapping strides, `NONE`
-reordering, and no pass-by-value or ragged metadata. Data tensors are f32;
+reordering, and no pass-by-value metadata. Ragged metadata is legal only for
+the explicit standard-f32 SDPA subset below. Data tensors are f32;
 C4 additionally permits INT32 sequence lengths and scalar INT64 RNG seed and
 offset tensors on their documented ports. Virtual intermediates use planned
 workspace. Convolution grouping is inferred from `X.C / W.C`; output channels
@@ -246,14 +247,19 @@ and left/right bounds are executable; the v1.24.0 bottom-right causal path does
 not combine with bias, ALiBi, or dropout. ALiBi requires `right_bound == 0`.
 Probability dropout takes scalar INT64 seed/offset and can expose `RNG_DUMP`;
 custom dropout takes a mask and explicit scale, plus scale inverse in backward.
-Static f32 forward also accepts independent external ragged Q/K/V/O storage
-with INT32/INT64 `[B+1,1,1,1]` element prefixes, and independent paged K/V
-containers `[num_blocks,H,block_size,D]` with external INT32
-`[B,1,page_slots,1]` tables. Both require padding and both sequence lengths;
-page IDs must be valid container block indices. A ragged Q/O may be combined
-with paged K/V. Backward ragged/paged execution, packed tables and row outputs,
-block masks, sink tokens, and the C5-specialized optional features above remain
-deferred.
+Static f32 forward also accepts independent external ragged
+Q/K/V/O/Stats/Max/Sum_exp storage with INT32/INT64 `[B+1,1,1,1]` element
+prefixes. Backward accepts the same storage for Q/K/V/O/dO/Stats/dQ/dK/dV and
+validated max-total-sequence hints. Forward independently paged K/V containers
+have shape `[num_blocks,H,block_size,D]`; each INT32
+`[B,1,page_slots,1]` table may be plain or compacted by an independent element
+prefix, with runtime segment demand `ceil(SEQ_LEN_KV/block_size)`. These storage
+forms require padding and both sequence lengths; page IDs must be valid
+container block indices. Ragged Q/O may be combined with paged K/V. Forward
+also supports the exact compressed UINT8 128-by-128 `Block_mask`. External f32
+`SINK_TOKEN` `[1,Hq,1,1]` is supported by forward/backward and backward may
+return matching `DSINK_TOKEN`. Paged backward and the C5-specialized optional
+features above remain deferred.
 
 The CPU Bernoulli stream is stable and bit-identical across DeepForge CPU
 variants for the same seed and offset. It is an implementation-defined CPU
@@ -268,10 +274,11 @@ dimensions. Those dimensions are maxima; runtime dimensions must be positive
 and no larger, runtime strides must satisfy the supported positive non-overlap
 condition, and each storage span must fit its compiled bound. The dynamic flag
 alone is persisted without changing static descriptor semantics. Explicit
-aliasing, other dynamic operations, ragged tensors outside the SDPA forward
-subset, and physical reorder handling outside the documented `F8_128x4` scale
-subset are deferred. New artifacts use format v4 for ragged storage references;
-v1-v3 remain readable as ordinary strided storage.
+aliasing, other dynamic operations, ragged tensors outside the documented
+standard-f32 SDPA subset, and physical reorder handling outside the documented
+`F8_128x4` scale subset are deferred. New artifacts use format v5 for ragged
+storage references and logical-sequence divisors; v1-v4 remain readable, with
+v4 divisors defaulted to one.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

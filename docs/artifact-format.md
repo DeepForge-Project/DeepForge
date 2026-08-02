@@ -6,11 +6,12 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `4`；reader
-同时接受版本 `3` 的 shape-override artifact、版本 `2` 的静态 metadata artifact 和
-版本 `1` 的 Conv2D artifact。版本 `1` 会重建 argument table；版本 `1`、`2` 的
-dynamic/override metadata 均默认为关闭，版本 `1` 至 `3` 的 tensor storage 均默认
-使用普通 strided addressing。
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `5`；reader
+同时接受版本 `4` 的 ragged-storage artifact、版本 `3` 的 shape-override artifact、
+版本 `2` 的静态 metadata artifact 和版本 `1` 的 Conv2D artifact。版本 `1` 会重建
+argument table；版本 `1`、`2` 的 dynamic/override metadata 均默认为关闭，版本 `1`
+至 `3` 的 tensor storage 默认使用普通 strided addressing，版本 `4` 的全部 ragged
+sequence divisor 默认为 1。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -35,7 +36,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 4
+u32 format_version = 5
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -57,6 +58,7 @@ repeated tensor_argument {
   u32 storage_policy          # 0 strided, 1 ragged batch prefix
   i64 ragged_offset_uid       # storage_policy != 1 时为 0
   i64 ragged_sequence_uid     # storage_policy != 1 时为 0
+  i64 ragged_sequence_divisor # 普通 ragged data 为 1
   u64 alignment
   u64 size_bytes
   u32 rank
@@ -116,6 +118,11 @@ sequence-length tensor UID；序列化 `size_bytes` 是编译最大 span。执�
 内容和 segment capacity，再以最后一个 prefix endpoint 作为 alias 检查的实际 byte
 span。引用无法解析或 metadata 不一致时，不会调用 native code。
 
+版本 `5` 增加 `ragged_sequence_divisor`。普通 ragged tensor 的值为 1；紧凑
+paged-attention page table 记录对应 K/V cache block size，因此 runtime 逻辑 sequence
+length `S` 在该 batch segment 中需要 `ceil(S/divisor)` 个 table entry。Divisor 必须
+为正，且不能令编译逻辑 sequence bound 溢出。版本 `4` artifact 按 divisor 1 解释。
+
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
 为 `_mlir_ciface_<symbol>`。原始函数和 wrapper 都是 ELF `GLOBAL HIDDEN`，不会成为
@@ -131,7 +138,7 @@ object 从当前进程解析标准 `libm` 符号。
 
 执行前会验证有序 argument table、UID、空指针、每个 tensor 的 alignment 和 byte
 range、runtime override policy/bound、workspace 64-byte 对齐、ragged
-prefix/reference 一致性及整数溢出。read/read alias 合法；任何涉及 write
+prefix/reference/divisor 一致性及整数溢出。read/read alias 合法；任何涉及 write
 argument 或 workspace 的重叠都会被拒绝。CPUID、FMA、OSXSAVE 和 XGETBV 决定
 AVX-512、AVX2 或 scalar 的安全选择；装载 object 本身不执行高 ISA 代码。
 
@@ -150,5 +157,5 @@ reader/loader 拒绝未知 format version、producer 版本、端序、不匹配
 数值契约、重复 UID、不一致 shape/padding、非法 workspace
 alignment/range/lifetime、错误的 argument table 或 adapter payload、variant
 symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum 错误。
-顶层编码发生变化时必须增加格式版本。版本 `1`、`2`、`3` 的字段顺序和语义保持
-冻结，仅用于读取；新编译结果写版本 `4`。
+顶层编码发生变化时必须增加格式版本。版本 `1`、`2`、`3`、`4` 的字段顺序和语义
+保持冻结，仅用于读取；新编译结果写版本 `5`。

@@ -286,36 +286,54 @@ argument；空 list 按编译最大 shape 执行。
 编译器仅对该 policy 生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
 loop bound。runtime descriptor 将解析后的值传给进程内对象和 artifact-loaded
 对象，alias 检查使用本次解析出的 byte span。workspace 保持静态上界，override
-workspace query 与 execute 使用同一套校验。Artifact format `3` 和 `4` 都记录两个
+workspace query 与 execute 使用同一套校验。Artifact format `3` 至 `5` 都记录两个
 context flag 和 policy；v1/v2 reader 默认全部关闭。
 
-### 3.7 C6 Ragged/Paged SDPA Forward 扩展
+### 3.7 C6 标准 f32 SDPA Metadata 扩展
 
-该扩展只支持静态 f32 `SDPA` forward，要求 `padding_mask=true`，并同时提供两个
-INT32 `[B,1,1,1]` sequence-length 输入；不适用于 `SDPA_BWD`、FP8/MXFP8
-attention 或 runtime shape override。Runtime length 是调用者前置条件，分别位于
-`[0,Sq]` 和 `[0,logical_Skv]`；ragged argument 还会在 dispatch 前强制校验对应值。
+该扩展只适用于静态标准 f32 `SDPA`/`SDPA_BWD`，不适用于 FP8/MXFP8 attention 或
+runtime shape override。Ragged 或 paged storage 要求 `padding_mask=true`，并同时
+提供两个 INT32 `[B,1,1,1]` sequence-length 输入。Runtime length 是调用者前置
+条件，分别位于 `[0,Sq]` 和 `[0,logical_Skv]`；ragged argument 还会在 dispatch 前
+强制校验对应值。
 
-Q、K、V、O 可以独立使用 ragged storage。Ragged data tensor 必须是 external plain
-rank-4 逻辑 tensor；其 `ragged_offset_uid` 和 `ragged_offset_name` 必须标识同一个
-独立 external plain INT32/INT64 `[B+1,1,1,1]` tensor。Prefix 值以 element 为单位，
-从 0 开始、单调非降且不超过编译最大 storage span。每个 segment 必须能按 data
-tensor 的 inner strided layout 容纳 runtime sequence extent。执行前会校验这些规则，
-alias 检查使用最后一个 prefix endpoint，而不是保守的最大 span。
+Forward Q/K/V/O/Stats/Max/Sum_exp 和 backward Q/K/V/O/dO/Stats/dQ/dK/dV 可独立
+使用 ragged storage。每个 argument 必须是 external plain rank-4 逻辑 tensor；其
+`ragged_offset_uid` 和 `ragged_offset_name` 必须标识同一个独立 external plain
+INT32/INT64 `[B+1,1,1,1]` tensor。Prefix 值以 element 为单位，从 0 开始、单调非降
+且不超过编译最大 storage span。每个 segment 必须能按 data tensor 的 inner strided
+layout 容纳 runtime sequence extent。执行前会校验这些规则，alias 检查使用最后一个
+prefix endpoint，而不是保守的最大 span。Backward 的 `max_total_seq_len_q` 和
+`max_total_seq_len_kv` 要求使用 ragged storage，值分别位于 `(0,B*Sq]` 和
+`(0,B*Skv]`；它们是校验 hint，不改变计算。
 
 K/V 可以独立使用 paged storage。Container dimension 为
-`[num_blocks,H,block_size,D]`，对应的独立 external plain INT32 table dimension 为
-`[B,1,page_slots,1]`。存在正的 `max_seq_len_kv` attribute 时，它给出逻辑 K/V
-sequence；否则按 Frontend 顺序从未分页 peer、Bias、`RNG_DUMP` 或最小可用 page
-capacity 推导。Capacity 必须覆盖逻辑 sequence。Page ID 是调用者前置条件，必须位于
+`[num_blocks,H,block_size,D]`，对应的独立 INT32 table 逻辑 dimension 为
+`[B,1,page_slots,1]`。Page table 可使用 external plain storage，或拥有独立 external
+INT32/INT64 `[B+1,1,1,1]` element prefix。每个紧凑 batch segment 至少要包含
+`ceil(SEQ_LEN_KV[b]/block_size)` 个 entry。存在正的 `max_seq_len_kv` attribute 时，
+它给出逻辑 K/V sequence；否则按 Frontend 顺序从未分页 peer、Bias、`RNG_DUMP` 或
+最小可用 page capacity 推导。Capacity 必须覆盖逻辑 sequence。Page ID 是调用者前置
+条件，必须位于
 `[0,num_blocks)`；生成代码会为非法
 ID 替换安全地址和零值，因此不会越界读取 container，但结果不属于语义契约。
 
 Ragged Q/O 可与 paged K/V 组合；单个 K 或 V container 不能同时 paged 和 ragged。
-Packed/ragged page table、ragged Stats/Max/Sum_exp 输出、backward ragged/paged 执行
-以及 packed total-sequence metadata 仍延后。Artifact format `4` 持久化 ragged
-storage policy 和 offset/sequence UID；reader 继续接受 v1-v3，并将其 argument 默认
-解释为普通 strided storage。
+Paged backward 执行仍延后。
+
+Forward `Block_mask` 必须是 external plain UINT8 tensor，精确 dimension 为
+`[B,Hq,ceil(Sq/128),ceil(ceil(Skv/128)/8)]`。每个 bit 启用一个 128x128 query/key
+tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，并与其他 score
+有效性条件共同生效。
+
+`SINK_TOKEN` 必须是 external plain FLOAT `[1,Hq,1,1]` tensor，forward/backward 均
+支持。每个 head 的值是所有有效 softmax row 的额外 logit，参与 row maximum 和分母，
+但不参与 V 加权输出。Backward 可输出相同 shape 的 external plain `DSINK_TOKEN`；
+它是在有效 batch/query row 上归约的 gradient，并要求对应 sink input 存在。
+
+Artifact format `5` 持久化 ragged storage policy、offset/sequence UID 和正的逻辑
+sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用对应
+cache block size。Reader 继续接受 v1-v4，其中 v4 divisor 默认为 1。
 
 ## 4. 对外运行接口
 

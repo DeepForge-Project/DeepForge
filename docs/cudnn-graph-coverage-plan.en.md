@@ -250,7 +250,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Six independently validated increments are complete.
+**Status:** in progress. Seven independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -277,9 +277,15 @@ remain on their reference schedule. The sixth implements producer-serialized
 per-batch INT32 M/N/K extent tensors for standard and FP8 MATMUL, including
 broadcast metadata, finite standard-MATMUL padding, zero FP8 padding, artifact
 reload, malformed descriptors, Release, ASan, and UBSan coverage.
+The seventh implements Frontend runtime scalar pass-by-value inputs as external,
+input-only, all-one tensors backed by ordinary UID-map pointers. Pointwise
+broadcasting, normalization epsilon, FP8 MATMUL controls, artifact reload,
+generic root-metadata rejection, malformed descriptors, Release, ASan, and
+UBSan cover the increment. Embedded/fused scalar constants remain deferred.
 
 **Work:** expand dynamic behavior beyond the delivered pointwise and MATMUL
-subsets; add reorder formats outside the delivered scale subset; then evaluate
+subsets; add reorder formats outside the delivered scale subset; define
+embedded constant ownership and artifact persistence; then evaluate
 fusion, threading, additional vector schedules, and family-specific cost models
 independently. The pinned v1.24.0 serializer exposes no paged-backward
 page-table ports, so that capability is compatibility work for a future schema

@@ -394,9 +394,9 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
     if (!tensor.uid_assigned) {
         return unsupported(path, "CPU execution requires an assigned UID");
     }
-    if (tensor.is_pass_by_value || tensor.pass_by_value) {
-        return unsupported(path,
-                           "pass-by-value tensors are not executable yet");
+    if (tensor.pass_by_value) {
+        return fail(ErrorCode::kUnsupportedExecutionMetadata, path,
+                    "embedded pass-by-value constants are not executable");
     }
     if (!numeric::is_supported_reordering(tensor)) {
         return unsupported(path,
@@ -407,6 +407,41 @@ Status validate_tensor(TensorDesc const& tensor, std::string const& path) {
         tensor.dim.size() != tensor.stride.size()) {
         return fail(ErrorCode::kInvalidShape, path,
                     "rank must be between 1 and 64");
+    }
+    if (tensor.is_pass_by_value) {
+        auto const scalar_type_supported = [&]() {
+            switch (tensor.data_type) {
+                case import::DataType::kInt64:
+                case import::DataType::kInt32:
+                case import::DataType::kFloat16:
+                case import::DataType::kFloat32:
+                case import::DataType::kFloat64:
+                case import::DataType::kBFloat16:
+                    return true;
+                default:
+                    return false;
+            }
+        }();
+        if (!scalar_type_supported) {
+            return fail(
+                ErrorCode::kUnsupportedDataType, path,
+                "runtime pass-by-value scalar type is outside the cuDNN "
+                "Frontend scalar set");
+        }
+        if (tensor.is_virtual || tensor.ragged_offset_uid ||
+            tensor.ragged_offset_name || tensor.reordering_type != "NONE") {
+            return unsupported(
+                path,
+                "runtime pass-by-value requires an external plain tensor");
+        }
+        if (!std::all_of(tensor.dim.begin(), tensor.dim.end(),
+                         [](std::int64_t dimension) {
+                             return dimension == 1;
+                         })) {
+            return unsupported(
+                path,
+                "runtime pass-by-value requires every dimension to equal one");
+        }
     }
     if (tensor.ragged_offset_uid && tensor.dim.front() <= 0) {
         return fail(ErrorCode::kInvalidShape, path,
@@ -1021,7 +1056,9 @@ Status validate_shape_override_subset(SerializedGraph const& graph) {
             return fail(ErrorCode::kMissingUid, path,
                         "tensor reference is unresolved");
         }
-        if (tensor->is_virtual || tensor->data_type != import::DataType::kFloat32 ||
+        if (tensor->is_virtual || tensor->is_pass_by_value ||
+            tensor->pass_by_value ||
+            tensor->data_type != import::DataType::kFloat32 ||
             tensor->reordering_type != "NONE" || tensor->ragged_offset_uid ||
             tensor->ragged_offset_name) {
             return unsupported(
@@ -1212,6 +1249,12 @@ Status analyze_graph(SerializedGraph const& graph,
                             "nodes[" + std::to_string(node_index) +
                                 "].outputs." + port,
                             "tensor reference is unresolved");
+            }
+            if (tensor->is_pass_by_value) {
+                return unsupported(
+                    "nodes[" + std::to_string(node_index) + "].outputs." +
+                        port,
+                    "runtime pass-by-value tensors are input-only");
             }
             if (tensor->ragged_offset_uid &&
                 !ragged_port_supported(node.tag, false, port)) {

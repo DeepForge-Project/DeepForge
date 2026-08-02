@@ -319,6 +319,14 @@ Json matmul_fp8_graph() {
                           std::move(tensors));
 }
 
+Json matmul_fp8_pass_by_value_graph() {
+    auto graph = matmul_fp8_graph();
+    for (auto uid : {"23", "24", "25"}) {
+        graph["tensors"][uid]["is_pass_by_value"] = true;
+    }
+    return graph;
+}
+
 Json matmul_fp8_override_graph() {
     auto graph = matmul_fp8_graph();
     graph["graph_uid"] = 5018;
@@ -795,8 +803,9 @@ void run_block_tests(TestRunner& tests) {
 
 void run_matmul_test(TestRunner& tests) {
     deepforge::compiler::CompilationResult compilation;
-    auto status = compile_document(matmul_fp8_graph(), compilation);
-    tests.good(status, "compile FP8 matmul");
+    auto status =
+        compile_document(matmul_fp8_pass_by_value_graph(), compilation);
+    tests.good(status, "compile FP8 matmul with runtime PBV scalars");
     if (status.is_bad() || !compilation.executable) return;
     std::vector<std::uint8_t> a{0x38, 0x40, 0x44, 0x48};
     std::vector<std::uint8_t> b{0x38, 0xb8, 0x40, 0x38};
@@ -814,7 +823,7 @@ void run_matmul_test(TestRunner& tests) {
                                          {27, amax.data()}};
     status = compilation.executable->execute_variant(
         deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
-    tests.good(status, "execute FP8 matmul");
+    tests.good(status, "execute FP8 matmul with runtime PBV scalars");
     tests.check(close_vectors(c, {5.0F, 1.0F, 11.0F, 1.0F}) &&
                     close_vectors(amax, {11.0F}),
                 "FP8 matmul descales inputs and reports pre-output-scale amax");

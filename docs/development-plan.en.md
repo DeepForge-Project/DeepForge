@@ -435,8 +435,8 @@ P0-P6 and post-MVP C0-C5 completed in this order:
    and generated equivalent UBJSON with the vendored parser. Source-level
    serialization and execute-signature conformance is the CPU release gate; no
    CUDA/cuDNN producer is required.
-3. Implemented the P1 canonical model, strict JSON/UBJSON importer, and 59 test
-   checks.
+3. Implemented the P1 canonical model and strict JSON/UBJSON importer with
+   exhaustive schema and negative-path coverage.
 4. Implemented P2 destination-passing MLIR import, verification, and metadata.
 5. Implemented P3 One-Shot Bufferize, allocation materialization, and workspace
    planning.
@@ -477,9 +477,16 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     and FP8 MATMUL. Per-batch broadcast metadata, finite f32 standard padding,
     zero FP8 padding, artifact reload, malformed descriptors, Release, ASan,
     and UBSan are covered without changing the public execute ABI.
+15. Completed C6.7 Frontend runtime scalar pass-by-value inputs. External
+    input-only all-one tensors use the ordinary UID-map pointer and artifact
+    argument metadata; pointwise broadcast, normalization epsilon, FP8 MATMUL
+    controls, generic root-metadata rejection, malformed descriptors, Release,
+    ASan, and UBSan cover the increment without an ABI or artifact-version
+    change. Embedded/fused scalar constants remain a separate deferred form.
 
 The remaining C6 functional work is broader dynamic behavior and reorder
-formats outside that scale subset. Paged backward is not representable by the
+formats outside that scale subset, plus embedded/fused constant ownership and
+persistence. Paged backward is not representable by the
 pinned v1.24.0 serializer and is tracked only as future schema-version
 compatibility work. Further benchmark-driven
 optimization remains owned by the Loop/Schedule layer: evaluate outer tiling,

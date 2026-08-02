@@ -187,8 +187,8 @@ Pointwise mode 的输入元数被严格验证：
 | `SDPA_MXFP8_BWD` | 静态 transpose-oriented Q/K/dO 输入和 E8M0 block descale、f16/bf16/f32 gradient/amax；使用 f32 dS reference approximation；descale 使用 `NONE` 或 `F8_128x4` ordering |
 
 全部已验证通用行都要求静态正维度、显式 UID、f32 graph context、正且不重叠的
-stride、`NONE` reorder，并且不是 pass-by-value tensor。Ragged metadata 仅在下述
-标准 f32 SDPA 显式子集中合法。data tensor 为 f32；C4 在文档指定端口允许 INT32
+stride 和 `NONE` reorder。Pass-by-value 仅限下述 C6 runtime scalar 子集，ragged
+metadata 仅在下述标准 f32 SDPA 显式子集中合法。data tensor 为 f32；C4 在文档指定端口允许 INT32
 sequence length 和 scalar INT64 RNG seed/offset，MATMUL/MATMUL_FP8 则允许 INT32
 extent-override tensor。virtual 中间值使用规划的 workspace。Convolution group 数由
 `X.C / W.C` 推导，输出 channel 必须可被 group 数整除。
@@ -214,9 +214,17 @@ FP8/MXFP8 attention 拒绝 padding、dropout、ALiBi、block mask、sink token
 读取外部提供的 log-sum-exp `Stats`。
 
 epsilon、momentum、accumulation count 等 normalization scalar 输入必须是所有维度
-均为 1 的显式 f32 tensor；scalar pass-by-value metadata 仍延后。非空分布式
+均为 1 的 f32 tensor，可以是普通 input 或 runtime pass-by-value input。非空分布式
 `peer_stats` 不可执行。running-stat 端口必须全有或全无，运行时值必须提供正的
 accumulation count 和有效 epsilon。
+
+C6 runtime pass-by-value 只接受满足以下条件的 input tensor：
+`is_pass_by_value=true`、`pass_by_value` 为 null、UID 显式分配、所有 dimension 为
+1，并且 descriptor 是 external、非 ragged、`NONE` reorder。Scalar type 限于
+`INT64`、`INT32`、`HALF`、`FLOAT`、`DOUBLE`、`BFLOAT16`，具体 operation port 可
+进一步收窄。调用者按普通 UID 提供 host pointer，artifact 将其持久化为单元素只读
+argument。Output、virtual tensor、runtime shape-override array、内嵌 scalar payload
+和非空根级 `pass_by_values` 均被拒绝；内嵌形式仍属于延后的 fused constant。
 
 `ROPE` 旋转最后一个偶数宽度的 `rope_dim`；`rope_dim == 0` 时旋转整个末维，
 前缀为 scaled pass-through。`FREQS` shape 为 `[S,1,1,rope_dim]`，split-half
@@ -254,7 +262,8 @@ bound 内。dynamic flag 单独出现时只持久化 metadata，不改变静态 
 MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们的 rank 与 C
 相同，末两个 dimension 为 `[1,1]`，batch dimension 可 broadcast 到 C。各值在静态
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
-value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
+value，MATMUL_FP8 使用零。显式 alias、内嵌 pass-by-value constant、其他动态
+operation、文档所列标准 f32 SDPA 子集外的 ragged tensor 和
 `F8_128x4` scale 子集以外的物理 reorder 处理延后。新 artifact 使用 format v5
 记录 ragged storage reference 和逻辑 sequence divisor；v1-v4 继续可读，其中 v4
 divisor 默认为 1。

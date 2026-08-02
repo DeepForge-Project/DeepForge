@@ -287,6 +287,7 @@ Json norm_forward_graph(NormCase const& configuration) {
     tensors["104"] = tensor("EPSILON", 104,
                              std::vector<std::int64_t>(
                                  configuration.x_dim.size(), 1));
+    tensors["104"]["is_pass_by_value"] = true;
     tensors["105"] = tensor("Y", 105, configuration.x_dim);
     Json outputs = Json::object({{"Y", 105}});
     if (!configuration.rms) {
@@ -326,6 +327,7 @@ Json norm_backward_graph(NormCase const& configuration) {
         tensors["206"] = tensor("EPSILON", 206,
                                  std::vector<std::int64_t>(
                                      configuration.x_dim.size(), 1));
+        tensors["206"]["is_pass_by_value"] = true;
         inputs["EPSILON"] = 206;
     }
     tensors["207"] = tensor("DX", 207, configuration.x_dim);
@@ -414,6 +416,16 @@ void run_norm_case(TestRunner& tests,
     deepforge::compiler::CompilationResult forward;
     auto status = compile_document(norm_forward_graph(configuration), forward);
     tests.good(status, "compile " + configuration.forward_tag);
+    auto const epsilon_argument = std::find_if(
+        forward.metadata.arguments.begin(), forward.metadata.arguments.end(),
+        [](auto const& argument) { return argument.uid == 104; });
+    tests.check(
+        epsilon_argument != forward.metadata.arguments.end() &&
+            epsilon_argument->access ==
+                deepforge::compiler::TensorAccess::kRead &&
+            epsilon_argument->size_bytes == sizeof(float),
+        configuration.forward_tag +
+            " keeps runtime PBV epsilon as a read argument");
     if (status.is_good() && forward.executable) {
         std::vector<float> y(x.size(), -99.0F);
         std::vector<float> mean(reference.mean.size(), -99.0F);

@@ -81,7 +81,7 @@ normative support boundaries.
 ```
 
 The diagram shows the original optimized Conv path. After canonical import, a
-generic C2-C5 graph takes a parallel standard-MLIR path directly through
+generic C2-C6 graph takes a parallel standard-MLIR path directly through
 static MemRef/SCF/Arith/Math IR, planned virtual-tensor workspace views, and
 the same LLVM object pipeline. This path includes grouped convolution,
 convolution gradients, normalization, sequence transforms, and attention
@@ -103,7 +103,7 @@ not an MLIR pass. It:
 - resolves tensor and node references plus stable UIDs;
 - validates the applicable capability subset;
 - builds standard Tensor/Linalg IR for the optimized MVP Conv or standard
-  MemRef/SCF/Math IR for a generic C2-C5 graph.
+  MemRef/SCF/Math IR for a generic C2-C6 graph.
 
 There is no temporary `cudnn.conv_fwd` operation. One-Shot Bufferize therefore
 never encounters an unknown custom operation without a
@@ -225,10 +225,14 @@ the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
 documented block/MXFP8 ports and runtime override for one exact-shape external
 f32 `POINTWISE` node. Standard and FP8 MATMUL also accept producer-serialized
 per-batch INT32 M/N/K extent tensors while retaining static allocation maxima.
+Runtime scalar pass-by-value inputs are accepted as external, input-only,
+all-one tensors whose host pointer is supplied by ordinary UID. Embedded/fused
+constant payloads remain deferred.
 Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
 tables, forward block masks, and forward/backward sink tokens. Broader dynamic
-behavior, other physical reorder metadata, threading, and broad fusion remain.
+behavior, other physical reorder metadata, embedded constant persistence,
+threading, and broad fusion remain.
 Paged backward cannot be represented by the pinned v1.24.0 serializer and is
 therefore future schema-version compatibility work.
 

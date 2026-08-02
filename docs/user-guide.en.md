@@ -85,7 +85,8 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic execution outside the pointwise and
-MATMUL override subsets, explicit aliasing, scalar pass-by-value, ragged/reordered tensors
+MATMUL override subsets, explicit aliasing, embedded pass-by-value constants,
+unsupported pass-by-value descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
 16 MiB. The exact per-tag matrix is in the
@@ -209,20 +210,31 @@ output_extent = 1 + (input_extent + pre + post - effective_filter) / stride
 `W` is logically `[K,C_per_group,filter...]`; the group count is inferred as
 `X.C / C_per_group`, and `Y.K` must be divisible by it.
 
-X, W, and Y must have explicit, distinct UIDs. Non-empty UBJSON
-`pass_by_values`, `workspace_modifications`, or `variant_pack_replacements`
-are rejected because they carry execution semantics not implemented by the
-CPU MVP.
+X, W, and Y must have explicit, distinct UIDs. For every JSON or UBJSON graph,
+nonempty root `pass_by_values`, `workspace_modifications`, or
+`variant_pack_replacements` are rejected because they carry execution semantics
+not implemented by the CPU runtime.
 
-For a generic C2-C5 graph, every non-virtual tensor that is read or written
+For a generic C2-C6 graph, every non-virtual tensor that is read or written
 must be present in the execute-time UID map. Virtual tensors are omitted from
 the map and allocated in the queried workspace. Writable buffers must not
 overlap another argument or workspace. `VIEW_ONLY`, `in_place_index`, and a
 node that reuses one UID as both input and output are rejected until alias
 semantics are implemented. Tensor names do not replace explicit UIDs.
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
-are explicit f32 tensors with an all-ones shape matching the operation rank;
-pass-by-value scalar serialization is deferred.
+are f32 tensors with an all-ones shape matching the operation rank. They may be
+ordinary tensor inputs or runtime pass-by-value inputs.
+
+A runtime pass-by-value input has `is_pass_by_value=true`, a null
+`pass_by_value` payload, an explicit UID, and dimensions that are all one. It
+must be external, input-only, non-ragged, non-reordered, and use `INT64`,
+`INT32`, `HALF`, `FLOAT`, `DOUBLE`, or `BFLOAT16`; the operation port may impose
+a narrower type. The execute-time UID map supplies a host pointer to the
+scalar, exactly as for another one-element read argument. This representation
+survives artifact serialization without a format change. Pass-by-value outputs,
+virtual tensors, shape-override arrays, embedded tensor payloads, and nonempty
+root `pass_by_values` remain unsupported. The last two forms are fused
+constants, not runtime scalar parameters.
 
 An `F8_128x4` scale descriptor has two trailing logical matrix axes, M and K,
 in either order. M is padded to a multiple of 128, K to a multiple of 4, the K

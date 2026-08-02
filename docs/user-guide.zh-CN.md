@@ -81,7 +81,8 @@ causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge vari
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
-不支持 pointwise 和 MATMUL override 子集之外的动态执行、显式 alias、scalar pass-by-value、
+不支持 pointwise 和 MATMUL override 子集之外的动态执行、显式 alias、内嵌
+pass-by-value constant、不满足下述约束的 pass-by-value descriptor、
 文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
 device pointer、AMX 或内部多线程。输入文件最大为 16 MiB。精确矩阵见
 [schema 清单](cudnn-graph-schema-inventory.md#5-capability-含义)。
@@ -196,17 +197,26 @@ output_extent = 1 + (input_extent + pre + post - effective_filter) / stride
 `W` 的 logical shape 为 `[K,C_per_group,filter...]`；group 数由
 `X.C / C_per_group` 推导，且 `Y.K` 必须可被 group 数整除。
 
-X、W、Y 必须有显式且互不重复的 UID。UBJSON 中的非空
-`pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 会被
-拒绝，因为它们包含当前 CPU MVP 未实现的执行语义。
+X、W、Y 必须有显式且互不重复的 UID。对所有 JSON/UBJSON graph，非空根级
+`pass_by_values`、`workspace_modifications` 或 `variant_pack_replacements` 都会被
+拒绝，因为它们包含当前 CPU runtime 未实现的执行语义。
 
-通用 C2-C5 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
+通用 C2-C6 图中每个被读写的非 virtual tensor 都必须出现在执行期 UID map 中。virtual
 tensor 不放入 UID map，而是使用查询得到的 workspace。可写 buffer 不得与其他
 argument 或 workspace 重叠。在 alias 语义实现前，`VIEW_ONLY`、
 `in_place_index` 以及同一个 UID 同时作为某 node 输入输出都会被拒绝。tensor name
 不能替代显式 UID。epsilon、momentum、accumulation count 等 normalization scalar
-输入是与操作 rank 匹配、shape 全为 1 的显式 f32 tensor；scalar pass-by-value
-serialization 仍延后。
+输入是与操作 rank 匹配、shape 全为 1 的 f32 tensor，可以是普通 tensor input，也
+可以是 runtime pass-by-value input。
+
+Runtime pass-by-value input 要求 `is_pass_by_value=true`、`pass_by_value` payload
+为 null、UID 显式分配且所有 dimension 为 1。它只能是 external、仅作为 input、非
+ragged、非 reordered tensor，data type 限于 `INT64`、`INT32`、`HALF`、`FLOAT`、
+`DOUBLE`、`BFLOAT16`，具体 operation port 还可进一步收窄。执行期 UID map 与普通
+单元素只读 argument 一样提供 scalar 的 host pointer；artifact 持久化不需要改变
+format。Pass-by-value output、virtual tensor、shape-override array、tensor 内嵌
+payload 和非空根级 `pass_by_values` 仍不支持；后两种表示 fused constant，不是
+runtime scalar parameter。
 
 `F8_128x4` scale descriptor 的最后两个逻辑 matrix axis 是 M 和 K，顺序可以互换。
 M padding 到 128 的倍数，K padding 到 4 的倍数；K axis stride 为 1，M axis stride

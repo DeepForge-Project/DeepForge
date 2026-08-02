@@ -187,6 +187,29 @@ Json single_softplus_graph(double beta = 1.0) {
                           std::move(tensors));
 }
 
+Json runtime_scalar_pointwise_graph() {
+    Json tensors = Json::object();
+    tensors["601"] = tensor("X", 601, {2, 3}, {3, 1});
+    tensors["602"] = tensor("ALPHA", 602, {1, 1}, {1, 1});
+    tensors["602"]["is_pass_by_value"] = true;
+    tensors["603"] = tensor("Y", 603, {2, 3}, {3, 1});
+    Json node = Json{{"tag", "POINTWISE"},
+                     {"name", "runtime_scalar_add"},
+                     {"inputs", Json::object({{"IN_0", 601}, {"IN_1", 602}})},
+                     {"outputs", Json::object({{"OUT_0", 603}})},
+                     {"compute_data_type", "FLOAT"},
+                     {"mode", "ADD"},
+                     {"axis", nullptr},
+                     {"relu_lower_clip", nullptr},
+                     {"relu_upper_clip", nullptr},
+                     {"relu_lower_clip_slope", nullptr},
+                     {"swish_beta", nullptr},
+                     {"elu_alpha", nullptr},
+                     {"softplus_beta", nullptr}};
+    return graph_document(2106, "runtime-scalar-pointwise",
+                          Json::array({node}), std::move(tensors));
+}
+
 Json reduction_graph() {
     Json nodes = Json::array();
     Json tensors = Json::object();
@@ -557,6 +580,68 @@ int main() {
                     "loaded pointwise artifact matches references");
     }
 
+    deepforge::import::SerializedGraph runtime_scalar;
+    status = parse_graph(runtime_scalar_pointwise_graph(), runtime_scalar);
+    tests.good(status, "parse runtime pass-by-value scalar");
+    deepforge::compiler::CompilationResult runtime_scalar_compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(
+            runtime_scalar, options, runtime_scalar_compilation);
+    }
+    tests.good(status, "compile runtime pass-by-value scalar");
+    auto const scalar_argument = std::find_if(
+        runtime_scalar_compilation.metadata.arguments.begin(),
+        runtime_scalar_compilation.metadata.arguments.end(),
+        [](auto const& argument) { return argument.uid == 602; });
+    tests.check(
+        scalar_argument != runtime_scalar_compilation.metadata.arguments.end() &&
+            scalar_argument->access ==
+                deepforge::compiler::TensorAccess::kRead &&
+            scalar_argument->dimensions ==
+                std::vector<std::int64_t>({1, 1}) &&
+            scalar_argument->size_bytes == sizeof(float),
+        "runtime scalar remains an ordinary one-element read argument");
+    std::vector<float> scalar_input{1.0F, 2.0F, 3.0F,
+                                    4.0F, 5.0F, 6.0F};
+    float alpha = 2.5F;
+    std::vector<float> scalar_output(6, -99.0F);
+    deepforge::runtime::VariantPack scalar_pack{{601, scalar_input.data()},
+                                                {602, &alpha},
+                                                {603, scalar_output.data()}};
+    if (runtime_scalar_compilation.executable) {
+        status = runtime_scalar_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr, scalar_pack,
+            nullptr);
+        tests.good(status, "execute runtime pass-by-value scalar");
+        tests.check(scalar_output ==
+                        std::vector<float>({3.5F, 4.5F, 5.5F,
+                                            6.5F, 7.5F, 8.5F}),
+                    "runtime scalar broadcasts from the UID-map pointer");
+    }
+
+    std::vector<std::uint8_t> scalar_artifact;
+    status = deepforge::compiler::serialize_artifact(
+        runtime_scalar_compilation, scalar_artifact);
+    tests.good(status, "serialize runtime scalar artifact");
+    std::unique_ptr<deepforge::runtime::Executable> scalar_loaded;
+    deepforge::compiler::ArtifactInfo scalar_info;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            scalar_artifact, scalar_loaded, &scalar_info);
+    }
+    tests.good(status, "load runtime scalar artifact");
+    tests.check(scalar_info.metadata == runtime_scalar_compilation.metadata,
+                "runtime scalar artifact preserves argument metadata");
+    if (scalar_loaded) {
+        std::fill(scalar_output.begin(), scalar_output.end(), -99.0F);
+        status = scalar_loaded->execute(nullptr, scalar_pack, nullptr);
+        tests.good(status, "execute loaded runtime scalar artifact");
+        tests.check(scalar_output ==
+                        std::vector<float>({3.5F, 4.5F, 5.5F,
+                                            6.5F, 7.5F, 8.5F}),
+                    "loaded artifact consumes the runtime scalar pointer");
+    }
+
     deepforge::import::SerializedGraph softplus;
     status = parse_graph(single_softplus_graph(), softplus);
     tests.good(status, "parse single-node stable softplus");
@@ -848,6 +933,61 @@ int main() {
     status = compile_document(invalid_broadcast);
     tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
                 "incompatible pointwise output shape is rejected");
+
+    auto nonscalar_pass_by_value = runtime_scalar_pointwise_graph();
+    nonscalar_pass_by_value["tensors"]["602"]["dim"] =
+        Json::array({1, 2});
+    nonscalar_pass_by_value["tensors"]["602"]["stride"] =
+        Json::array({2, 1});
+    status = compile_document(nonscalar_pass_by_value);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "runtime pass-by-value rejects non-scalar tensors");
+
+    auto output_pass_by_value = runtime_scalar_pointwise_graph();
+    for (auto uid : {"601", "603"}) {
+        output_pass_by_value["tensors"][uid]["dim"] = Json::array({1, 1});
+        output_pass_by_value["tensors"][uid]["stride"] = Json::array({1, 1});
+    }
+    output_pass_by_value["tensors"]["603"]["is_pass_by_value"] = true;
+    status = compile_document(output_pass_by_value);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "runtime pass-by-value rejects output tensors");
+
+    auto fused_scalar = runtime_scalar_pointwise_graph();
+    fused_scalar["tensors"]["602"]["pass_by_value"] = 2.5;
+    status = compile_document(fused_scalar);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedExecutionMetadata,
+                "embedded pass-by-value constants remain deferred");
+
+    auto virtual_scalar = runtime_scalar_pointwise_graph();
+    virtual_scalar["tensors"]["604"] =
+        tensor("SCALAR_X", 604, {1, 1}, {1, 1});
+    virtual_scalar["tensors"]["605"] =
+        tensor("SCALAR_Y", 605, {1, 1}, {1, 1});
+    virtual_scalar["tensors"]["602"]["is_virtual"] = true;
+    auto scalar_consumer = virtual_scalar["nodes"][0];
+    auto scalar_producer = scalar_consumer;
+    scalar_producer["name"] = "produce_virtual_scalar";
+    scalar_producer["inputs"] =
+        Json::object({{"IN_0", 604}, {"IN_1", 605}});
+    scalar_producer["outputs"] = Json::object({{"OUT_0", 602}});
+    virtual_scalar["nodes"] =
+        Json::array({std::move(scalar_producer), std::move(scalar_consumer)});
+    status = compile_document(virtual_scalar);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "runtime pass-by-value rejects virtual tensors");
+
+    auto dynamic_scalar = runtime_scalar_pointwise_graph();
+    dynamic_scalar["context"]["is_dynamic_shape_enabled"] = true;
+    dynamic_scalar["context"]["is_override_shape_enabled"] = true;
+    status = compile_document(dynamic_scalar);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "runtime pass-by-value is not a pointwise shape-override array");
 
     auto nonzero_padding = matmul_graph();
     nonzero_padding["nodes"][0]["padding_value"] = 1.0;

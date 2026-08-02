@@ -69,7 +69,7 @@ Arith、Math 和 LLVM dialect。
 +----------------------------------------------------------------+
 ```
 
-上图描述原有优化 Conv 路径。canonical import 之后，通用 C2-C5 图走并行的标准
+上图描述原有优化 Conv 路径。canonical import 之后，通用 C2-C6 图走并行的标准
 MLIR 路径，直接生成静态 MemRef/SCF/Arith/Math IR、规划 virtual tensor workspace
 view，再进入同一 LLVM object pipeline。该路径包含 grouped convolution、
 convolution gradient、normalization、sequence transform 和 attention
@@ -86,7 +86,7 @@ Importer 是文件/对象模型到 MLIR 的边界，不是 MLIR pass。它负责
 - 忽略文档内 GPU-only plan metadata，拒绝非空的未支持执行语义字段；
 - 解析 tensor/node 引用和稳定 UID；
 - 校验适用的 capability 子集；
-- 为优化 MVP Conv 构造标准 Tensor/Linalg IR，或为通用 C2-C5 图构造标准
+- 为优化 MVP Conv 构造标准 Tensor/Linalg IR，或为通用 C2-C6 图构造标准
   MemRef/SCF/Math IR。
 
 不定义 `cudnn.conv_fwd` 临时 op。这样 One-Shot Bufferize 不会遇到没有
@@ -196,10 +196,13 @@ stride、grouped convolution、特殊端口 bf16 和 schema 清单声明的能�
 已加入文档指定 block/MXFP8 端口的 `F8_128x4` 物理 scale 解码，以及单个
 exact-shape external f32 `POINTWISE` node 的 runtime override。标准和 FP8 MATMUL
 还支持 producer 序列化的 per-batch INT32 M/N/K extent tensor，同时保持静态
-allocation 上界。标准 f32 SDPA 已
+allocation 上界。Runtime scalar pass-by-value input 以 external、仅作为 input、全 1
+dimension tensor 的形式执行，host pointer 由普通 UID 提供；内嵌/fused constant
+payload 仍延后。标准 f32 SDPA 已
 支持 ragged forward data/row output 和 backward data/gradient、带紧凑 page table
 的独立 paged K/V、forward block mask 及 forward/backward sink token。更广泛
-dynamic 行为、其他 physical reorder metadata、threading 和广泛 fusion 仍待实现。
+dynamic 行为、其他 physical reorder metadata、内嵌 constant 持久化、threading 和
+广泛 fusion 仍待实现。
 固定使用的 v1.24.0 serializer 无法表达 paged backward，因此它属于未来 schema
 版本兼容工作。
 

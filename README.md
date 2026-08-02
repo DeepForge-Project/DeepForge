@@ -8,7 +8,7 @@ subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
 **Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
-the first five C6 increments are implemented. The end-to-end path
+the first seven C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
@@ -124,7 +124,7 @@ The current executable forms are:
   the [schema capability matrix](docs/cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 The generic path supports rank-3 through rank-5 grouped convolution with
-stride, dilation, asymmetric padding, FPROP/DGRAD/WGRAD, and mixed C2-C5
+stride, dilation, asymmetric padding, FPROP/DGRAD/WGRAD, and mixed C2-C6
 graphs. It also supports normalization forward/backward, batch statistics,
 running-stat updates, deterministic Bernoulli RNG, RoPE forward/backward, and
 f32 SDPA forward/backward within the matrix constraints. C5 adds software
@@ -144,8 +144,12 @@ accept optional producer-serialized external plain INT32 `M_override`,
 dimensions are one, and each batch dimension is either one or the corresponding
 C dimension. The values select per-batch output and reduction extents within
 the serialized static maxima. Standard MATMUL fills the inactive M/N region
-with its finite f32 `padding_value`; MATMUL_FP8 fills it with zero. Static f32
-SDPA supports external ragged forward data and
+with its finite f32 `padding_value`; MATMUL_FP8 fills it with zero. Runtime
+scalar pass-by-value inputs are also executable when they are external,
+plain, input-only tensors with all-one dimensions and no embedded payload. The
+caller supplies the scalar address under its ordinary UID, matching the
+Frontend runtime form without changing the public ABI or artifact format.
+Static f32 SDPA supports external ragged forward data and
 row outputs, and ragged backward data and gradients, using validated
 element-prefix offsets. Forward also supports independently paged K/V caches,
 including compact INT32 page tables with independent prefixes, compressed
@@ -153,8 +157,8 @@ UINT8 block masks, and per-query-head sink logits; backward can return the sink
 gradient. These storage forms require padding and explicit sequence lengths.
 Paged backward page-table ports are not present in the pinned v1.24.0
 serialization schema and are therefore outside the current input contract.
-Explicit aliasing, scalar pass-by-value, other tensor reordering, distributed
-peer statistics, and optional features on the
+Explicit aliasing, embedded/fused pass-by-value constants, other tensor
+reordering, distributed peer statistics, and optional features on the
 specialized FP8/MXFP8 attention paths are not executable yet.
 
 DeepForge does not define a private graph JSON format. Unsupported schema,
@@ -371,7 +375,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, exact-pointwise shape override, MATMUL M/N/K extent overrides, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
+| C6 | In progress: `F8_128x4`, exact-pointwise shape override, MATMUL M/N/K extent overrides, runtime scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; broader dynamic/reorder behavior remains |
 | Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

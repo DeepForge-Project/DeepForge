@@ -511,6 +511,26 @@ int main(int argc, char** argv) {
                        [](Json& value) {
                            value["pass_by_values"]["4"] = 1.0;
                        });
+        expect_invalid("generic non-empty pass-by-values",
+                       ErrorCode::kUnsupportedExecutionMetadata,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["pass_by_values"]["4"] = 1.0;
+                       });
+        expect_invalid("generic non-empty workspace modifications",
+                       ErrorCode::kUnsupportedExecutionMetadata,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["workspace_modifications"]["4"] = 1;
+                       });
+        expect_invalid("generic non-empty variant replacements",
+                       ErrorCode::kUnsupportedExecutionMetadata,
+                       [&](Json& value) {
+                           value = graph_for_schema(value, *pointwise_schema);
+                           value["variant_pack_replacements"] =
+                               Json::array({Json::array(
+                                   {1, Json::array({3, 0})})});
+                       });
         expect_invalid("non-empty variant replacements",
                        ErrorCode::kUnsupportedExecutionMetadata,
                        [](Json& value) {

@@ -215,6 +215,10 @@ Json rng_graph(bool fixed_seed = false) {
     Json tensors = Json::object();
     tensors["1"] = tensor("Seed", 1, {1, 1, 1, 1}, "INT64");
     tensors["2"] = tensor("Offset", 2, {1, 1, 1, 1}, "INT64");
+    if (!fixed_seed) {
+        tensors["1"]["is_pass_by_value"] = true;
+        tensors["2"]["is_pass_by_value"] = true;
+    }
     tensors["3"] = tensor("Y", 3, {2, 3});
     Json inputs = fixed_seed ? Json::object()
                              : Json::object({{"Seed", 1}, {"Offset", 2}});
@@ -1097,7 +1101,7 @@ std::vector<float> finite_difference_sink(AttentionCase configuration,
 void run_rng_tests(TestRunner& tests) {
     deepforge::compiler::CompilationResult compilation;
     auto status = compile_document(rng_graph(), compilation);
-    tests.good(status, "compile dynamic-seed RNG");
+    tests.good(status, "compile runtime-PBV-seed RNG");
     if (status.is_bad() || !compilation.executable) return;
 
     std::int64_t seed = -31;
@@ -1112,7 +1116,7 @@ void run_rng_tests(TestRunner& tests) {
                                          {3, scalar.data()}};
     status = compilation.executable->execute_variant(
         deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr);
-    tests.good(status, "execute dynamic-seed RNG");
+    tests.good(status, "execute runtime-PBV-seed RNG");
     tests.check(scalar == expected,
                 "RNG stream matches the stable CPU Bernoulli contract");
 

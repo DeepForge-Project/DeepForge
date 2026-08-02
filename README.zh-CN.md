@@ -6,7 +6,7 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前五个 C6 增量已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前七个 C6 增量已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
@@ -100,7 +100,7 @@ CPU-only MVP，因此不锁定也不安装 CUDA/cuDNN backend 版本。
   [schema capability matrix](docs/cudnn-graph-schema-inventory.md#5-capability-含义)。
 
 通用路径支持 rank 3-5 grouped convolution、stride、dilation、非对称 padding、
-FPROP/DGRAD/WGRAD 及 C2-C5 混合图；也支持 capability matrix 范围内的
+FPROP/DGRAD/WGRAD 及 C2-C6 混合图；也支持 capability matrix 范围内的
 normalization forward/backward、batch statistics、running-stat 更新、确定性
 Bernoulli RNG、RoPE forward/backward 和 f32 SDPA forward/backward。C5 在 9 个
 特殊 tag 所需端口加入软件 FLOAT16/BFLOAT16/FP8/FP4/INT4 conversion 和 packed
@@ -115,13 +115,16 @@ shape override。序列化 dimension 是上界，Frontend-shaped override array 
 `M_override`、`N_override`、`K_override` tensor：rank 与 C 相同，末两个 matrix
 dimension 为 1，每个 batch dimension 为 1 或对应的 C dimension。各 batch 的值在
 序列化静态上界内选择输出与 reduction extent；标准 MATMUL 用有限 f32
-`padding_value` 填充 M/N 无效区，MATMUL_FP8 填零。静态 f32 SDPA
+`padding_value` 填充 M/N 无效区，MATMUL_FP8 填零。Runtime scalar
+pass-by-value input 也可执行：tensor 必须是 external、plain、仅作为
+input、所有 dimension 为 1 且没有内嵌 payload；调用者按普通 UID 提供 scalar 地址。
+这与 Frontend 的 runtime 形式一致，不改变公开 ABI 或 artifact format。静态 f32 SDPA
 支持采用已校验 element-prefix offset 的 external ragged forward data/row output 和
 backward data/gradient。Forward 还支持独立 paged K/V cache、带独立 prefix 的紧凑
 INT32 page table、压缩 UINT8 block mask 和每个 query head 的 sink logit；backward
 可输出 sink gradient。这些 storage 形式都要求 padding 和显式 sequence length。
 固定使用的 v1.24.0 serialization schema 没有 paged backward page-table 端口，因此
-该形式不属于当前输入契约。显式 alias、scalar pass-by-value、其他 tensor reorder、
+该形式不属于当前输入契约。显式 alias、内嵌/fused pass-by-value constant、其他 tensor reorder、
 分布式 peer statistics 和 FP8/MXFP8 特殊 attention 路径的可选特性暂不可执行。
 
 ## 架构
@@ -309,7 +312,7 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：`F8_128x4`、exact-pointwise shape override、MATMUL M/N/K extent override、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
+| C6 | 进行中：`F8_128x4`、exact-pointwise shape override、MATMUL M/N/K extent override、runtime scalar pass-by-value、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余更广 dynamic/reorder 行为 |
 | Optimize | 进行中：target-aware K-output unroll 已完成；外层 tiling、padding fusion、并行化继续由 benchmark 驱动 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

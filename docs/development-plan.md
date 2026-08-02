@@ -394,7 +394,8 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
 2. 已完成：按 Frontend `v1.24.0` serializer 源码固化 Conv2D JSON fixture，并由
    vendored parser 生成等价 UBJSON；CPU release gate 是 serialization 和 execute
    signature 的源码级一致性，不要求 CUDA/cuDNN producer；
-3. 已完成：实现 P1 canonical model、strict JSON/UBJSON importer 和 59 项测试检查；
+3. 已完成：实现 P1 canonical model 和 strict JSON/UBJSON importer，并覆盖完整 schema
+   与负向路径；
 4. 已完成：实现 P2 destination-passing MLIR importer/verifier 和 metadata 输出；
 5. 已完成：P3 One-Shot Bufferize、allocation materialization 和 workspace plan；
 6. 已完成：P4 scalar、P5 SIMD 分发以及 P6 CLI/artifact/质量门。
@@ -430,9 +431,15 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     override。Per-batch broadcast metadata、标准 MATMUL 有限 f32 padding、FP8 零
     padding、artifact reload、错误 descriptor、Release、ASan 和 UBSan 均已覆盖，
     且不改变公开 execute ABI。
+15. 已完成：C6.7 Frontend runtime scalar pass-by-value input。External、仅作为
+    input、全 1 dimension 的 tensor 使用普通 UID-map pointer 和 artifact argument
+    metadata；pointwise broadcast、normalization epsilon、FP8 MATMUL control、通用
+    根级 metadata 拒绝、错误 descriptor、Release、ASan 和 UBSan 覆盖该增量，且不
+    改变 ABI 或 artifact version。内嵌/fused scalar constant 作为独立形式继续延后。
 
-剩余 C6 功能工作包括更广泛的 dynamic 行为和上述 scale 子集以外的 reorder
-format。固定使用的 v1.24.0 serializer 无法表达 paged backward，该能力仅作为未来
+剩余 C6 功能工作包括更广泛的 dynamic 行为、上述 scale 子集以外的 reorder
+format，以及内嵌/fused constant 的 ownership 和持久化。固定使用的 v1.24.0
+serializer 无法表达 paged backward，该能力仅作为未来
 schema 版本的兼容工作跟踪。后续 benchmark 驱动优化仍由 Loop/Schedule 层负责，并对照保留的
 baseline policy 逐项评估外层 tiling、padding fusion 和多线程。这些优化
 不得反向改变已冻结的 serialization、ABI、workspace ownership、数值和 artifact

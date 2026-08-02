@@ -147,8 +147,8 @@ attribute 和 alias 约束以
 已验证行的声明为准。
 
 C2 data tensor 必须具有正的静态 allocation dimension、正且不重叠的 stride、显式
-UID、`NONE` reorder，并且不是 pass-by-value 或 ragged tensor。virtual tensor 使用
-静态规划的 workspace。`VIEW_ONLY` reshape、in-place concatenate、同 UID
+UID、`NONE` reorder，并且不是 ragged tensor。Pass-by-value 仅限 3.8 节的 runtime
+scalar 扩展。virtual tensor 使用静态规划的 workspace。`VIEW_ONLY` reshape、in-place concatenate、同 UID
 输入输出和 RESAMPLE index 输出仍不支持。
 RESAMPLE `BILINEAR` 也会被拒绝，因为 v1.24.0 序列化 fraction 表示省略了恢复
 分数缩放语义所需的 denominator。第 4 节公开执行接口保持不变，差异只存在于
@@ -184,11 +184,12 @@ reduction count 大于 1 时使用 sample variance；running-stat 更新公式�
 和 `DBN_WEIGHT` 通过公开序列化端口输出 sum、等价 affine 和 gradient coefficient，
 不引入私有 side channel。
 
-scalar-like 输入必须是所有维度为 1、非 pass-by-value 的显式 f32 tensor。非空
+scalar-like 输入必须是所有维度为 1 的 f32 tensor，可以是普通 input，也可以是
+3.8 节约束下的 runtime pass-by-value input。非空
 分布式 `peer_stats` 被拒绝。BATCHNORM running-stat 端口必须全有或全无。执行时
 epsilon 必须使 square-root 输入为正，`ACCUM_COUNT` 必须为正；这些数据值属于调用者
 前置条件，而不是编译期 metadata。C2/C3 node 可通过 virtual workspace tensor
-混合。dynamic shape、alias、pass-by-value、ragged/reordered storage 和其他非 f32
+混合。dynamic shape、alias、内嵌 pass-by-value constant、ragged/reordered storage 和其他非 f32
 执行仍延后。
 
 ### 3.3 MVP 后 C4 扩展
@@ -252,7 +253,7 @@ ordering，并使用 f32 dS reference approximation。Frontend producer 生成�
 descriptor，但公开 execute ABI 按设计不会在 dispatch 前扫描 tensor 内容。
 
 连接 tensor type 同时受两端支持时，C2-C5 node 可以混合。公开 UID variant-pack
-和 workspace ABI 不变。Dynamic/override shape、pass-by-value、alias、
+和 workspace ABI 不变。Dynamic/override shape、内嵌 pass-by-value constant、alias、
 ragged storage、reorder format 和 paged/cache metadata 除下述 C6 显式扩展外均不
 支持。
 
@@ -281,7 +282,7 @@ coordinate；公开 execute 和 workspace ABI 不变。
 `is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
 dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor。当前启用
 override 必须精确包含一个 `POINTWISE` node；全部输入输出必须是编译 dimension
-相同的 external、非 ragged、非 reordered FLOAT tensor，不支持 broadcast 或
+相同的 external、非 ragged、非 reordered、非 pass-by-value FLOAT tensor，不支持 broadcast 或
 virtual workspace。
 
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
@@ -346,6 +347,26 @@ tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，
 Artifact format `5` 持久化 ragged storage policy、offset/sequence UID 和正的逻辑
 sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用对应
 cache block size。Reader 继续接受 v1-v4，其中 v4 divisor 默认为 1。
+
+### 3.8 C6 Runtime Scalar Pass-by-Value 扩展
+
+接受的 Frontend runtime 形式要求 `is_pass_by_value=true`，并且
+`pass_by_value` payload 为 null。Tensor 必须具有显式 UID、rank 1-64、所有
+dimension 为 1、正且不重叠的 layout 和 `NONE` reorder；它只能是 external、仅作为
+input、非 ragged，type 限于 `INT64`、`INT32`、`HALF`、`FLOAT`、`DOUBLE`、
+`BFLOAT16`，具体消费端口可进一步收窄。
+
+调用者在普通 UID map 中提供 scalar 的 host pointer。编译器把它记录为单元素只读
+argument，因此公开 ABI、workspace 规则、invocation adapter 和 artifact format 均不
+改变。POINTWISE scalar broadcast、normalization epsilon 和 FP8 MATMUL scale control
+均覆盖了该行为。
+
+Pass-by-value output、virtual/ragged/reordered descriptor 以及 graph-level runtime
+shape override 均被拒绝。数值型 tensor `pass_by_value` payload 或非空根级
+`pass_by_values` 表示内嵌 fused constant，并返回
+`DFE_UNSUPPORTED_EXECUTION_METADATA`；该独立形式的 constant ownership 和 artifact
+持久化仍延后。所有图形式都拒绝非空根级 `workspace_modifications` 和
+`variant_pack_replacements`，该规则不再只依赖优化 Conv specialization。
 
 ## 4. 对外运行接口
 

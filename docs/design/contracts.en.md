@@ -164,8 +164,9 @@ mode, shape, layout, attribute, and alias restrictions are the validated rows
 in the [schema capability inventory](../cudnn-graph-schema-inventory.en.md#5-capability-meaning).
 
 All C2 data tensors have positive static allocation dimensions and positive
-non-overlapping strides, explicit UIDs, `NONE` reordering, and no pass-by-value
-or ragged metadata. Virtual tensors are assigned to static workspace.
+non-overlapping strides, explicit UIDs, `NONE` reordering, and no ragged
+metadata. Pass-by-value is limited to the runtime scalar extension in section
+3.8. Virtual tensors are assigned to static workspace.
 `VIEW_ONLY` reshape, in-place concatenate, same-UID input/output, and RESAMPLE
 index outputs remain unsupported. RESAMPLE `BILINEAR` is also rejected because the
 v1.24.0 serialized fraction representation omits the denominator needed to
@@ -209,14 +210,15 @@ scale, and serialized bias outputs. `GENSTATS`, `BN_FINALIZE`, and
 `DBN_WEIGHT` expose their serialized sums, equivalent affine values, and
 gradient coefficients without a private side channel.
 
-Scalar-like inputs are explicit, non-pass-by-value f32 tensors with every
-dimension equal to one. Nonempty distributed `peer_stats` is rejected.
+Scalar-like inputs are f32 tensors with every dimension equal to one. They may
+be ordinary inputs or runtime pass-by-value inputs under section 3.8. Nonempty
+distributed `peer_stats` is rejected.
 BATCHNORM running-stat ports must be all present or all absent. At execution,
 epsilon must make the square-root operand positive and `ACCUM_COUNT` must be
 positive; these data values are caller preconditions rather than compile-time
 metadata. C2 and C3 nodes may be mixed, including through virtual workspace
-tensors. Dynamic shape, aliasing, pass-by-value, ragged/reordered storage, and
-other non-f32 execution remain deferred.
+tensors. Dynamic shape, aliasing, embedded pass-by-value constants,
+ragged/reordered storage, and other non-f32 execution remain deferred.
 
 ### 3.3 Post-MVP C4 Extension
 
@@ -291,7 +293,7 @@ execute ABI intentionally does not inspect tensor contents before dispatch.
 
 C2-C5 nodes may be mixed when both ends support the connected tensor type.
 The public UID variant-pack and workspace ABI is unchanged. Dynamic/override
-shapes, pass-by-value, aliasing, ragged storage, reorder formats, and
+shapes, embedded pass-by-value constants, aliasing, ragged storage, reorder formats, and
 paged/cache metadata are unsupported except for the explicit C6 extensions
 below.
 
@@ -324,8 +326,8 @@ ABI is unchanged.
 persisted independently. The dynamic flag alone is plan metadata and does not
 alter a static kernel descriptor. Enabling override currently requires exactly
 one `POINTWISE` node. Every input and output must be an external, non-ragged,
-non-reordered FLOAT tensor with the same compiled dimensions; broadcasting and
-virtual workspace are excluded.
+non-reordered, non-pass-by-value FLOAT tensor with the same compiled dimensions;
+broadcasting and virtual workspace are excluded.
 
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
@@ -403,6 +405,29 @@ Artifact format `5` persists the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
 one; compact page tables use the corresponding cache block size. The reader
 continues to accept v1-v4, with v4 divisors defaulted to one.
+
+### 3.8 C6 Runtime Scalar Pass-by-Value Extension
+
+The accepted Frontend runtime form has `is_pass_by_value=true` and a null
+`pass_by_value` payload. The tensor must have an explicit UID, rank 1-64 with
+every dimension equal to one, a positive non-overlapping layout, and `NONE`
+reordering. It is external, input-only, non-ragged, and has type `INT64`,
+`INT32`, `HALF`, `FLOAT`, `DOUBLE`, or `BFLOAT16`; the consuming operation port
+may impose a narrower type.
+
+The caller supplies a host pointer to the scalar in the ordinary UID map. The
+compiler records the tensor as a one-element read argument, so the public ABI,
+workspace rules, invocation adapter, and artifact format are unchanged. The
+same behavior is exercised by pointwise broadcasting, normalization epsilon,
+and FP8 MATMUL scale controls.
+
+Pass-by-value outputs, virtual/ragged/reordered descriptors, and graph-level
+runtime shape overrides are rejected. A numeric tensor `pass_by_value` payload
+or nonempty root `pass_by_values` represents an embedded fused constant and
+returns `DFE_UNSUPPORTED_EXECUTION_METADATA`; constant ownership and artifact
+persistence for that distinct form remain deferred. Nonempty root
+`workspace_modifications` and `variant_pack_replacements` are likewise rejected
+for every graph form, not only the optimized Conv specialization.
 
 ## 4. Public Execution Interface
 

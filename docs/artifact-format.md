@@ -107,6 +107,11 @@ ranked-memref descriptor 和 workspace descriptor，再调用隐藏的 pointer-t
 wrapper。这个内部 adapter 不改变公开的 handle + UID variant-pack + workspace
 调用形状。reader 会拒绝未知 adapter kind，也会拒绝非空的 kind-1 metadata。
 
+Runtime pass-by-value scalar 不增加 argument-table flag。编译后它与 external 单元素
+只读 argument 具有相同 CPU 调用语义：调用者按 UID 提供地址，因此现有 format 可
+精确 reload。内嵌/fused scalar constant 需要持久化 value ownership，当前仍不支持；
+reader 不得从普通单元素 argument 推断这种 constant。
+
 版本 `3` 将执行 shape 意图与 argument 的编译最大 shape/byte span 分开记录。policy
 `1` 表示 object 为 exact-shape pointwise override 子集生成了 dynamic memref
 descriptor 和 runtime loop bound；runtime 在调用前仍会验证每个 override。过渡期

@@ -1744,7 +1744,7 @@ Status validate_variant_pack_uids(Json const& root, ConvFpropDesc const& conv) {
     return Status::ok();
 }
 
-Status validate_metadata(Json const& root, ConvFpropDesc const& conv) {
+Status validate_execution_metadata(Json const& root) {
     auto status = require_empty_object_if_present(root, "pass_by_values");
     if (status.is_bad()) {
         return status;
@@ -1759,6 +1759,12 @@ Status validate_metadata(Json const& root, ConvFpropDesc const& conv) {
     if (status.is_bad()) {
         return status;
     }
+
+    return Status::ok();
+}
+
+Status validate_conv_metadata(Json const& root, ConvFpropDesc const& conv) {
+    auto status = Status::ok();
 
     auto const workspace_size = root.find("fe_workspace_size");
     if (workspace_size != root.end()) {
@@ -1837,6 +1843,11 @@ Status read_document(Json const& root, SerializedGraph& output) {
         return status;
     }
 
+    status = validate_execution_metadata(root);
+    if (status.is_bad()) {
+        return status;
+    }
+
     status = require_field(root, "", "nodes", field);
     if (status.is_bad()) {
         return status;
@@ -1898,7 +1909,7 @@ Status read_document(Json const& root, SerializedGraph& output) {
         if (status.is_bad()) {
             return status;
         }
-        status = validate_metadata(root, *conv);
+        status = validate_conv_metadata(root, *conv);
         if (status.is_bad()) {
             return status;
         }

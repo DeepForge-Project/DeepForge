@@ -198,7 +198,8 @@ execution subset:
 
 All validated generic rows require static, positive, explicitly UID-assigned
 tensors and f32 graph context types, positive non-overlapping strides, `NONE`
-reordering, and no pass-by-value metadata. Ragged metadata is legal only for
+reordering, and no pass-by-value metadata except the C6 runtime scalar subset
+below. Ragged metadata is legal only for
 the explicit standard-f32 SDPA subset below. Data tensors are f32. C4 permits
 INT32 sequence lengths and scalar INT64 RNG seed/offset tensors, while MATMUL
 and MATMUL_FP8 permit INT32 extent-override tensors on their documented ports.
@@ -230,11 +231,21 @@ and unlisted optional ports. Windowed forms that could produce fully masked
 rows are rejected. Backward consumes the supplied log-sum-exp `Stats`.
 
 Normalization scalar inputs such as epsilon, momentum, and accumulation count
-are explicit f32 tensors whose dimensions are all one; scalar pass-by-value
-metadata remains deferred. Distributed nonempty `peer_stats` is not
+are f32 tensors whose dimensions are all one; they may be ordinary inputs or
+runtime pass-by-value inputs. Distributed nonempty `peer_stats` is not
 executable. Running-stat ports must be either all present or all absent, and
 their runtime values are required to provide positive accumulation counts and
 valid epsilon values.
+
+C6 runtime pass-by-value accepts an input tensor only when
+`is_pass_by_value=true`, `pass_by_value` is null, the UID is explicit, every
+dimension is one, and the descriptor is external, non-ragged, and `NONE`
+reordered. The scalar type is `INT64`, `INT32`, `HALF`, `FLOAT`, `DOUBLE`, or
+`BFLOAT16`, subject to each operation port's narrower type rules. Its host
+pointer is supplied under the ordinary UID and is persisted as a one-element
+read argument in artifacts. Outputs, virtual tensors, runtime shape-override
+arrays, embedded scalar payloads, and nonempty root `pass_by_values` are
+rejected. The embedded forms remain deferred fused constants.
 
 `ROPE` rotates the final even `rope_dim` values, or the full final dimension
 when `rope_dim == 0`; the preceding values are scaled pass-through. `FREQS`
@@ -280,8 +291,8 @@ MATMUL and MATMUL_FP8 accept optional external plain INT32 M/N/K inputs whose
 rank matches C, whose trailing dimensions are `[1,1]`, and whose batch
 dimensions broadcast to C. Values select the output and reduction extents
 within static maxima; standard MATMUL uses a finite f32 padding value outside
-M/N and MATMUL_FP8 uses zero. Explicit
-aliasing, other dynamic operations, ragged tensors outside the documented
+M/N and MATMUL_FP8 uses zero. Explicit aliasing, embedded pass-by-value
+constants, other dynamic operations, ragged tensors outside the documented
 standard-f32 SDPA subset, and physical reorder handling outside the documented
 `F8_128x4` scale subset are deferred. New artifacts use format v5 for ragged
 storage references and logical-sequence divisors; v1-v4 remain readable, with

@@ -232,7 +232,7 @@ requantization 在 C5 结束时归入 C6。
 
 ### C6. 动态元数据、优化和发布验收
 
-**状态**：进行中，六个独立验收增量已完成。第一个为 block-scale conversion 的
+**状态**：进行中，七个独立验收增量已完成。第一个为 block-scale conversion 的
 E4M3/E8M0 scale 和 MXFP8 的 E8M0 descale 端口实现 Frontend/CUTLASS
 `F8_128x4` 物理 ordering。第二个为单个 exact-shape、external plain f32
 `POINTWISE` 子集实现 Frontend-shaped runtime dimension/stride、artifact v3 policy
@@ -253,9 +253,15 @@ model。它选择 target-aware K-output unroll，保留 baseline 回退，暴露
 per-batch INT32 M/N/K extent tensor，包括 broadcast metadata、标准 MATMUL 有限
 padding、FP8 零 padding、artifact reload、错误 descriptor、Release、ASan 和 UBSan
 覆盖。
+第七个将 Frontend runtime scalar pass-by-value input 实现为 external、仅作为 input、
+全 1 dimension 且由普通 UID-map pointer 提供的 tensor。Pointwise broadcast、
+normalization epsilon、FP8 MATMUL control、artifact reload、通用根级 metadata 拒绝、
+错误 descriptor、Release、ASan 和 UBSan 覆盖该增量；内嵌/fused scalar constant
+继续延后。
 
 **工作内容**：将动态行为扩展到已交付 pointwise/MATMUL 子集之外；加入已交付
-scale 子集外的 reorder format；随后独立评估 fusion、threading、其他 vector
+scale 子集外的 reorder format；定义内嵌 constant ownership 和 artifact 持久化；
+随后独立评估 fusion、threading、其他 vector
 schedule 和各操作族 cost model。固定使用的 v1.24.0 serializer 没有 paged backward
 page-table 端口，因此该能力属于未来 schema 版本的兼容工作，不是当前契约下的实现
 任务。

@@ -1,27 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">DeepForge project icon</title>
-  <desc id="desc">A forging hammer strikes a matrix-marked anvil, representing deep learning graphs compiled into CPU code.</desc>
+  <desc id="desc">A long-handled forge hammer resting on an anvil.</desc>
 
   <rect width="512" height="512" fill="#ffffff"/>
 
-  <!-- Forging hammer -->
-  <g fill="#c84a32" transform="rotate(-28 292 176)">
-    <rect x="226" y="72" width="190" height="62" rx="12"/>
-    <rect x="290" y="122" width="38" height="154" rx="14"/>
+  <g fill="#c8161e" transform="translate(-25 58)">
+    <!-- Anvil: thick face, curved waist, and two-stage base. -->
+    <path d="M98 127h249v5h117c-15 24-43 43-79 52l-38 7v-27H140v14c0 10-10 15-24 12-12-2-18-9-18-20z"/>
+    <path d="M140 164h207v32c-31 8-45 25-44 46 1 20 18 37 50 51H168c31-15 47-32 48-52 1-21-16-39-76-50z"/>
+    <path d="M160 293h201c7 0 12 5 12 12v12H148v-12c0-7 5-12 12-12z"/>
+    <path d="M130 319h259v66H130z"/>
+
+    <!-- Hammer: head resting on the face, with the handle rising to the right. -->
+    <g transform="rotate(-22 157 86)">
+      <path d="M163 77h230c6 0 9 3 9 9s-3 9-9 9H163z"/>
+      <path d="M168 83h225c2 0 3 1 3 3s-1 3-3 3H168z" fill="#ffffff"/>
+      <path d="M139 49h36l5 8v58l-5 8h-36l-5-8V57z"/>
+    </g>
   </g>
-
-  <!-- Impact sparks -->
-  <path d="M140 156l14 22-14 22-14-22z" fill="#c84a32"/>
-  <path d="M188 112l12 19-12 19-12-19z" fill="#c84a32"/>
-  <path d="M100 204l10 16-10 16-10-16z" fill="#c84a32"/>
-
-  <!-- Matrix-marked anvil -->
-  <path d="M70 232h246c48 0 84-18 126-58h18c-18 58-56 100-112 118h-54l-22 50h-88l-22-50h-50z" fill="#c84a32"/>
-  <rect x="116" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
-  <rect x="156" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
-  <rect x="196" y="252" width="28" height="26" rx="4" fill="#ffffff"/>
-
-  <!-- Anvil stem and base -->
-  <path d="M184 326h88l34 84H150z" fill="#c84a32"/>
-  <path d="M116 392h220l52 58H64z" fill="#c84a32"/>
 </svg>

@@ -15,7 +15,9 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -217,32 +219,43 @@ DecodeTable decode_table(DataType type) {
 ::mlir::Value logical_offset(
     ::mlir::OpBuilder& builder,
     ::mlir::Location location,
+    ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
-    auto result = index_constant(builder, location, 0);
+    auto metadata = ::mlir::memref::ExtractStridedMetadataOp::create(
+        builder, location, buffer);
+    auto strides = metadata.getStrides();
+    ::mlir::Value result = metadata.getOffset();
     for (std::size_t axis = 0; axis < indices.size(); ++axis) {
         auto contribution = ::mlir::arith::MulIOp::create(
             builder, location, indices[axis],
-            index_constant(builder, location, tensor.stride[axis]));
+            *std::next(strides.begin(), static_cast<std::ptrdiff_t>(axis)));
         result = ::mlir::arith::AddIOp::create(builder, location, result,
                                                contribution);
     }
+    (void)tensor;
     return result;
 }
 
 ::mlir::Value f8_reordered_offset(
     ::mlir::OpBuilder& builder,
     ::mlir::Location location,
+    ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
     auto const layout = *f8_reordering_layout(tensor);
+    auto metadata = ::mlir::memref::ExtractStridedMetadataOp::create(
+        builder, location, buffer);
+    auto sizes = metadata.getSizes();
+    auto runtime_size = [&](std::size_t axis) -> ::mlir::Value {
+        return *std::next(sizes.begin(), static_cast<std::ptrdiff_t>(axis));
+    };
     auto l = index_constant(builder, location, 0);
     for (std::size_t axis = 0; axis + 2 < tensor.dim.size(); ++axis) {
         l = ::mlir::arith::AddIOp::create(
             builder, location,
             ::mlir::arith::MulIOp::create(
-                builder, location, l,
-                index_constant(builder, location, tensor.dim[axis])),
+                builder, location, l, runtime_size(axis)),
             indices[axis]);
     }
     ::mlir::Value m = indices[layout.m_axis];
@@ -251,6 +264,12 @@ DecodeTable decode_table(DataType type) {
         builder, location, m, index_constant(builder, location, 128));
     ::mlir::Value k_block = ::mlir::arith::DivUIOp::create(
         builder, location, k, index_constant(builder, location, 4));
+    ::mlir::Value m_blocks = ::mlir::arith::DivUIOp::create(
+        builder, location, runtime_size(layout.m_axis),
+        index_constant(builder, location, 128));
+    ::mlir::Value k_blocks = ::mlir::arith::DivUIOp::create(
+        builder, location, runtime_size(layout.k_axis),
+        index_constant(builder, location, 4));
     ::mlir::Value m_in_32 = ::mlir::arith::RemUIOp::create(
         builder, location, m, index_constant(builder, location, 32));
     ::mlir::Value m_group = ::mlir::arith::RemUIOp::create(
@@ -268,10 +287,9 @@ DecodeTable decode_table(DataType type) {
             ::mlir::arith::AddIOp::create(
                 builder, location,
                 ::mlir::arith::MulIOp::create(
-                    builder, location, l,
-                    index_constant(builder, location, layout.m_blocks)),
+                    builder, location, l, m_blocks),
                 m_block),
-            index_constant(builder, location, layout.k_blocks)),
+            k_blocks),
         k_block);
     ::mlir::Value offset = ::mlir::arith::MulIOp::create(
         builder, location, matrix_block,
@@ -311,7 +329,7 @@ DecodeTable decode_table(DataType type) {
     ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
-    auto slot = logical_offset(builder, location, tensor, indices);
+    auto slot = logical_offset(builder, location, buffer, tensor, indices);
     auto two = index_constant(builder, location, 2);
     auto byte_index = ::mlir::arith::DivUIOp::create(builder, location, slot,
                                                      two);
@@ -337,7 +355,7 @@ void store_packed_code(
     ::mlir::Value buffer,
     TensorDesc const& tensor,
     llvm::SmallVector<::mlir::Value> const& indices) {
-    auto slot = logical_offset(builder, location, tensor, indices);
+    auto slot = logical_offset(builder, location, buffer, tensor, indices);
     auto two = index_constant(builder, location, 2);
     auto byte_index = ::mlir::arith::DivUIOp::create(builder, location, slot,
                                                      two);
@@ -633,7 +651,8 @@ bool is_supported_reordering(TensorDesc const& tensor) noexcept {
             builder, location,
             packed_byte_view(builder, location, buffer, tensor),
             ::mlir::ValueRange{
-                f8_reordered_offset(builder, location, tensor, indices)});
+                f8_reordered_offset(builder, location, buffer, tensor,
+                                    indices)});
         return decode_low_precision(builder, location, code, tensor.data_type);
     }
     if (tensor.data_type == DataType::kFp4E2M1) {
@@ -718,7 +737,8 @@ void store_from_f32(
             builder, location, code,
             packed_byte_view(builder, location, buffer, tensor),
             ::mlir::ValueRange{
-                f8_reordered_offset(builder, location, tensor, indices)});
+                f8_reordered_offset(builder, location, buffer, tensor,
+                                    indices)});
         return;
     }
     if (tensor.data_type == DataType::kFp4E2M1) {

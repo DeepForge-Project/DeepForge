@@ -495,9 +495,20 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     role 和固定 axis，同时保持 v1-v10 可读。非连续和最大 shape 执行、reload、错误
     关系/layout/图、Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace ABI
     不变。
+24. 已完成：C6.16 producer-specific block-scale MATMUL descriptor override。精确
+    三节点图由两个 FLOAT `BLOCK_SCALE_DEQUANTIZE` 和一个 FLOAT `MATMUL` 组成；
+    block size 分别为 `[1,16]`、`[16,1]`。五个 external rank-3 role 按
+    A/SF_A/B/SF_B/C 排列，storage 依次为
+    FP4-E2M1/F8_128x4-E4M3/FP4-E2M1/F8_128x4-E4M3/BFLOAT16；两个反量化
+    FLOAT tensor 保持 virtual。Runtime 会联合校验 B/M/N/K shape、128x4 scale
+    padding 和 producer-canonical stride。Packed FP4 与 reordered scale addressing
+    使用 runtime memref metadata，每个 virtual view 分别跟随自身 source descriptor，
+    MATMUL 可写 BFLOAT16。Artifact v12 记录五个有序 role，并保持 v1-v11 可读。
+    Dynamic scalar 执行、reload、partial/最大 descriptor、错误关系/layout/图、
+    Release、ASan 和 UBSan 覆盖该增量，公开 ABI 不变。
 
 剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE
-与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
+、producer-specific block-scale MATMUL 与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
 v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`
 helper 只存在于 legacy backend/filter 路径；两者都没有可达的现代 serialized Graph

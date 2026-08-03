@@ -3,6 +3,7 @@
 #include "DeepForge/Import/Capability.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <set>
@@ -43,6 +44,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
         case ShapeOverridePolicy::kReduction:
         case ShapeOverridePolicy::kTranspose:
         case ShapeOverridePolicy::kConcatenate:
+        case ShapeOverridePolicy::kBlockScaleMatmul:
             return true;
     }
     return false;
@@ -235,6 +237,81 @@ bool valid_concatenate_dimensions(
     return axis_extent == output[static_cast<std::size_t>(axis)];
 }
 
+bool checked_multiply(std::int64_t lhs,
+                      std::int64_t rhs,
+                      std::int64_t& output) {
+    if (lhs <= 0 || rhs <= 0 ||
+        lhs > std::numeric_limits<std::int64_t>::max() / rhs) {
+        return false;
+    }
+    output = lhs * rhs;
+    return true;
+}
+
+bool round_up(std::int64_t value,
+              std::int64_t multiple,
+              std::int64_t& output) {
+    if (value <= 0 || multiple <= 0 ||
+        value > std::numeric_limits<std::int64_t>::max() - (multiple - 1)) {
+        return false;
+    }
+    output = ((value + multiple - 1) / multiple) * multiple;
+    return true;
+}
+
+bool valid_block_scale_matmul_dimensions(
+    std::vector<TensorArgumentMetadata const*> const& roles) {
+    if (roles.size() != 5 ||
+        std::any_of(roles.begin(), roles.end(), [](auto const* argument) {
+            return argument->dimensions.size() != 3;
+        })) {
+        return false;
+    }
+    auto const& a = roles[0]->dimensions;
+    auto const& scale_a = roles[1]->dimensions;
+    auto const& b = roles[2]->dimensions;
+    auto const& scale_b = roles[3]->dimensions;
+    auto const& c = roles[4]->dimensions;
+    auto const batch = a[0];
+    auto const m = a[1];
+    auto const k = a[2];
+    auto const n = b[2];
+    if (batch <= 0 || m <= 0 || n <= 0 || k <= 0 || k % 16 != 0 ||
+        b[0] != batch || b[1] != k || c != std::vector<std::int64_t>(
+                                                   {batch, m, n})) {
+        return false;
+    }
+    std::int64_t scale_m = 0;
+    std::int64_t scale_n = 0;
+    std::int64_t scale_k = 0;
+    if (!round_up(m, 128, scale_m) || !round_up(n, 128, scale_n) ||
+        !round_up(k / 16, 4, scale_k) ||
+        scale_a !=
+            std::vector<std::int64_t>({batch, scale_m, scale_k}) ||
+        scale_b !=
+            std::vector<std::int64_t>({batch, scale_k, scale_n})) {
+        return false;
+    }
+    std::int64_t mk = 0;
+    std::int64_t nk = 0;
+    std::int64_t mn = 0;
+    std::int64_t scale_mk = 0;
+    std::int64_t scale_nk = 0;
+    if (!checked_multiply(m, k, mk) || !checked_multiply(n, k, nk) ||
+        !checked_multiply(m, n, mn) ||
+        !checked_multiply(scale_m, scale_k, scale_mk) ||
+        !checked_multiply(scale_n, scale_k, scale_nk)) {
+        return false;
+    }
+    return roles[0]->strides == std::vector<std::int64_t>({mk, k, 1}) &&
+           roles[1]->strides ==
+               std::vector<std::int64_t>({scale_mk, scale_k, 1}) &&
+           roles[2]->strides == std::vector<std::int64_t>({nk, 1, k}) &&
+           roles[3]->strides ==
+               std::vector<std::int64_t>({scale_nk, 1, scale_k}) &&
+           roles[4]->strides == std::vector<std::int64_t>({mn, n, 1});
+}
+
 }  // namespace
 
 import::Status validate_graph_compile_metadata(
@@ -321,6 +398,7 @@ import::Status validate_graph_compile_metadata(
         metadata.override_policy != ShapeOverridePolicy::kReduction &&
         metadata.override_policy != ShapeOverridePolicy::kTranspose &&
         metadata.override_policy != ShapeOverridePolicy::kConcatenate &&
+        metadata.override_policy != ShapeOverridePolicy::kBlockScaleMatmul &&
         !metadata.override_role_uids.empty()) {
         return fail("override role UIDs require a role-based policy");
     }
@@ -528,6 +606,46 @@ import::Status validate_graph_compile_metadata(
         if (!valid_roles) {
             return fail(
                 "CONCATENATE override roles, axis, or maximum shapes are invalid");
+        }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kBlockScaleMatmul) {
+        if (metadata.arguments.size() != 5 ||
+            metadata.override_role_uids.size() != 5 ||
+            std::set<std::int64_t>(metadata.override_role_uids.begin(),
+                                   metadata.override_role_uids.end())
+                    .size() != 5) {
+            return fail(
+                "block-scale MATMUL override metadata requires distinct A/SF_A/B/SF_B/C role UIDs");
+        }
+        std::vector<TensorArgumentMetadata const*> roles;
+        roles.reserve(5);
+        for (auto uid : metadata.override_role_uids) {
+            auto const role = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == uid;
+                });
+            if (role == metadata.arguments.end()) {
+                return fail(
+                    "block-scale MATMUL override role UID is unresolved");
+            }
+            roles.push_back(&*role);
+        }
+        constexpr std::array expected_types{
+            import::DataType::kFp4E2M1, import::DataType::kFp8E4M3,
+            import::DataType::kFp4E2M1, import::DataType::kFp8E4M3,
+            import::DataType::kBFloat16};
+        bool valid_roles = valid_block_scale_matmul_dimensions(roles);
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            valid_roles =
+                valid_roles && roles[role]->data_type == expected_types[role] &&
+                roles[role]->storage_policy == TensorStoragePolicy::kStrided &&
+                roles[role]->access ==
+                    (role == 4 ? TensorAccess::kWrite : TensorAccess::kRead);
+        }
+        if (!valid_roles) {
+            return fail(
+                "block-scale MATMUL override roles, maximum shapes, or canonical strides are invalid");
         }
     }
     for (auto const& argument : metadata.arguments) {

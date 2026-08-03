@@ -297,6 +297,15 @@ Shape override 还支持具有 1 至 63 个连续编号 input 的单个标准 f3
 的 runtime extent 必须相同，固定 axis 上 input extent 的受检求和必须等于 Y。每个
 role 可使用位于自身序列化 storage bound 内、独立且正并不重叠的 stride。不支持
 in-place、pass-by-value、ragged/reordered storage、virtual tensor、额外 tensor 或组合图。
+Shape override 还支持 exact producer-specific rank-3 图：
+`BLOCK_SCALE_DEQUANTIZE(A,SF_A)`、`BLOCK_SCALE_DEQUANTIZE(B,SF_B)` 后接一个
+`MATMUL`。A/B 是 external FP4 E2M1，SF_A/SF_B 是带 `F8_128x4` 的 external
+FP8 E4M3，两个反量化 FLOAT value 是 virtual，C 是 external BFLOAT16。最终 shape
+为 `A=[B,M,K]`、`B=[B,K,N]`、`C=[B,M,N]`、
+`SF_A=[B,round_up(M,128),round_up(K/16,4)]`、
+`SF_B=[B,round_up(K/16,4),round_up(N,128)]`，且 K 可被 16 整除。五个 external
+stride 都必须保持 producer canonical layout。其他 block-scale 图、类型、reorder、
+port 及同时使用 dynamic context mode 均被拒绝。
 编译 dimension 是上界；runtime dimension 必须为正且
 不超过该上界，runtime stride 必须满足当前支持的正且不重叠条件，每个 external
 storage span 必须位于编译 bound 内。dynamic flag 单独出现时只持久化 metadata，
@@ -306,9 +315,10 @@ MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们�
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
 value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
 子集外的 ragged tensor，以及固定版本现代 Graph producer 未生成的物理 reorder
-契约延后。新 artifact 使用 format v11 记录有序 CONCATENATE input/Y role 和固定
-axis，同时保留 v10 TRANSPOSE role/permutation、v9 REDUCTION role、v8 LOGICAL
-RESHAPE role、v7 SDPA-forward role、v6 MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v10 继续
+契约延后。新 artifact 使用 format v12 记录有序 block-scale MATMUL
+A/SF_A/B/SF_B/C role，同时保留 v11 CONCATENATE input/Y role 和固定 axis、v10
+TRANSPOSE role/permutation、v9 REDUCTION role、v8 LOGICAL
+RESHAPE role、v7 SDPA-forward role、v6 MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v11 继续
 可读，其中 v4 divisor 默认为 1，v6 之前的 role list 为空。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集

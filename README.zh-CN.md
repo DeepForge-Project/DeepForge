@@ -6,7 +6,7 @@ DeepForge 是一个基于 MLIR 的 CPU 编译器。它读取开源
 `cudnn-frontend` 生成的序列化 Graph，将受支持的图降低为 LLVM IR 和
 x86-64 目标代码，并以 cuDNN Frontend 的 UID variant-pack 方式执行。
 
-**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前十五个 C6 增量已实现。从 strict
+**当前状态**：CPU MVP 的 P0-P6、MVP 后覆盖阶段 C0-C5 及前十六个 C6 增量已实现。从 strict
 JSON/UBJSON importer、标准
 Tensor/Linalg IR、唯一一次 One-Shot Bufferize 和静态 workspace planning，到
 scalar/AVX2/AVX-512 LLVM object、CPUID 分发、Frontend-shaped runtime、可重新装载
@@ -117,7 +117,12 @@ dimension 可缩小或重新分配元素，但 X/Y 元素总数必须相同。�
 `TRANSPOSE` 接受相同固定 rank 的 external plain X/Y descriptor，并保持序列化
 permutation。单个标准 f32 `CONCATENATE` 接受 1 至 63 个有序 external plain input
 及相同固定 rank 的 Y；非 concat axis extent 保持相同，固定 axis 上 input extent
-之和等于 Y。单个 dense 标准 f32
+之和等于 Y。一个 producer-specific rank-3 block-scale MATMUL 图也支持有界 descriptor
+override：两个 `BLOCK_SCALE_DEQUANTIZE` node 的 virtual FLOAT 输出输入一个
+`MATMUL`；external role 按 A、SF_A、B、SF_B、C 排列，类型依次为 FP4 E2M1、
+reordered FP8 E4M3、FP4 E2M1、reordered FP8 E4M3 和 BFLOAT16。Runtime descriptor
+必须保持 producer canonical layout、K 为 16 的倍数及用户指南规定的 128x4 padding
+scale shape。单个 dense 标准 f32
 `SDPA` forward 也接受 external plain Q/K/V/O 及可选 row-output
 descriptor；runtime B、Sq、Skv 可缩小，head、embedding、GQA 和跨 tensor 关系保持
 固定并在执行前校验。该子集只支持无 mask 或 top-left causal，不包含其他可选
@@ -330,7 +335,7 @@ header；编译器 API 仍按预期依赖固定的 MLIR 工具链。
 | P5 | 已完成：AVX2/AVX-512、tail、CPUID/XGETBV 分发 |
 | P6 | 已完成：CLI、可装载 artifact、CI、benchmark 和质量门 |
 | C0-C5 | 已完成：通用 graph/runtime 基础及全部 39 个 serialized tag 的已验证子集 |
-| C6 | 进行中：`F8_128x4`、多节点 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE 与 dense SDPA-forward descriptor override、MATMUL M/N/K extent override、runtime/embedded scalar pass-by-value、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余已交付子集之外的 dynamic 行为 |
+| C6 | 进行中：`F8_128x4`、多节点 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE、producer-specific block-scale MATMUL 与 dense SDPA-forward descriptor override、MATMUL M/N/K extent override、runtime/embedded scalar pass-by-value、标准 f32 SDPA ragged/packed/block-mask/sink metadata 及首个 direct-Conv cost model 已完成；剩余已交付子集之外的 dynamic 行为 |
 | Optimize | 进行中：target-aware K-output unroll 已完成；外层 tiling、padding fusion、并行化继续由 benchmark 驱动 |
 | Re-evaluate | 至少出现两个后端的共同抽象需求后，再评估 Machine Dialect |
 

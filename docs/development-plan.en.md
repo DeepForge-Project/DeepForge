@@ -558,10 +558,23 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     while v1-v10 remain readable. Non-contiguous and maximum-shape execution,
     reload, malformed relation/layout/graph cases, Release, ASan, and UBSan
     cover the increment without changing the public execute/workspace ABI.
+24. Completed C6.16 producer-specific block-scale MATMUL descriptor override.
+    The exact three-node graph contains two FLOAT `BLOCK_SCALE_DEQUANTIZE`
+    operations with block sizes `[1,16]` and `[16,1]`, followed by one FLOAT
+    `MATMUL`. Its five external rank-3 roles are A/SF_A/B/SF_B/C with
+    FP4-E2M1/F8_128x4-E4M3/FP4-E2M1/F8_128x4-E4M3/BFLOAT16 storage; the two
+    dequantized FLOAT tensors remain virtual. Runtime B/M/N/K shapes, 128x4
+    scale padding, and producer-canonical strides are validated together.
+    Packed FP4 and reordered scale addressing now consume runtime memref
+    metadata, each virtual view follows its own source descriptor, and MATMUL
+    stores BFLOAT16 output. Artifact v12 records the five ordered roles while
+    v1-v11 remain readable. Dynamic scalar execution, reload, partial and
+    maximum descriptors, malformed relation/layout/graph cases, Release,
+    ASan, and UBSan cover the increment without changing the public ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
 exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, REDUCTION,
-TRANSPOSE, CONCATENATE, and dense
+TRANSPOSE, CONCATENATE, producer-specific block-scale MATMUL, and dense
 standard-f32 SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to

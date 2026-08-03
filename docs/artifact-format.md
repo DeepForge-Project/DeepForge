@@ -6,8 +6,9 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `11`；reader
-同时接受版本 `10` 的 TRANSPOSE-override artifact、版本 `9` 的 REDUCTION-override
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `12`；reader
+同时接受版本 `11` 的 CONCATENATE-override artifact、版本 `10` 的
+TRANSPOSE-override artifact、版本 `9` 的 REDUCTION-override
 artifact、版本 `8` 的 RESHAPE-override artifact、版本 `7` 的 SDPA-override artifact、
 版本 `6` 的 MATMUL-override artifact、版本 `5` 的 ragged-sequence
 artifact、版本 `4` 的 ragged-storage artifact、
@@ -18,7 +19,8 @@ dynamic/override metadata 均默认为关闭，版本 `1` 至 `3` 的 tensor sto
 `1` 至 `5` 的 override role UID 默认为空；版本 `6` 保留其有序 MATMUL role UID，
 版本 `7` 保留其有序 SDPA-forward role UID，版本 `8` 保留其有序 LOGICAL RESHAPE
 role UID，版本 `9` 保留其有序 REDUCTION role UID，版本 `10` 保留其有序 TRANSPOSE
-role UID 和 permutation；版本 `1` 至 `9` 的 policy-specific axis map 默认为空。
+role UID 和 permutation；版本 `11` 保留其有序 CONCATENATE input/Y role UID 和固定
+axis；版本 `1` 至 `9` 的 policy-specific axis map 默认为空。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -43,7 +45,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 11
+u32 format_version = 12
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -54,8 +56,8 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE
-u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；policy 4/5/6 为 2；policy 7 为 2..64；其他为 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE, 8 block-scale MATMUL
+u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；policy 4/5/6 为 2；policy 7 为 2..64；policy 8 为 5；其他为 0
 i64 override_role_uids[override_role_count] # 顺序由下述 policy 定义
 u32 override_axis_count      # policy 6 为固定 rank；policy 7 为 1；其他为 0
 i64 override_axis_map[override_axis_count] # 下述 policy-specific axis
@@ -184,6 +186,16 @@ override 仅可在保持这些最终关系时使用各自独立、正且不重�
 内的 stride。版本 `10` 不能编码 policy `7`，会拒绝该值，同时继续保留 policy `6`
 的 role 和 permutation。
 
+版本 `12` 为 producer-specific rank-3 block-scale MATMUL 图增加 policy `8`，按
+A、SF_A、B、SF_B、C 顺序保存五个不同 role UID。其 storage 依次为
+FP4-E2M1/F8_128x4-E4M3/FP4-E2M1/F8_128x4-E4M3/BFLOAT16；两个反量化
+FLOAT tensor 保留为 private virtual workspace。Runtime 要求 `A=[B,M,K]`、
+`B=[B,K,N]`、`C=[B,M,N]`，K 可被 16 整除，scale shape 必须为
+`SF_A=[B,round_up(M,128),round_up(K/16,4)]` 和
+`SF_B=[B,round_up(K/16,4),round_up(N,128)]`，且五个 stride 都保持 runtime 契约
+规定的 producer canonical layout。版本 `11` 不能编码 policy `8`，会拒绝该值，
+同时继续保留 policy `7` role 和 axis。
+
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
 为 `_mlir_ciface_<symbol>`。原始函数和 wrapper 都是 ELF `GLOBAL HIDDEN`，不会成为
@@ -199,7 +211,8 @@ object 从当前进程解析标准 `libm` 符号。
 
 执行前会验证有序 argument table、UID、空指针、每个 tensor 的 alignment 和 byte
 range、runtime override policy/bound、workspace 64-byte 对齐、ragged
-prefix/reference/divisor 一致性及整数溢出。read/read alias 合法；任何涉及 write
+prefix/reference/divisor 一致性、block-scale MATMUL shape/scale/canonical-stride
+关系及整数溢出。read/read alias 合法；任何涉及 write
 argument 或 workspace 的重叠都会被拒绝。CPUID、FMA、OSXSAVE 和 XGETBV 决定
 AVX-512、AVX2 或 scalar 的安全选择；装载 object 本身不执行高 ISA 代码。
 

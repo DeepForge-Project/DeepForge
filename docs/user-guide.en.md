@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, one standard-f32 `REDUCTION`, one standard-f32 `TRANSPOSE`, one standard-f32 `CONCATENATE`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, one standard-f32 `REDUCTION`, one standard-f32 `TRANSPOSE`, one standard-f32 `CONCATENATE`, one producer-specific block-scale MATMUL graph, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -77,7 +77,7 @@ documented in the runtime section. The pinned v1.24.0 schema exposes no paged
 backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the seven override subsets below.
+block-scale and MXFP8 ports and the eight override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -85,7 +85,8 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic execution outside the pointwise, MATMUL,
-RESHAPE, REDUCTION, TRANSPOSE, CONCATENATE, and SDPA-forward override subsets,
+RESHAPE, REDUCTION, TRANSPOSE, CONCATENATE, producer-specific block-scale
+MATMUL, and SDPA-forward override subsets,
 explicit aliasing, unsupported pass-by-value
 descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
@@ -600,6 +601,35 @@ fixed concatenation axis, the checked sum of all final input extents must equal
 Y. These relations also apply after partial overrides. Each role may use an
 independent positive non-overlapping stride within its serialized byte bound;
 the input count, port order, rank, and axis cannot be overridden.
+
+The producer-specific block-scale MATMUL override requires exactly this ordered
+rank-3 graph: `BLOCK_SCALE_DEQUANTIZE(A,SF_A)`,
+`BLOCK_SCALE_DEQUANTIZE(B,SF_B)`, then one `MATMUL` consuming both virtual
+FLOAT outputs. A/B are external FP4 E2M1, SF_A/SF_B are external FP8 E4M3 with
+`F8_128x4`, and C is external BFLOAT16. Compute types are FLOAT, block sizes
+are `[1,16]` and `[16,1]`, scales are non-negative, and MATMUL padding is zero.
+No additional tensor, node, or port is allowed. For B=2, M=N=33, and K=32, a
+valid complete call is:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{
+    a_uid, sf_a_uid, b_uid, sf_b_uid, c_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {2, 33, 32}, {2, 128, 4}, {2, 32, 33}, {2, 4, 128},
+    {2, 33, 33}};
+deepforge::runtime::OverrideStrides override_strides{
+    {1056, 32, 1}, {512, 4, 1}, {1056, 1, 32}, {512, 1, 4},
+    {1089, 33, 1}};
+```
+
+In general, final shapes are `A=[B,M,K]`, `B=[B,K,N]`, `C=[B,M,N]`, with K
+divisible by 16. Define `SM=round_up(M,128)`, `SN=round_up(N,128)`, and
+`SK=round_up(K/16,4)`; scale shapes are `SF_A=[B,SM,SK]` and
+`SF_B=[B,SK,SN]`. Strides must be exactly `A=[M*K,K,1]`,
+`SF_A=[SM*SK,SK,1]`, `B=[N*K,1,K]`, `SF_B=[SN*SK,1,SK]`, and
+`C=[M*N,N,1]`. Partial overrides are accepted only when the final five
+descriptors preserve all relations and serialized bounds. The independent
+`is_dynamic_shape_enabled` flag must remain false for this producer form.
 
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static. Conversely,

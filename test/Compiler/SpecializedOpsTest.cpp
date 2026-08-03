@@ -1,3 +1,4 @@
+#include "DeepForge/Compiler/Artifact.h"
 #include "DeepForge/Compiler/Codegen.h"
 #include "DeepForge/Import/SerializedGraphImporter.h"
 
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -105,6 +107,18 @@ std::size_t f8_128x4_offset(std::size_t m,
            (m % 32) * 16 + ((m / 32) % 4) * 4 + k % 4;
 }
 
+void set_fp4_code(std::vector<std::uint8_t>& bytes,
+                  std::size_t slot,
+                  std::uint8_t code) {
+    auto& byte = bytes.at(slot / 2);
+    if (slot % 2 == 0) {
+        byte = static_cast<std::uint8_t>((byte & 0xf0U) | (code & 0x0fU));
+    } else {
+        byte = static_cast<std::uint8_t>((byte & 0x0fU) |
+                                         ((code & 0x0fU) << 4U));
+    }
+}
+
 Json context(std::string name) {
     return Json{{"name", std::move(name)},
                 {"compute_data_type", "FLOAT"},
@@ -130,7 +144,8 @@ Json graph_document(std::uint64_t uid,
 
 deepforge::import::Status compile_document(
     Json const& document,
-    deepforge::compiler::CompilationResult& compilation) {
+    deepforge::compiler::CompilationResult& compilation,
+    deepforge::compiler::CompileOptions options = {}) {
     auto text = document.dump();
     std::vector<std::uint8_t> bytes(text.begin(), text.end());
     deepforge::import::SerializedGraph graph;
@@ -138,8 +153,7 @@ deepforge::import::Status compile_document(
     auto status = importer.parse(std::span<std::uint8_t const>(bytes),
                                  deepforge::import::InputFormat::kJson, graph);
     if (status.is_bad()) return status;
-    return deepforge::compiler::compile_graph(
-        graph, deepforge::compiler::CompileOptions{}, compilation);
+    return deepforge::compiler::compile_graph(graph, options, compilation);
 }
 
 bool close_vectors(std::vector<float> const& actual,
@@ -241,6 +255,62 @@ Json transposed_reordered_block_dequantize_graph() {
               {"is_negative_scale", false}};
     return graph_document(5017, "transposed-reordered-block-dequantize",
                           Json::array({node}), std::move(tensors));
+}
+
+Json block_scale_matmul_override_graph() {
+    Json tensors = Json::object();
+    tensors["801"] =
+        tensor("A", 801, {2, 129, 128}, "FP4_E2M1", false,
+               {16512, 128, 1});
+    tensors["802"] =
+        tensor("SF_A", 802, {2, 256, 8}, "FP8_E4M3", false,
+               {2048, 8, 1});
+    tensors["802"]["reordering_type"] = "F8_128x4";
+    tensors["803"] =
+        tensor("dequantized_A", 803, {2, 129, 128}, "FLOAT", true,
+               {16512, 128, 1});
+    tensors["804"] =
+        tensor("B", 804, {2, 128, 129}, "FP4_E2M1", false,
+               {16512, 1, 128});
+    tensors["805"] =
+        tensor("SF_B", 805, {2, 8, 256}, "FP8_E4M3", false,
+               {2048, 1, 8});
+    tensors["805"]["reordering_type"] = "F8_128x4";
+    tensors["806"] =
+        tensor("dequantized_B", 806, {2, 128, 129}, "FLOAT", true,
+               {16512, 1, 128});
+    tensors["807"] =
+        tensor("C", 807, {2, 129, 129}, "BFLOAT16", false,
+               {16641, 129, 1});
+
+    Json dequantize_a{
+        {"tag", "BLOCK_SCALE_DEQUANTIZE"},
+        {"name", "dequantize_A"},
+        {"inputs", Json::object({{"X", 801}, {"scale", 802}})},
+        {"outputs", Json::object({{"Y", 803}})},
+        {"compute_data_type", "FLOAT"},
+        {"block_size", Json::array({1, 16})},
+        {"is_negative_scale", false}};
+    Json dequantize_b{
+        {"tag", "BLOCK_SCALE_DEQUANTIZE"},
+        {"name", "dequantize_B"},
+        {"inputs", Json::object({{"X", 804}, {"scale", 805}})},
+        {"outputs", Json::object({{"Y", 806}})},
+        {"compute_data_type", "FLOAT"},
+        {"block_size", Json::array({16, 1})},
+        {"is_negative_scale", false}};
+    Json matmul{{"tag", "MATMUL"},
+                {"name", "block_scale_matmul"},
+                {"inputs", Json::object({{"A", 803}, {"B", 806}})},
+                {"outputs", Json::object({{"C", 807}})},
+                {"compute_data_type", "FLOAT"},
+                {"padding_value", 0.0}};
+    auto graph = graph_document(
+        5018, "block-scale-matmul-override",
+        Json::array({dequantize_a, dequantize_b, matmul}),
+        std::move(tensors));
+    graph["context"]["is_override_shape_enabled"] = true;
+    return graph;
 }
 
 Json fp4_roundtrip_graph() {
@@ -889,6 +959,228 @@ void run_matmul_test(TestRunner& tests) {
                 "FP8 M/N/K overrides zero inactive outputs and products");
 }
 
+void run_block_scale_matmul_override_test(TestRunner& tests) {
+    auto document = block_scale_matmul_override_graph();
+    deepforge::compiler::CompilationResult compilation;
+    deepforge::compiler::CompileOptions options;
+    options.capture_mlir = true;
+    auto status = compile_document(document, compilation, options);
+    tests.good(status, "compile dynamic block-scale MATMUL producer graph");
+    if (status.is_bad() || !compilation.executable) return;
+
+    tests.check(
+        compilation.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kBlockScaleMatmul &&
+            compilation.metadata.override_role_uids ==
+                std::vector<std::int64_t>({801, 802, 804, 805, 807}) &&
+            compilation.metadata.arguments.size() == 5,
+        "block-scale MATMUL records ordered A/SF_A/B/SF_B/C roles");
+    tests.check(
+        compilation.imported_mlir.find("memref.extract_strided_metadata") !=
+                std::string::npos &&
+            compilation.imported_mlir.find("memref.dim") !=
+                std::string::npos &&
+            compilation.imported_mlir.find("bf16") != std::string::npos,
+        "block-scale MATMUL IR uses runtime low-precision metadata and BF16 C");
+
+    constexpr std::size_t batch = 2;
+    constexpr std::size_t m = 33;
+    constexpr std::size_t n = 33;
+    constexpr std::size_t k = 32;
+    constexpr std::size_t matrix_span = m * k;
+    constexpr std::size_t output_span = m * n;
+    constexpr std::size_t scale_span = 128 * 4;
+    std::vector<std::uint8_t> a(batch * matrix_span / 2, 0x22);
+    std::vector<std::uint8_t> b(batch * n * k / 2, 0x22);
+    for (std::size_t reduction = 0; reduction < k; ++reduction) {
+        set_fp4_code(a, k + reduction, 0x04);
+        set_fp4_code(b, k + reduction, 0x04);
+    }
+    std::vector<std::uint8_t> scale_a(batch * scale_span, 0x38);
+    std::vector<std::uint8_t> scale_b(batch * scale_span, 0x38);
+    scale_a[f8_128x4_offset(32, 0, 1, 128, 4)] = 0x40;
+    scale_b[f8_128x4_offset(32, 0, 1, 128, 4)] = 0x30;
+    std::vector<std::uint16_t> c(batch * output_span, 0xffff);
+    deepforge::runtime::VariantPack pack{{801, a.data()},
+                                         {802, scale_a.data()},
+                                         {804, b.data()},
+                                         {805, scale_b.data()},
+                                         {807, c.data()}};
+    deepforge::runtime::OverrideUids override_uids{801, 802, 804, 805, 807};
+    deepforge::runtime::OverrideShapes override_shapes{
+        {2, 33, 32}, {2, 128, 4}, {2, 32, 33}, {2, 4, 128}, {2, 33, 33}};
+    deepforge::runtime::OverrideStrides override_strides{
+        {1056, 32, 1}, {512, 4, 1}, {1056, 1, 32}, {512, 1, 4},
+        {1089, 33, 1}};
+
+    auto const workspace_bytes = static_cast<std::size_t>(
+        compilation.executable->get_workspace_size());
+    auto const allocation_bytes = (workspace_bytes + 63U) & ~std::size_t{63U};
+    void* workspace = std::aligned_alloc(64, allocation_bytes);
+    tests.check(workspace != nullptr,
+                "allocate block-scale MATMUL virtual workspace");
+    if (workspace == nullptr) return;
+
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        override_uids, override_shapes, override_strides);
+    tests.good(status, "execute dynamic block-scale MATMUL scalar variant");
+    auto output_matches = [&]() {
+        for (std::size_t batch_index = 0; batch_index < batch;
+             ++batch_index) {
+            for (std::size_t row = 0; row < m; ++row) {
+                for (std::size_t column = 0; column < n; ++column) {
+                    std::uint16_t expected = 0x4200;
+                    if (batch_index == 0 && row == 1 && column == 1) {
+                        expected = 0x4300;
+                    } else if (batch_index == 0 &&
+                               (row == 1 || column == 1)) {
+                        expected = 0x4280;
+                    } else if (batch_index == 1 && row == 32 &&
+                               column != 32) {
+                        expected = 0x4240;
+                    } else if (batch_index == 1 && row != 32 &&
+                               column == 32) {
+                        expected = 0x41c0;
+                    }
+                    if (c[batch_index * output_span + row * n + column] !=
+                        expected) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    };
+    tests.check(
+        output_matches(),
+        "dynamic FP4 strides, F8_128x4 tiles, virtual shapes, and BF16 output match reference");
+
+    std::int64_t queried_workspace = -1;
+    status = compilation.executable->get_workspace_size(
+        nullptr, queried_workspace,
+        deepforge::runtime::OverrideUids{801, 802, 807},
+        deepforge::runtime::OverrideShapes{
+            {2, 128, 128}, {2, 128, 8}, {2, 128, 129}},
+        deepforge::runtime::OverrideStrides{
+            {16384, 128, 1}, {1024, 8, 1}, {16512, 129, 1}});
+    tests.good(status,
+               "accept a consistent partial block-scale M override");
+    tests.check(queried_workspace ==
+                    compilation.executable->get_workspace_size(),
+                "shape overrides preserve the compiled workspace bound");
+
+    auto invalid_shapes = override_shapes;
+    auto invalid_strides = override_strides;
+    invalid_shapes[0] = {2, 33, 30};
+    invalid_shapes[2] = {2, 30, 33};
+    invalid_strides[0] = {990, 30, 1};
+    invalid_strides[2] = {990, 1, 30};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        override_uids, invalid_shapes, invalid_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "block-scale MATMUL rejects runtime K not divisible by 16");
+
+    invalid_shapes = override_shapes;
+    invalid_strides = override_strides;
+    invalid_shapes[1] = {2, 127, 4};
+    invalid_strides[1] = {508, 4, 1};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        override_uids, invalid_shapes, invalid_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "block-scale MATMUL rejects incorrect runtime scale padding");
+
+    invalid_strides = override_strides;
+    invalid_strides[2] = {1056, 33, 1};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        override_uids, override_shapes, invalid_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidLayout,
+                "block-scale MATMUL rejects noncanonical runtime strides");
+
+    invalid_shapes = override_shapes;
+    invalid_shapes[0] = {2, 130, 32};
+    invalid_strides = override_strides;
+    invalid_strides[0] = {4160, 32, 1};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        override_uids, invalid_shapes, invalid_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "block-scale MATMUL rejects dimensions above compiled maxima");
+
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, workspace,
+        deepforge::runtime::OverrideUids{801},
+        deepforge::runtime::OverrideShapes{{2, 33, 32}},
+        deepforge::runtime::OverrideStrides{{1056, 32, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "block-scale MATMUL rejects inconsistent partial overrides");
+
+    std::vector<std::uint8_t> artifact;
+    status = deepforge::compiler::serialize_artifact(compilation, artifact);
+    tests.good(status, "serialize block-scale MATMUL artifact v12");
+    std::unique_ptr<deepforge::runtime::Executable> loaded;
+    deepforge::compiler::ArtifactInfo artifact_info;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            artifact, loaded, &artifact_info);
+    }
+    tests.good(status, "load block-scale MATMUL artifact v12");
+    tests.check(
+        artifact_info.format_version ==
+                deepforge::compiler::kArtifactFormatVersion &&
+            artifact_info.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kBlockScaleMatmul &&
+            artifact_info.metadata.override_role_uids == override_uids,
+        "artifact v12 preserves block-scale MATMUL roles and policy");
+    if (loaded) {
+        std::fill(c.begin(), c.end(), 0xffff);
+        status = loaded->execute(nullptr, pack, workspace, override_uids,
+                                 override_shapes, override_strides);
+        tests.good(status, "execute loaded block-scale MATMUL artifact");
+        tests.check(output_matches(),
+                    "loaded artifact preserves dynamic low-precision semantics");
+    }
+    std::free(workspace);
+
+    auto invalid_document = document;
+    invalid_document["nodes"][0]["block_size"] = Json::array({1, 8});
+    status = compile_document(invalid_document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "block-scale MATMUL override rejects non-producer block sizes");
+
+    invalid_document = document;
+    invalid_document["tensors"]["802"]["reordering_type"] = "NONE";
+    status = compile_document(invalid_document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "block-scale MATMUL override requires reordered scale roles");
+
+    invalid_document = document;
+    invalid_document["tensors"]["807"]["data_type"] = "FLOAT";
+    status = compile_document(invalid_document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "block-scale MATMUL override requires producer BF16 output");
+
+    invalid_document = document;
+    invalid_document["tensors"]["803"]["is_virtual"] = false;
+    status = compile_document(invalid_document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "block-scale MATMUL override requires virtual dequantize outputs");
+
+    invalid_document = document;
+    invalid_document["context"]["is_dynamic_shape_enabled"] = true;
+    status = compile_document(invalid_document, compilation);
+    tests.check(
+        status.code() == deepforge::import::ErrorCode::kUnsupportedOperation,
+        "block-scale MATMUL override rejects the independent dynamic flag");
+}
+
 void run_moe_test(TestRunner& tests) {
     deepforge::compiler::CompilationResult compilation;
     auto status = compile_document(moe_graph(), compilation);
@@ -1100,6 +1392,7 @@ int main() {
     TestRunner tests;
     run_block_tests(tests);
     run_matmul_test(tests);
+    run_block_scale_matmul_override_test(tests);
     run_moe_test(tests);
     run_attention_forward_test(tests, false);
     run_attention_backward_test(tests, false);

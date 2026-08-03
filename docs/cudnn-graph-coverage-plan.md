@@ -120,13 +120,14 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
   role 升到 v6。v7 增加 SDPA-forward override policy，v8 增加 LOGICAL RESHAPE
   override policy，v9 增加 REDUCTION override policy，v10 增加 TRANSPOSE override
   policy 和固定 permutation metadata，v11 增加 CONCATENATE override policy、有序
-  input/Y role 和固定 axis，并保持旧版本读取兼容。
+  input/Y role 和固定 axis，v12 增加 producer-specific block-scale MATMUL override
+  policy 及有序 A/SF_A/B/SF_B/C role，并保持旧版本读取兼容。
 
 兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override、
 format-v4 ragged-storage 和 format-v5 ragged-sequence artifact；当前新编译 graph 写
-format v11，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override、
+format v12，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override、
 format-v8 RESHAPE-override、format-v9 REDUCTION-override 和 format-v10
-TRANSPOSE-override artifact。未知 artifact version
+TRANSPOSE-override、format-v11 CONCATENATE-override artifact。未知 artifact version
 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
@@ -305,9 +306,17 @@ CONCATENATE 实现有界 descriptor override。全部 role 保持相同固定 ra
 每个非 concat axis 的 runtime extent 相同，concat axis 上 input extent 的受检求和
 等于 Y。Artifact v11 持久化有序 input/Y role 和固定 axis。独立非连续 stride、最大与
 partial override、reload、错误关系/layout/图、Release、ASan 和 UBSan 构成验收集。
+第十六个为两个 block-scale dequantize 输入一个 MATMUL 的 exact producer-specific
+rank-3 图实现有界 descriptor override。External A/B 为 FP4 E2M1，SF_A/SF_B 为
+reordered F8_128x4 E4M3，C 为 BFLOAT16，两个反量化 FLOAT tensor 为 virtual。
+Runtime 联合校验 B/M/N/K 关系、K 可被 16 整除、128x4 scale padding 和五个
+producer-canonical stride。Artifact v12 持久化 A/SF_A/B/SF_B/C role。Dynamic
+packed/reordered addressing、独立 virtual view、BFLOAT16 输出、最大/partial override、
+reload、错误关系/layout/图、Release、ASan 和 UBSan 构成验收集。
 
 **工作内容**：将动态行为扩展到已交付 exact-pointwise、单个标准 f32 MATMUL 与
-LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
+LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE、producer-specific
+block-scale MATMUL、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
 之外；随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
 除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
 `INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成

@@ -113,6 +113,28 @@ bool checked_element_count(std::span<std::int64_t const> dimensions,
     return true;
 }
 
+bool checked_multiply(std::int64_t lhs,
+                      std::int64_t rhs,
+                      std::int64_t& output) {
+    if (lhs <= 0 || rhs <= 0 ||
+        lhs > std::numeric_limits<std::int64_t>::max() / rhs) {
+        return false;
+    }
+    output = lhs * rhs;
+    return true;
+}
+
+bool round_up(std::int64_t value,
+              std::int64_t multiple,
+              std::int64_t& output) {
+    if (value <= 0 || multiple <= 0 ||
+        value > std::numeric_limits<std::int64_t>::max() - (multiple - 1)) {
+        return false;
+    }
+    output = ((value + multiple - 1) / multiple) * multiple;
+    return true;
+}
+
 struct ResolvedArgument {
     std::vector<std::int64_t> dimensions;
     std::vector<std::int64_t> strides;
@@ -483,6 +505,92 @@ Status resolve_overrides(
             return fail(
                 ErrorCode::kInvalidShape, "runtime.override",
                 "CONCATENATE runtime Y axis extent must equal the input sum");
+        }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kBlockScaleMatmul) {
+        if (metadata.override_role_uids.size() != 5) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "block-scale MATMUL override metadata is malformed");
+        }
+        std::array<ResolvedArgument const*, 5> roles{};
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == metadata.override_role_uids[role];
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(
+                    ErrorCode::kUnsupportedExecutionMetadata,
+                    "runtime.override",
+                    "block-scale MATMUL override role UID is unresolved");
+            }
+            roles[role] = &resolved[static_cast<std::size_t>(
+                argument - metadata.arguments.begin())];
+        }
+        if (std::any_of(roles.begin(), roles.end(), [](auto const* role) {
+                return role->dimensions.size() != 3;
+            })) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "block-scale MATMUL overrides require rank-3 tensors");
+        }
+        auto const& a = roles[0]->dimensions;
+        auto const& scale_a = roles[1]->dimensions;
+        auto const& b = roles[2]->dimensions;
+        auto const& scale_b = roles[3]->dimensions;
+        auto const& c = roles[4]->dimensions;
+        auto const batch = a[0];
+        auto const m = a[1];
+        auto const k = a[2];
+        auto const n = b[2];
+        if (k % 16 != 0 || b[0] != batch || b[1] != k || c[0] != batch ||
+            c[1] != m || c[2] != n) {
+            return fail(
+                ErrorCode::kInvalidShape, "runtime.override",
+                "block-scale MATMUL B/M/N/K dimensions are inconsistent or K is not divisible by 16");
+        }
+        std::int64_t scale_m = 0;
+        std::int64_t scale_n = 0;
+        std::int64_t scale_k = 0;
+        if (!round_up(m, 128, scale_m) || !round_up(n, 128, scale_n) ||
+            !round_up(k / 16, 4, scale_k)) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "block-scale MATMUL scale dimensions overflow int64");
+        }
+        if (scale_a !=
+                std::vector<std::int64_t>({batch, scale_m, scale_k}) ||
+            scale_b !=
+                std::vector<std::int64_t>({batch, scale_k, scale_n})) {
+            return fail(
+                ErrorCode::kInvalidShape, "runtime.override",
+                "block-scale MATMUL scale dimensions do not match 128x4 padding");
+        }
+        std::int64_t mk = 0;
+        std::int64_t nk = 0;
+        std::int64_t mn = 0;
+        std::int64_t scale_mk = 0;
+        std::int64_t scale_nk = 0;
+        if (!checked_multiply(m, k, mk) || !checked_multiply(n, k, nk) ||
+            !checked_multiply(m, n, mn) ||
+            !checked_multiply(scale_m, scale_k, scale_mk) ||
+            !checked_multiply(scale_n, scale_k, scale_nk)) {
+            return fail(ErrorCode::kInvalidLayout, "runtime.override",
+                        "block-scale MATMUL canonical strides overflow int64");
+        }
+        if (roles[0]->strides !=
+                std::vector<std::int64_t>({mk, k, 1}) ||
+            roles[1]->strides !=
+                std::vector<std::int64_t>({scale_mk, scale_k, 1}) ||
+            roles[2]->strides !=
+                std::vector<std::int64_t>({nk, 1, k}) ||
+            roles[3]->strides !=
+                std::vector<std::int64_t>({scale_nk, 1, scale_k}) ||
+            roles[4]->strides !=
+                std::vector<std::int64_t>({mn, n, 1})) {
+            return fail(
+                ErrorCode::kInvalidLayout, "runtime.override",
+                "block-scale MATMUL overrides require producer-canonical strides");
         }
     }
     output = std::move(resolved);

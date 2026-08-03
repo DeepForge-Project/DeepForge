@@ -14,7 +14,7 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG、单个标准 f32 `MATMUL`、单个标准 f32 LOGICAL `RESHAPE`、单个标准 f32 `REDUCTION`、单个标准 f32 `TRANSPOSE`、单个标准 f32 `CONCATENATE` 和单个 dense 标准 f32 `SDPA` forward 支持 shape override array，MATMUL 另有独立 extent-override tensor 端口 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG、单个标准 f32 `MATMUL`、单个标准 f32 LOGICAL `RESHAPE`、单个标准 f32 `REDUCTION`、单个标准 f32 `TRANSPOSE`、单个标准 f32 `CONCATENATE`、一个 producer-specific block-scale MATMUL 图和单个 dense 标准 f32 `SDPA` forward 支持 shape override array，MATMUL 另有独立 extent-override tensor 端口 |
 | 通用 Tensor | rank 1-64 f32 data、显式 UID；allocation 仍为静态；文档指定的 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；文档指定的标准 f32 SDPA tensor 可使用 ragged batch-prefix storage；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
@@ -74,15 +74,15 @@ paged，每个 INT32 page table 可为 plain storage 或使用独立 prefix 紧�
 schema 没有 paged backward page-table 端口，因此该形式不属于输入契约。
 C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 也已为文档指定
 的 block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder，并实现
-下述七类 override 子集。
+下述八类 override 子集。
 v1.24.0 标准 SDPA 的 bottom-right
 causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
 复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
-不支持 pointwise、MATMUL、RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE 和
-SDPA-forward override 子集之外的动态执行、显式
+不支持 pointwise、MATMUL、RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE、
+producer-specific block-scale MATMUL 和 SDPA-forward override 子集之外的动态执行、显式
 alias、不满足下述
 约束的 pass-by-value descriptor、
 文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
@@ -555,6 +555,33 @@ deepforge::runtime::OverrideStrides override_strides{
 input extent 的受检求和必须等于 Y。Partial override 后也必须保持这些关系。每个 role
 可使用位于自身序列化 byte bound 内、独立且正并不重叠的 stride；input 数量、端口
 顺序、rank 和 axis 均不能 override。
+
+Producer-specific block-scale MATMUL override 只接受下述精确有序 rank-3 图：
+`BLOCK_SCALE_DEQUANTIZE(A,SF_A)`、`BLOCK_SCALE_DEQUANTIZE(B,SF_B)`，随后一个
+`MATMUL` 读取两个 virtual FLOAT 输出。A/B 是 external FP4 E2M1，SF_A/SF_B 是带
+`F8_128x4` 的 external FP8 E4M3，C 是 external BFLOAT16。Compute type 均为
+FLOAT，block size 分别为 `[1,16]`、`[16,1]`，scale 非负且 MATMUL padding 为零；
+不允许额外 tensor、node 或 port。B=2、M=N=33、K=32 时，一个合法完整调用为：
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{
+    a_uid, sf_a_uid, b_uid, sf_b_uid, c_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {2, 33, 32}, {2, 128, 4}, {2, 32, 33}, {2, 4, 128},
+    {2, 33, 33}};
+deepforge::runtime::OverrideStrides override_strides{
+    {1056, 32, 1}, {512, 4, 1}, {1056, 1, 32}, {512, 1, 4},
+    {1089, 33, 1}};
+```
+
+一般情况下，最终 shape 为 `A=[B,M,K]`、`B=[B,K,N]`、`C=[B,M,N]`，K 可被
+16 整除。令 `SM=round_up(M,128)`、`SN=round_up(N,128)`、
+`SK=round_up(K/16,4)`，scale shape 为 `SF_A=[B,SM,SK]`、
+`SF_B=[B,SK,SN]`。Stride 必须精确为 `A=[M*K,K,1]`、
+`SF_A=[SM*SK,SK,1]`、`B=[N*K,1,K]`、`SF_B=[SN*SK,1,SK]`、
+`C=[M*N,N,1]`。Partial override 只有在最终五个 descriptor 保持全部关系和序列化
+上界时才合法；该 producer form 要求 independent `is_dynamic_shape_enabled` flag 为
+false。
 
 仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，该信息会写入 plan
 和 `.dfo` metadata，但执行 descriptor 保持静态。反过来，已支持的 descriptor

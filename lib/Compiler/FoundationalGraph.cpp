@@ -1084,6 +1084,170 @@ Status validate_shape_override_subset(
     if (!graph.context.is_override_shape_enabled.value_or(false)) {
         return Status::ok();
     }
+    if (graph.nodes.size() == 3 &&
+        graph.nodes[0].tag == OperationTag::kBlockScaleDequantize &&
+        graph.nodes[1].tag == OperationTag::kBlockScaleDequantize &&
+        graph.nodes[2].tag == OperationTag::kMatmul) {
+        if (graph.context.is_dynamic_shape_enabled.value_or(false)) {
+            return unsupported(
+                "context",
+                "block-scale MATMUL shape overrides cannot be combined with the independent dynamic-shape flag");
+        }
+        auto const* dequantize_a =
+            std::get_if<GenericOperationDesc>(&graph.nodes[0].attributes);
+        auto const* dequantize_b =
+            std::get_if<GenericOperationDesc>(&graph.nodes[1].attributes);
+        auto const* matmul =
+            std::get_if<GenericOperationDesc>(&graph.nodes[2].attributes);
+        auto valid_dequantize_ports = [](GenericOperationDesc const* operation) {
+            return operation != nullptr && operation->input_lists.empty() &&
+                   operation->inputs.size() == 2 &&
+                   operation->inputs.contains("X") &&
+                   operation->inputs.contains("scale") &&
+                   operation->outputs.size() == 1 &&
+                   operation->outputs.contains("Y");
+        };
+        if (!valid_dequantize_ports(dequantize_a) ||
+            !valid_dequantize_ports(dequantize_b) || matmul == nullptr ||
+            !matmul->input_lists.empty() || matmul->inputs.size() != 2 ||
+            !matmul->inputs.contains("A") || !matmul->inputs.contains("B") ||
+            matmul->outputs.size() != 1 || !matmul->outputs.contains("C")) {
+            return unsupported(
+                "nodes",
+                "runtime block-scale MATMUL overrides require two X/scale dequantize nodes followed by one A/B MATMUL node");
+        }
+
+        std::string_view dequantize_a_compute;
+        std::string_view dequantize_b_compute;
+        std::string_view matmul_compute;
+        std::vector<std::int64_t> blocks_a;
+        std::vector<std::int64_t> blocks_b;
+        bool negative_scale_a = false;
+        bool negative_scale_b = false;
+        std::optional<double> padding_value;
+        if (!read_string_attribute(*dequantize_a, "compute_data_type",
+                                   dequantize_a_compute) ||
+            !read_integer_array(*dequantize_a, "block_size", blocks_a) ||
+            !read_bool_attribute(*dequantize_a, "is_negative_scale",
+                                 negative_scale_a) ||
+            !read_string_attribute(*dequantize_b, "compute_data_type",
+                                   dequantize_b_compute) ||
+            !read_integer_array(*dequantize_b, "block_size", blocks_b) ||
+            !read_bool_attribute(*dequantize_b, "is_negative_scale",
+                                 negative_scale_b) ||
+            !read_string_attribute(*matmul, "compute_data_type",
+                                   matmul_compute) ||
+            !read_optional_number_attribute(*matmul, "padding_value",
+                                            padding_value)) {
+            return fail(ErrorCode::kInvalidValue, "nodes",
+                        "block-scale MATMUL override attributes are malformed");
+        }
+        if (dequantize_a_compute != "FLOAT" ||
+            dequantize_b_compute != "FLOAT" || matmul_compute != "FLOAT" ||
+            blocks_a != std::vector<std::int64_t>({1, 16}) ||
+            blocks_b != std::vector<std::int64_t>({16, 1}) ||
+            negative_scale_a || negative_scale_b ||
+            padding_value.value_or(0.0) != 0.0) {
+            return unsupported(
+                "nodes",
+                "runtime block-scale MATMUL overrides require FLOAT compute, block sizes [1,16]/[16,1], non-negative scales, and zero padding");
+        }
+
+        std::array<std::int64_t, 7> uids{};
+        std::array<std::pair<TensorReference const*, std::string>, 7> references{
+            std::pair{&dequantize_a->inputs.at("X"),
+                      "nodes[0].inputs.X"},
+            std::pair{&dequantize_a->inputs.at("scale"),
+                      "nodes[0].inputs.scale"},
+            std::pair{&dequantize_a->outputs.at("Y"),
+                      "nodes[0].outputs.Y"},
+            std::pair{&dequantize_b->inputs.at("X"),
+                      "nodes[1].inputs.X"},
+            std::pair{&dequantize_b->inputs.at("scale"),
+                      "nodes[1].inputs.scale"},
+            std::pair{&dequantize_b->outputs.at("Y"),
+                      "nodes[1].outputs.Y"},
+            std::pair{&matmul->outputs.at("C"), "nodes[2].outputs.C"}};
+        for (std::size_t index = 0; index < references.size(); ++index) {
+            auto status = reference_uid(*references[index].first,
+                                        references[index].second, uids[index]);
+            if (status.is_bad()) return status;
+        }
+        std::int64_t matmul_a_uid = 0;
+        std::int64_t matmul_b_uid = 0;
+        auto status = reference_uid(matmul->inputs.at("A"),
+                                    "nodes[2].inputs.A", matmul_a_uid);
+        if (status.is_bad()) return status;
+        status = reference_uid(matmul->inputs.at("B"),
+                               "nodes[2].inputs.B", matmul_b_uid);
+        if (status.is_bad()) return status;
+        if (matmul_a_uid != uids[2] || matmul_b_uid != uids[5]) {
+            return unsupported(
+                "nodes[2]",
+                "block-scale MATMUL inputs must be the two dequantize outputs");
+        }
+        if (graph.tensors.size() != uids.size() ||
+            std::set<std::int64_t>(uids.begin(), uids.end()).size() !=
+                uids.size()) {
+            return unsupported(
+                "tensors",
+                "runtime block-scale MATMUL overrides require exactly five external and two distinct virtual tensors");
+        }
+
+        auto const* a = graph.find_tensor(*references[0].first);
+        auto const* scale_a = graph.find_tensor(*references[1].first);
+        auto const* dequantized_a = graph.find_tensor(*references[2].first);
+        auto const* b = graph.find_tensor(*references[3].first);
+        auto const* scale_b = graph.find_tensor(*references[4].first);
+        auto const* dequantized_b = graph.find_tensor(*references[5].first);
+        auto const* c = graph.find_tensor(*references[6].first);
+        if (a == nullptr || scale_a == nullptr || dequantized_a == nullptr ||
+            b == nullptr || scale_b == nullptr || dequantized_b == nullptr ||
+            c == nullptr) {
+            return fail(ErrorCode::kMissingUid, "tensors",
+                        "block-scale MATMUL tensor reference is unresolved");
+        }
+        auto plain = [](TensorDesc const& tensor) {
+            return !tensor.is_pass_by_value && !tensor.pass_by_value &&
+                   !tensor.ragged_offset_uid && !tensor.ragged_offset_name;
+        };
+        auto external_role = [&](TensorDesc const& tensor,
+                                 import::DataType type,
+                                 std::string_view reordering) {
+            return plain(tensor) && !tensor.is_virtual &&
+                   tensor.data_type == type && tensor.dim.size() == 3 &&
+                   tensor.reordering_type == reordering;
+        };
+        auto virtual_role = [&](TensorDesc const& tensor) {
+            return plain(tensor) && tensor.is_virtual &&
+                   tensor.data_type == import::DataType::kFloat32 &&
+                   tensor.dim.size() == 3 && tensor.reordering_type == "NONE";
+        };
+        if (!external_role(*a, import::DataType::kFp4E2M1, "NONE") ||
+            !external_role(*scale_a, import::DataType::kFp8E4M3,
+                           "F8_128x4") ||
+            !virtual_role(*dequantized_a) ||
+            !external_role(*b, import::DataType::kFp4E2M1, "NONE") ||
+            !external_role(*scale_b, import::DataType::kFp8E4M3,
+                           "F8_128x4") ||
+            !virtual_role(*dequantized_b) ||
+            !external_role(*c, import::DataType::kBFloat16, "NONE")) {
+            return unsupported(
+                "tensors",
+                "runtime block-scale MATMUL overrides require rank-3 FP4 A/B, reordered E4M3 scales, virtual FLOAT dequantize outputs, and BF16 C");
+        }
+        if (dequantized_a->dim != a->dim ||
+            dequantized_a->stride != a->stride ||
+            dequantized_b->dim != b->dim ||
+            dequantized_b->stride != b->stride) {
+            return unsupported(
+                "tensors",
+                "dequantize outputs must preserve their FP4 input descriptors");
+        }
+        role_uids = {uids[0], uids[1], uids[3], uids[4], uids[6]};
+        policy = ShapeOverridePolicy::kBlockScaleMatmul;
+        return Status::ok();
+    }
     if (graph.nodes.size() == 1 &&
         graph.nodes.front().tag == OperationTag::kReshape) {
         auto const* operation =
@@ -1716,8 +1880,14 @@ Status analyze_graph(SerializedGraph const& graph,
                         port,
                     "ragged storage is unsupported on this operation port");
             }
+            auto const block_scale_matmul_output =
+                override_policy == ShapeOverridePolicy::kBlockScaleMatmul &&
+                node.tag == OperationTag::kMatmul && port == "C" &&
+                override_role_uids.size() == 5 &&
+                tensor->uid == override_role_uids[4];
             if (!is_specialized_operation(node.tag) &&
-                tensor->data_type != import::DataType::kFloat32) {
+                tensor->data_type != import::DataType::kFloat32 &&
+                !block_scale_matmul_output) {
                 return fail(ErrorCode::kUnsupportedDataType,
                             "nodes[" + std::to_string(node_index) +
                                 "].outputs." + port,
@@ -3116,8 +3286,8 @@ Status emit_matmul(
             float_constant(
                 body_builder, body_location,
                 static_cast<float>(padding_value.value_or(0.0))));
-        ::mlir::memref::StoreOp::create(body_builder, body_location, result,
-                                         values.at(c_uid), c_indices);
+        numeric::store_from_f32(body_builder, body_location, result,
+                                values.at(c_uid), c, c_indices);
     };
     return dynamic ? emit_dynamic_loop(builder, location, values.at(c_uid),
                                        rank, body)
@@ -3414,6 +3584,20 @@ Status build_module(::mlir::MLIRContext& context,
         return status;
     }
     auto workspace_value = entry->getArgument(metadata.arguments.size());
+    std::map<std::int64_t, std::int64_t> dynamic_extent_sources;
+    if (metadata.override_policy == ShapeOverridePolicy::kBlockScaleMatmul) {
+        for (std::size_t index = 0; index < 2; ++index) {
+            auto const* operation =
+                std::get_if<GenericOperationDesc>(&graph.nodes[index].attributes);
+            if (operation == nullptr) {
+                return fail(ErrorCode::kInvalidValue, "mlir",
+                            "validated block-scale dequantize node is malformed");
+            }
+            dynamic_extent_sources.emplace(
+                std::get<std::int64_t>(operation->outputs.at("Y")),
+                std::get<std::int64_t>(operation->inputs.at("X")));
+        }
+    }
     for (auto const& [uid, tensor] : graph.tensors) {
         if (!tensor.is_virtual) {
             continue;
@@ -3443,7 +3627,18 @@ Status build_module(::mlir::MLIRContext& context,
             ::mlir::ValueRange{});
         ::mlir::Value view;
         if (metadata.override_shape_enabled) {
-            auto extent_source = entry->getArgument(0);
+            ::mlir::Value extent_source = entry->getArgument(0);
+            if (metadata.override_policy ==
+                ShapeOverridePolicy::kBlockScaleMatmul) {
+                auto const source = dynamic_extent_sources.find(uid);
+                if (source == dynamic_extent_sources.end() ||
+                    !values.contains(source->second)) {
+                    return fail(
+                        ErrorCode::kInvalidValue, allocation_name,
+                        "dynamic virtual tensor extent source is absent");
+                }
+                extent_source = values.at(source->second);
+            }
             llvm::SmallVector<::mlir::Value> dynamic_sizes;
             dynamic_sizes.reserve(tensor.dim.size());
             for (std::size_t axis = 0; axis < tensor.dim.size(); ++axis) {

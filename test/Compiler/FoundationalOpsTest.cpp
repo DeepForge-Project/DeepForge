@@ -493,7 +493,7 @@ void run_dynamic_reshape_tests(TestRunner& tests) {
             artifact_info.metadata.override_policy ==
                 deepforge::compiler::ShapeOverridePolicy::kReshape &&
             artifact_info.metadata.override_role_uids == override_uids,
-        "artifact v11 preserves ordered RESHAPE override roles");
+        "artifact v12 preserves ordered RESHAPE override roles");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,
@@ -667,7 +667,7 @@ void run_dynamic_transpose_tests(TestRunner& tests) {
             artifact_info.metadata.override_role_uids == override_uids &&
             artifact_info.metadata.override_axis_map ==
                 std::vector<std::int64_t>({2, 0, 1}),
-        "artifact v11 preserves ordered TRANSPOSE roles and permutation");
+        "artifact v12 preserves ordered TRANSPOSE roles and permutation");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,
@@ -858,7 +858,7 @@ void run_dynamic_concatenate_tests(TestRunner& tests) {
             artifact_info.metadata.override_role_uids == override_uids &&
             artifact_info.metadata.override_axis_map ==
                 std::vector<std::int64_t>({1}),
-        "artifact v11 preserves ordered CONCATENATE roles and axis");
+        "artifact v12 preserves ordered CONCATENATE roles and axis");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,

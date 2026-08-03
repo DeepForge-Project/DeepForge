@@ -678,6 +678,37 @@ Status emit_flat_loop(::mlir::OpBuilder& builder,
 }
 
 template <typename Body>
+Status emit_dynamic_loop(::mlir::OpBuilder& builder,
+                         ::mlir::Location location,
+                         ::mlir::Value extent_source,
+                         std::size_t rank,
+                         Body&& body) {
+    llvm::SmallVector<::mlir::Value> lowers;
+    llvm::SmallVector<::mlir::Value> uppers;
+    llvm::SmallVector<::mlir::Value> steps;
+    lowers.reserve(rank);
+    uppers.reserve(rank);
+    steps.reserve(rank);
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+        lowers.push_back(index_constant(builder, location, 0));
+        uppers.push_back(::mlir::memref::DimOp::create(
+            builder, location, extent_source,
+            index_constant(builder, location,
+                           static_cast<std::int64_t>(axis))));
+        steps.push_back(index_constant(builder, location, 1));
+    }
+    auto loop = ::mlir::scf::buildLoopNest(
+        builder, location, lowers, uppers, steps,
+        [&](::mlir::OpBuilder& body_builder, ::mlir::Location body_location,
+            ::mlir::ValueRange induction_variables) {
+            body(body_builder, body_location,
+                 llvm::SmallVector<::mlir::Value>(induction_variables));
+        });
+    builder.setInsertionPointAfter(loop.loops.front());
+    return Status::ok();
+}
+
+template <typename Body>
 ::mlir::Value reduce_extent(::mlir::OpBuilder& builder,
                             ::mlir::Location location,
                             std::int64_t extent,
@@ -733,11 +764,9 @@ Status emit_block_dequantize(
     auto const& y = graph.tensors.at(y_uid);
     std::vector<std::int64_t> blocks;
     (void)read_integer_array(operation, "block_size", blocks);
-    return emit_flat_loop(
-        builder, location, y.dim, "BLOCK_SCALE_DEQUANTIZE",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& indices) {
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& indices) {
             auto scale_indices = indices;
             auto const first = indices.size() - blocks.size();
             for (std::size_t block_index = 0;
@@ -757,7 +786,12 @@ Status emit_block_dequantize(
                 body_builder, body_location, x_value, scale_value);
             numeric::store_from_f32(body_builder, body_location, result,
                                     values.at(y_uid), y, indices);
-        });
+        };
+    return graph.context.is_override_shape_enabled.value_or(false)
+               ? emit_dynamic_loop(builder, location, values.at(y_uid),
+                                   y.dim.size(), body)
+               : emit_flat_loop(builder, location, y.dim,
+                                "BLOCK_SCALE_DEQUANTIZE", body);
 }
 
 float quantized_maximum(DataType type) {

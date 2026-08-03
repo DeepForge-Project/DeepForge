@@ -338,6 +338,17 @@ equals Y. Each role may use an independent positive non-overlapping stride
 within its serialized storage bound. In-place, pass-by-value, ragged or
 reordered storage, virtual tensors, additional tensors, and composed graphs are
 rejected.
+Shape override is also executable for the exact producer-specific rank-3 graph
+with `BLOCK_SCALE_DEQUANTIZE(A,SF_A)`,
+`BLOCK_SCALE_DEQUANTIZE(B,SF_B)`, and one consuming `MATMUL`. A/B are external
+FP4 E2M1, SF_A/SF_B are external FP8 E4M3 with `F8_128x4`, the two FLOAT
+dequantized values are virtual, and C is external BFLOAT16. Final shapes are
+`A=[B,M,K]`, `B=[B,K,N]`, `C=[B,M,N]`,
+`SF_A=[B,round_up(M,128),round_up(K/16,4)]`, and
+`SF_B=[B,round_up(K/16,4),round_up(N,128)]`, with K divisible by 16. All five
+external strides must retain the producer-canonical layouts. Other block-scale
+graphs, types, reorderings, ports, and simultaneous dynamic context mode are
+rejected.
 Compiled dimensions are maxima; runtime dimensions must be positive and no
 larger, runtime strides
 must satisfy the supported positive non-overlap condition, and each external
@@ -350,11 +361,12 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v11 for ordered CONCATENATE input/Y roles and its
-fixed axis while retaining v10 TRANSPOSE roles/permutation, v9 REDUCTION roles,
+New artifacts use format v12 for ordered block-scale MATMUL A/SF_A/B/SF_B/C
+roles while retaining v11 CONCATENATE input/Y roles and fixed axis, v10
+TRANSPOSE roles/permutation, v9 REDUCTION roles,
 v8 logical-RESHAPE roles, v7
 SDPA-forward roles, v6 MATMUL roles, v4 ragged references, and v5
-logical-sequence divisors; v1-v10 remain readable, with v4
+logical-sequence divisors; v1-v11 remain readable, with v4
 divisors defaulted to one and pre-v6 role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or

@@ -7,8 +7,9 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `11`; the reader also
-accepts version `10` TRANSPOSE-override artifacts, version `9` REDUCTION-override
+generated kernel. The current writer emits format version `12`; the reader also
+accepts version `11` CONCATENATE-override artifacts, version `10`
+TRANSPOSE-override artifacts, version `9` REDUCTION-override
 artifacts, version `8` RESHAPE-override artifacts, version `7` SDPA-override
 artifacts, version `6` MATMUL-override artifacts, version `5` ragged-sequence
 artifacts, version `4` ragged-storage
@@ -22,7 +23,8 @@ retains its ordered MATMUL role UIDs, version `7` retains its ordered
 SDPA-forward role UIDs, version `8` retains its ordered logical-RESHAPE role
 UIDs, version `9` retains its ordered REDUCTION role UIDs, and version `10`
 retains its ordered TRANSPOSE role UIDs and permutation. Versions `1` through
-`9` default the policy-specific axis map to empty.
+`9` default the policy-specific axis map to empty. Version `11` retains its
+ordered CONCATENATE input/Y role UIDs and fixed axis.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -52,7 +54,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 11
+u32 format_version = 12
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -63,8 +65,8 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE
-u32 override_role_count      # policy 2: 3; policy 3: 4..7; policies 4/5/6: 2; policy 7: 2..64; else 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE, 8 block-scale MATMUL
+u32 override_role_count      # policy 2: 3; policy 3: 4..7; policies 4/5/6: 2; policy 7: 2..64; policy 8: 5; else 0
 i64 override_role_uids[override_role_count] # policy-specific order below
 u32 override_axis_count      # policy 6: fixed rank; policy 7: 1; else 0
 i64 override_axis_map[override_axis_count] # policy-specific axes below
@@ -213,6 +215,18 @@ strides within their serialized byte bounds only while preserving those final
 relations. Version `10` cannot encode policy `7` and rejects it while retaining
 policy `6` roles and permutation.
 
+Version `12` adds policy `8` for the producer-specific rank-3 block-scale
+MATMUL graph. It stores five distinct role UIDs in A, SF_A, B, SF_B, C order.
+The roles have FP4-E2M1/F8_128x4-E4M3/FP4-E2M1/F8_128x4-E4M3/BFLOAT16
+storage, while the two dequantized FLOAT values remain private virtual
+workspace tensors. Runtime validation requires `A=[B,M,K]`, `B=[B,K,N]`,
+`C=[B,M,N]`, K divisible by 16, and scale shapes
+`SF_A=[B,round_up(M,128),round_up(K/16,4)]` and
+`SF_B=[B,round_up(K/16,4),round_up(N,128)]`. All five strides must remain the
+producer-canonical layouts documented in the runtime contract. Version `11`
+cannot encode policy `8` and rejects it while retaining policy `7` roles and
+axis.
+
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
 `<base>_avx2`, and `<base>_avx512`. The C-interface wrapper in each object is
@@ -231,8 +245,8 @@ operations resolve their standard `libm` symbols from the current process.
 
 Execution validates the ordered argument table, UIDs, null pointers, per-tensor
 alignment and byte ranges, runtime override policy and bounds, 64-byte
-workspace alignment, ragged prefix/reference/divisor consistency, and integer
-overflow.
+workspace alignment, ragged prefix/reference/divisor consistency, block-scale
+MATMUL shape/scale/canonical-stride relations, and integer overflow.
 Read/read aliasing is legal; overlap involving a write argument or workspace is
 rejected. CPUID, FMA, OSXSAVE, and XGETBV determine safe AVX-512, AVX2, or
 scalar selection. Loading an object does not itself execute high-ISA code.

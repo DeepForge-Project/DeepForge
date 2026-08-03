@@ -326,7 +326,7 @@ ABI is unchanged.
 `is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
 persisted independently. The dynamic flag alone is plan metadata and does not
 alter a static kernel descriptor, and override execution does not require that
-flag to be set. Enabling override selects one of four explicit policies.
+flag to be set. Enabling override selects one of eight explicit policies.
 
 The exact-pointwise policy accepts a nonempty ordered DAG containing only
 `POINTWISE` nodes. Every used tensor is non-ragged, non-reordered,
@@ -378,6 +378,19 @@ tensors are rejected, as are composed graphs. All role UIDs are distinct.
 Metadata records the input role UIDs in numeric port order, then Y, and records
 the concatenation axis.
 
+The block-scale MATMUL policy accepts only the producer-specific ordered graph
+`BLOCK_SCALE_DEQUANTIZE(A,SF_A)`,
+`BLOCK_SCALE_DEQUANTIZE(B,SF_B)`, `MATMUL(dequantized_A,dequantized_B)`.
+The dequantize outputs are distinct virtual rank-3 FLOAT tensors preserving
+the corresponding A/B descriptors. The five external rank-3 roles are ordered
+A, SF_A, B, SF_B, C and have FP4 E2M1, FP8 E4M3 with `F8_128x4`, FP4 E2M1,
+FP8 E4M3 with `F8_128x4`, and BFLOAT16 types. Both dequantize operations and
+MATMUL use FLOAT compute; block sizes are exactly `[1,16]` and `[16,1]`, scales
+are non-negative, and MATMUL padding is zero. Other nodes, tensors, ports,
+types, reorderings, pass-by-value or ragged storage, and the independent
+dynamic-shape flag are rejected. Metadata records the five external role UIDs
+in A, SF_A, B, SF_B, C order.
+
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
 external argument UIDs. Each supplied shape preserves rank, has positive
@@ -412,8 +425,19 @@ the same rank. All extents are equal on every non-concatenation axis, and the
 checked sum of all input extents on the fixed concatenation axis equals Y.
 Complete and partial overrides must preserve both relations.
 
+For block-scale MATMUL, final descriptors have the exact forms
+`A=[B,M,K]`, `B=[B,K,N]`, and `C=[B,M,N]`, with positive K divisible by 16.
+Let `SM=round_up(M,128)`, `SN=round_up(N,128)`, and
+`SK=round_up(K/16,4)`. Scale descriptors must be
+`SF_A=[B,SM,SK]` and `SF_B=[B,SK,SN]`. Unlike the other policies, all five
+runtime strides must remain producer-canonical:
+`A=[M*K,K,1]`, `SF_A=[SM*SK,SK,1]`, `B=[N*K,1,K]`,
+`SF_B=[SN*SK,1,SK]`, and `C=[M*N,N,1]`. Complete and partial overrides are
+accepted only when the final five descriptors satisfy all of these relations
+and remain within their serialized maxima and byte spans.
+
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
-loop bounds under all seven policies. Runtime descriptors carry the resolved values
+loop bounds under all eight policies. Runtime descriptors carry the resolved values
 to in-process and artifact-loaded objects. Pointwise virtual intermediates use
 the common runtime dimensions and internal packed views over workspace sized
 for serialized maxima. MATMUL loops use runtime C extents, runtime K, and
@@ -424,7 +448,10 @@ runtime X descriptor. REDUCTION loops use runtime Y output extents and runtime X
 reduction extents; AVG derives its divisor from the latter. TRANSPOSE loops use
 runtime Y extents and map each output index through the fixed permutation to X.
 CONCATENATE loops use each runtime input extent and a checked cumulative offset
-on the fixed axis while using Y extents on all other axes.
+on the fixed axis while using Y extents on all other axes. Block-scale
+dequantization derives separate virtual runtime views from A and B; packed FP4
+and `F8_128x4` addressing use runtime memref metadata, and MATMUL traverses the
+resolved C/M/N/K extents before storing BFLOAT16.
 Alias checks use
 resolved external byte spans. Workspace
 remains statically bounded, and workspace query performs the same validation
@@ -435,9 +462,10 @@ Artifact formats `3` through `5` record both context flags and pointwise policy
 policy `3` using the same role-list field; v8 adds logical-RESHAPE policy `4`
 with X/Y role UIDs; v9 adds REDUCTION policy `5` with X/Y role UIDs; v10 adds
 TRANSPOSE policy `6`, X/Y role UIDs, and the fixed permutation; v11 adds
-CONCATENATE policy `7`, ordered input/Y role UIDs, and the fixed axis. The v1/v2
+CONCATENATE policy `7`, ordered input/Y role UIDs, and the fixed axis; v12 adds
+block-scale MATMUL policy `8` and ordered A/SF_A/B/SF_B/C role UIDs. The v1/v2
 readers default override metadata to disabled, v1-v5 readers default role UIDs
-to empty, and v6-v10 remain readable with their role metadata while formats
+to empty, and v6-v11 remain readable with their role metadata while formats
 before v10 default the policy-specific axis map to empty. The
 pinned Frontend MATMUL sample can execute shapes larger than its fake cache
 shape, but DeepForge deliberately requires every runtime dimension and byte
@@ -503,7 +531,7 @@ sink input.
 Artifact format `5` introduced the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
 one; compact page tables use the corresponding cache block size. Formats v6
-through v11 retain those fields, and the reader accepts v1-v10 with v4 divisors
+through v12 retain those fields, and the reader accepts v1-v11 with v4 divisors
 defaulted to one.
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value Extension

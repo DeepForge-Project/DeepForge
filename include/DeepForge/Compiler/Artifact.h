@@ -20,7 +20,8 @@ inline constexpr std::uint32_t kSdpaOverrideArtifactFormatVersion = 7;
 inline constexpr std::uint32_t kReshapeOverrideArtifactFormatVersion = 8;
 inline constexpr std::uint32_t kReductionOverrideArtifactFormatVersion = 9;
 inline constexpr std::uint32_t kTransposeOverrideArtifactFormatVersion = 10;
-inline constexpr std::uint32_t kArtifactFormatVersion = 11;
+inline constexpr std::uint32_t kConcatenateOverrideArtifactFormatVersion = 11;
+inline constexpr std::uint32_t kArtifactFormatVersion = 12;
 inline constexpr double kDefaultAbsoluteTolerance = 1.0e-4;
 inline constexpr double kDefaultRelativeTolerance = 1.0e-3;
 

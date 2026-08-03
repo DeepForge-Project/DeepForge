@@ -326,7 +326,7 @@ ABI is unchanged.
 `is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
 persisted independently. The dynamic flag alone is plan metadata and does not
 alter a static kernel descriptor, and override execution does not require that
-flag to be set. Enabling override selects one of two explicit policies.
+flag to be set. Enabling override selects one of three explicit policies.
 
 The exact-pointwise policy accepts a nonempty ordered DAG containing only
 `POINTWISE` nodes. Every used tensor is non-ragged, non-reordered,
@@ -340,6 +340,14 @@ C is write-only. Virtual, pass-by-value, ragged, reordered, or additional
 tensors are rejected, as are composed graphs and simultaneous serialized
 `M_override`/`N_override`/`K_override` ports. Metadata records three distinct
 role UIDs in A, B, C order.
+
+The SDPA-forward policy accepts exactly one dense standard-f32 `SDPA`. Q, K,
+V, O and optional Stats/Max/Sum_exp are external plain rank-4 tensors; inputs
+are read-only and outputs are write-only. Metadata records Q, K, V, O followed
+by the present row outputs in Stats, Max, Sum_exp order. The operation may be
+unmasked or use top-left causal `right_bound=0`; padding, sequence metadata,
+bias, ALiBi, sliding windows, bottom-right alignment, dropout, paging, ragged
+storage, sink/block masks, virtual tensors, and composed graphs are rejected.
 
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
@@ -356,21 +364,26 @@ public arguments and cannot be overridden. For MATMUL, final descriptors obey
 `A[-2] == C[-2]`, `A[-1] == B[-2]`, and `B[-1] == C[-1]`. On every batch axis,
 A and B extents are equal or one and C equals their maximum. This permits a
 partial override such as changing one input batch extent to one while preserving
-the relation.
+the relation. For SDPA, only B, Sq, and Skv may change. All roles have the same
+B; Q/O share Hq and Sq, K/V share Skv, Q/K share Dqk, O/V share Dv, Hq is
+divisible by both source-head counts, and every row output is `[B,Hq,Sq,1]`.
+Heads and embedding dimensions must equal their compiled values.
 
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
-loop bounds under either policy. Runtime descriptors carry the resolved values
+loop bounds under all three policies. Runtime descriptors carry the resolved values
 to in-process and artifact-loaded objects. Pointwise virtual intermediates use
 the common runtime dimensions and internal packed views over workspace sized
 for serialized maxima. MATMUL loops use runtime C extents, runtime K, and
-runtime singleton-batch selection. Alias checks use resolved external byte
+runtime singleton-batch selection. SDPA loops use runtime Q/O extents and
+runtime K sequence length for softmax and V reduction. Alias checks use resolved external byte
 spans. Workspace remains statically bounded, and workspace query performs the
 same validation as execution.
 
 Artifact formats `3` through `5` record both context flags and pointwise policy
-`1`; v6 adds MATMUL policy `2` and its ordered role UIDs. The v1/v2 readers
-default override metadata to disabled, and v1-v5 readers default role UIDs to
-empty. The pinned Frontend sample can execute shapes larger than its fake cache
+`1`; v6 adds MATMUL policy `2` and its ordered role UIDs; v7 adds SDPA-forward
+policy `3` using the same role-list field. The v1/v2 readers default override
+metadata to disabled, v1-v5 readers default role UIDs to empty, and v6 remains
+readable with MATMUL roles. The pinned Frontend MATMUL sample can execute shapes larger than its fake cache
 shape, but DeepForge deliberately requires every runtime dimension and byte
 span to fit the serialized maxima: the public UID-map ABI carries pointers, not
 allocation lengths, so larger descriptors cannot be validated safely.
@@ -433,9 +446,9 @@ sink input.
 
 Artifact format `5` introduced the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
-one; compact page tables use the corresponding cache block size. Format v6
-retains those fields, and the reader accepts v1-v5 with v4 divisors defaulted
-to one.
+one; compact page tables use the corresponding cache block size. Formats v6
+and v7 retain those fields, and the reader accepts v1-v6 with v4 divisors
+defaulted to one.
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value Extension
 

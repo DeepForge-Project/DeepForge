@@ -1083,6 +1083,104 @@ Status validate_shape_override_subset(
         return Status::ok();
     }
     if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kSdpa) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        auto const valid_output = [](std::string const& port) {
+            return port == "O" || port == "Stats" || port == "Max" ||
+                   port == "Sum_exp";
+        };
+        if (operation == nullptr || !operation->input_lists.empty() ||
+            operation->inputs.size() != 3 ||
+            !operation->inputs.contains("Q") ||
+            !operation->inputs.contains("K") ||
+            !operation->inputs.contains("V") ||
+            !operation->outputs.contains("O") ||
+            !std::all_of(operation->outputs.begin(), operation->outputs.end(),
+                         [&](auto const& item) {
+                             return valid_output(item.first);
+                         })) {
+            return unsupported(
+                "nodes[0]",
+                "runtime SDPA overrides require Q/K/V inputs and only O, "
+                "Stats, Max, or Sum_exp outputs");
+        }
+
+        bool padding = false;
+        bool alibi = false;
+        std::optional<std::int64_t> left_bound;
+        std::optional<std::int64_t> right_bound;
+        std::optional<std::int64_t> max_seq_len_kv;
+        std::optional<double> dropout_probability;
+        std::string_view alignment;
+        if (!read_bool_attribute(*operation, "padding_mask", padding) ||
+            !read_bool_attribute(*operation, "alibi_mask", alibi) ||
+            !read_optional_integer_attribute(*operation, "left_bound",
+                                             left_bound) ||
+            !read_optional_integer_attribute(*operation, "right_bound",
+                                             right_bound) ||
+            !read_optional_integer_attribute(*operation, "max_seq_len_kv",
+                                             max_seq_len_kv) ||
+            !read_optional_number_attribute(*operation,
+                                            "dropout_probability",
+                                            dropout_probability) ||
+            !read_string_attribute(*operation, "diagonal_alignment",
+                                   alignment)) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "SDPA override attributes are malformed");
+        }
+        if (padding || alibi || left_bound ||
+            (right_bound && *right_bound != 0) || max_seq_len_kv ||
+            dropout_probability || alignment != "TOP_LEFT") {
+            return unsupported(
+                "nodes[0]",
+                "runtime SDPA overrides support dense unmasked or TOP_LEFT "
+                "causal forward attention without padding, ALiBi, sliding "
+                "windows, paging, or dropout");
+        }
+
+        std::vector<std::int64_t> sdpa_roles;
+        sdpa_roles.reserve(operation->outputs.size() + 3);
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->dim.size() != 4 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime SDPA overrides require external plain rank-4 f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            sdpa_roles.push_back(uid);
+            return Status::ok();
+        };
+        for (auto port : {"Q", "K", "V"}) {
+            auto status = check_role(operation->inputs.at(port),
+                                     "nodes[0].inputs." + std::string(port));
+            if (status.is_bad()) return status;
+        }
+        for (auto port : {"O", "Stats", "Max", "Sum_exp"}) {
+            auto const item = operation->outputs.find(port);
+            if (item == operation->outputs.end()) continue;
+            auto status = check_role(item->second,
+                                     "nodes[0].outputs." + std::string(port));
+            if (status.is_bad()) return status;
+        }
+        policy = ShapeOverridePolicy::kSdpaForward;
+        role_uids = std::move(sdpa_roles);
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
         graph.nodes.front().tag == OperationTag::kMatmul) {
         auto const* operation =
             std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);

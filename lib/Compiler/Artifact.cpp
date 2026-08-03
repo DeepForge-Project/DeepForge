@@ -712,6 +712,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version != kShapeOverrideArtifactFormatVersion &&
         version != kRaggedArtifactFormatVersion &&
         version != kRaggedSequenceArtifactFormatVersion &&
+        version != kMatmulOverrideArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -740,6 +741,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
     if (version == kShapeOverrideArtifactFormatVersion ||
         version == kRaggedArtifactFormatVersion ||
         version == kRaggedSequenceArtifactFormatVersion ||
+        version == kMatmulOverrideArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -750,10 +752,12 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             override_shape_enabled > 1) {
             return parse_failure("dynamic shape metadata is malformed");
         }
-        auto const maximum_policy =
-            version == kArtifactFormatVersion
-                ? ShapeOverridePolicy::kMatmul
-                : ShapeOverridePolicy::kPointwiseExact;
+        auto maximum_policy = ShapeOverridePolicy::kPointwiseExact;
+        if (version == kMatmulOverrideArtifactFormatVersion) {
+            maximum_policy = ShapeOverridePolicy::kMatmul;
+        } else if (version == kArtifactFormatVersion) {
+            maximum_policy = ShapeOverridePolicy::kSdpaForward;
+        }
         if (override_policy >
             static_cast<std::uint32_t>(maximum_policy)) {
             return parse_failure("dynamic shape metadata is malformed");
@@ -762,7 +766,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         result.metadata.override_shape_enabled = override_shape_enabled != 0;
         result.metadata.override_policy =
             static_cast<ShapeOverridePolicy>(override_policy);
-        if (version == kArtifactFormatVersion) {
+        if (version == kMatmulOverrideArtifactFormatVersion ||
+            version == kArtifactFormatVersion) {
             std::uint32_t role_count = 0;
             if (!reader.read_u32(role_count) || role_count > 64) {
                 return parse_failure("override role metadata is malformed");
@@ -795,6 +800,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             }
             if ((version == kRaggedArtifactFormatVersion ||
                  version == kRaggedSequenceArtifactFormatVersion ||
+                 version == kMatmulOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
@@ -805,6 +811,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                 return parse_failure("argument storage policy is malformed");
             }
             if ((version == kRaggedSequenceArtifactFormatVersion ||
+                 version == kMatmulOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_i64(argument.ragged_sequence_divisor) ||
                  argument.ragged_sequence_divisor <= 0)) {

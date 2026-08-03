@@ -281,7 +281,7 @@ coordinate；公开 execute 和 workspace ABI 不变。
 
 `is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
 dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor；override 执行
-也不要求同时设置该 flag。启用 override 后只能选择以下两个明确 policy 之一。
+也不要求同时设置该 flag。启用 override 后只能选择以下三个明确 policy 之一。
 
 Exact-pointwise policy 接受非空且只包含 `POINTWISE` node 的有序 DAG。全部已用
 tensor 必须是编译 dimension 相同的非 ragged、非 reordered、非 pass-by-value FLOAT，
@@ -293,6 +293,13 @@ rank 的 external plain strided tensor；A/B 只读，C 只写。Virtual、pass-
 ragged、reordered 或额外 tensor 均被拒绝，也不能使用组合图或同时提供序列化
 `M_override`/`N_override`/`K_override` 端口。Metadata 按 A、B、C 顺序记录三个
 不同的 role UID。
+
+SDPA-forward policy 只接受单个 dense 标准 f32 `SDPA`。Q、K、V、O 以及可选
+Stats/Max/Sum_exp 必须是 external plain rank-4 tensor；input 只读，output 只写。
+Metadata 先记录 Q、K、V、O，再按 Stats、Max、Sum_exp 顺序记录实际存在的 row
+output。Operation 可无 mask，或使用 top-left causal `right_bound=0`；padding、sequence
+metadata、bias、ALiBi、sliding window、bottom-right alignment、dropout、paging、
+ragged storage、sink/block mask、virtual tensor 和组合图均被拒绝。
 
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
 override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
@@ -307,16 +314,22 @@ external argument。Virtual UID 不是公开 argument，不能被调用者 overr
 两者最大值。因此允许只把一个 input 的 batch extent 改为 1 等仍保持关系的 partial
 override。
 
-编译器为两个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
+SDPA 只能改变 B、Sq、Skv。全部 role 的 B 相同；Q/O 共用 Hq 和 Sq，K/V 共用
+Skv，Q/K 共用 Dqk，O/V 共用 Dv，Hq 可被两个 source-head count 整除，所有 row
+output 都是 `[B,Hq,Sq,1]`。Head 和 embedding dimension 必须保持编译值。
+
+编译器为三个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
 loop bound。Runtime descriptor 将解析结果传给进程内对象和 artifact-loaded 对象。
 Pointwise virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
 规划的 workspace 上建立内部 packed view；MATMUL loop 使用 runtime C extent、
-runtime K 和 runtime singleton-batch 选择。Alias 检查使用本次解析出的 external byte
+runtime K 和 runtime singleton-batch 选择；SDPA loop 使用 runtime Q/O extent，并以
+runtime K sequence length 执行 softmax 和 V reduction。Alias 检查使用本次解析出的 external byte
 span。Workspace 保持静态上界，workspace query 与 execute 使用同一套校验。
 
 Artifact format `3` 至 `5` 记录两个 context flag 和 pointwise policy `1`；v6 增加
-MATMUL policy `2` 及其有序 role UID。v1/v2 reader 默认关闭 override metadata，
-v1-v5 reader 默认 role UID 为空。固定 Frontend sample 可执行大于 fake cache shape
+MATMUL policy `2` 及其有序 role UID；v7 使用同一 role-list 字段增加 SDPA-forward
+policy `3`。v1/v2 reader 默认关闭 override metadata，v1-v5 reader 默认 role UID
+为空，v6 仍可连同 MATMUL role 读取。固定 Frontend MATMUL sample 可执行大于 fake cache shape
 的 descriptor，但 DeepForge 明确要求每个 runtime dimension 和 byte span 都位于
 序列化上界内：公开 UID-map ABI 只携带 pointer，没有 allocation length，因而无法
 安全校验更大的 descriptor。
@@ -370,8 +383,8 @@ tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，
 
 Artifact format `5` 首次持久化 ragged storage policy、offset/sequence UID 和正的
 逻辑 sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用
-对应 cache block size。Format v6 保留这些字段，reader 接受 v1-v5，其中 v4 divisor
-默认为 1。
+对应 cache block size。Format v6 和 v7 保留这些字段，reader 接受 v1-v6，其中 v4
+divisor 默认为 1。
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value 扩展
 

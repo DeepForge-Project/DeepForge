@@ -305,8 +305,15 @@ intermediates receive the common runtime shape through statically bounded packed
 workspace views. It is also executable for one standard-f32 `MATMUL` whose A/B/C
 are external plain tensors of equal rank at least two. Its final descriptors
 must preserve M/N/K relations and batch broadcasting; composed graphs, virtual
-tensors, and simultaneous M/N/K extent ports are rejected. Compiled dimensions
-are maxima; runtime dimensions must be positive and no larger, runtime strides
+tensors, and simultaneous M/N/K extent ports are rejected. Shape override is
+additionally executable for one dense
+standard-f32 `SDPA` forward with external plain Q/K/V/O and optional
+Stats/Max/Sum_exp. It is unmasked or top-left causal and may change only B, Sq,
+and Skv; heads, embeddings, GQA, and all cross-tensor relations remain fixed.
+Padding/sequence metadata, bias, ALiBi, other windows, dropout, paging/ragged
+storage, sink/block masks, virtual tensors, and composed graphs are rejected.
+Compiled dimensions are maxima; runtime dimensions must be positive and no
+larger, runtime strides
 must satisfy the supported positive non-overlap condition, and each external
 storage span must fit its compiled bound. The dynamic flag alone is persisted
 without changing static descriptor semantics. Independently,
@@ -317,9 +324,10 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v6 for ordered MATMUL override roles while retaining
-the v4 ragged references and v5 logical-sequence divisors; v1-v5 remain
-readable, with v4 divisors defaulted to one and pre-v6 role lists empty.
+New artifacts use format v7 for ordered SDPA-forward override roles while
+retaining v6 MATMUL roles, v4 ragged references, and v5 logical-sequence
+divisors; v1-v6 remain readable, with v4 divisors defaulted to one and pre-v6
+role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

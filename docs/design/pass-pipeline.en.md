@@ -267,7 +267,8 @@ reused.
 ## 9. Failure Strategy
 
 Compile-time errors include schema or version mismatch, dynamic behavior
-outside the declared pointwise and MATMUL override policies, invalid layout or data type,
+outside the declared pointwise, MATMUL, and SDPA-forward override policies,
+invalid layout or data type,
 unknown nodes, unsupported access, an unplannable workspace, illegal
 vectorization, and final dialect residue.
 

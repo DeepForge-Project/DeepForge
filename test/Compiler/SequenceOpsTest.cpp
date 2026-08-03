@@ -169,6 +169,15 @@ std::size_t offset4(std::array<std::int64_t, 4> const& dimensions,
         ((a * dimensions[1] + b) * dimensions[2] + c) * dimensions[3] + d);
 }
 
+std::size_t strided_offset4(std::vector<std::int64_t> const& strides,
+                            std::int64_t a,
+                            std::int64_t b,
+                            std::int64_t c,
+                            std::int64_t d) {
+    return static_cast<std::size_t>(a * strides[0] + b * strides[1] +
+                                    c * strides[2] + d * strides[3]);
+}
+
 std::vector<float> pack_bshd(
     std::vector<float> const& dense,
     std::array<std::int64_t, 4> const& dimensions,
@@ -558,6 +567,28 @@ Json feature_sdpa_graph() {
         true, false, true, nullptr, 2, 1);
     return graph_document(4003, "feature_sdpa", Json::array({node}),
                           std::move(tensors));
+}
+
+Json dynamic_sdpa_graph() {
+    Json tensors = Json::object();
+    tensors["1301"] = tensor("Q", 1301, {2, 2, 3, 2});
+    tensors["1302"] = tensor("K", 1302, {2, 1, 4, 2});
+    tensors["1303"] = tensor("V", 1303, {2, 1, 4, 3});
+    tensors["1304"] = tensor("O", 1304, {2, 2, 3, 3});
+    tensors["1305"] = tensor("Stats", 1305, {2, 2, 3, 1});
+    tensors["1306"] = tensor("Max", 1306, {2, 2, 3, 1});
+    tensors["1307"] = tensor("Sum_exp", 1307, {2, 2, 3, 1});
+    auto node = forward_attention_node(
+        Json::object({{"Q", 1301}, {"K", 1302}, {"V", 1303}}),
+        Json::object({{"O", 1304},
+                      {"Stats", 1305},
+                      {"Max", 1306},
+                      {"Sum_exp", 1307}}),
+        true, false, false, nullptr, nullptr, 0, "TOP_LEFT", 0.65F);
+    auto graph = graph_document(4020, "dynamic_sdpa", Json::array({node}),
+                                std::move(tensors));
+    graph["context"]["is_override_shape_enabled"] = true;
+    return graph;
 }
 
 Json ragged_sdpa_graph() {
@@ -1348,6 +1379,272 @@ void run_feature_attention_tests(TestRunner& tests) {
     tests.check(close_vectors(d_q, finite_difference_q(configuration, d_o),
                               2.5e-3F),
                 "SDPA dQ matches finite differences through masked dropout forward");
+}
+
+void run_dynamic_attention_tests(TestRunner& tests) {
+    AttentionCase configuration;
+    configuration.q_dim = {1, 2, 2, 2};
+    configuration.k_dim = {1, 1, 3, 2};
+    configuration.v_dim = {1, 1, 3, 3};
+    configuration.o_dim = {1, 2, 2, 3};
+    configuration.q = {0.2F, -0.3F, 0.7F, 0.1F,
+                       -0.5F, 0.4F, 0.3F, -0.8F};
+    configuration.k = {0.6F, -0.2F, -0.4F, 0.9F, 0.1F, 0.5F};
+    configuration.v = {0.3F, -0.7F, 0.2F, 0.8F, 0.2F,
+                       -0.4F, -0.6F, 0.4F, 0.9F};
+    configuration.padding = false;
+    configuration.left_bound.reset();
+    configuration.right_bound = 0;
+    configuration.attention_scale = 0.65F;
+    configuration.dropout_scale = 1.0F;
+    auto const reference = attention_forward(configuration);
+
+    deepforge::import::SerializedGraph graph;
+    auto status = parse_graph(dynamic_sdpa_graph(), graph);
+    tests.good(status, "parse runtime shape-override SDPA");
+    deepforge::compiler::CompilationResult compilation;
+    if (status.is_good()) {
+        deepforge::compiler::CompileOptions options;
+        options.capture_mlir = true;
+        status = deepforge::compiler::compile_graph(graph, options,
+                                                    compilation);
+    }
+    tests.good(status, "compile runtime shape-override SDPA");
+    if (status.is_bad() || !compilation.executable) return;
+    tests.check(
+        !compilation.metadata.dynamic_shape_enabled &&
+            compilation.metadata.override_shape_enabled &&
+            compilation.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kSdpaForward &&
+            compilation.metadata.override_role_uids ==
+                std::vector<std::int64_t>(
+                    {1301, 1302, 1303, 1304, 1305, 1306, 1307}) &&
+            compilation.imported_mlir.find("memref.dim") !=
+                std::string::npos &&
+            compilation.imported_mlir.find("?x?x?x?xf32") !=
+                std::string::npos,
+        "SDPA override metadata and MLIR use runtime descriptors independently of the dynamic flag");
+
+    deepforge::runtime::OverrideUids const override_uids{
+        1301, 1302, 1303, 1304, 1305, 1306, 1307};
+    deepforge::runtime::OverrideShapes const override_shapes{
+        {1, 2, 2, 2}, {1, 1, 3, 2}, {1, 1, 3, 3}, {1, 2, 2, 3},
+        {1, 2, 2, 1}, {1, 2, 2, 1}, {1, 2, 2, 1}};
+    deepforge::runtime::OverrideStrides const override_strides{
+        {20, 8, 3, 1}, {15, 12, 3, 1}, {22, 20, 4, 1},
+        {30, 12, 4, 1}, {11, 5, 2, 1}, {11, 5, 2, 1},
+        {11, 5, 2, 1}};
+
+    std::vector<float> q(24, -77.0F);
+    std::vector<float> k(16, -77.0F);
+    std::vector<float> v(24, -77.0F);
+    std::vector<float> o(36, -99.0F);
+    std::vector<float> stats(12, -99.0F);
+    std::vector<float> maximum(12, -99.0F);
+    std::vector<float> sum(12, -99.0F);
+    auto scatter = [](std::vector<float> const& dense,
+                      std::array<std::int64_t, 4> const& dimensions,
+                      std::vector<std::int64_t> const& strides,
+                      std::vector<float>& strided) {
+        for (std::int64_t a = 0; a < dimensions[0]; ++a) {
+            for (std::int64_t b = 0; b < dimensions[1]; ++b) {
+                for (std::int64_t c = 0; c < dimensions[2]; ++c) {
+                    for (std::int64_t d = 0; d < dimensions[3]; ++d) {
+                        strided[strided_offset4(strides, a, b, c, d)] =
+                            dense[offset4(dimensions, a, b, c, d)];
+                    }
+                }
+            }
+        }
+    };
+    scatter(configuration.q, configuration.q_dim, override_strides[0], q);
+    scatter(configuration.k, configuration.k_dim, override_strides[1], k);
+    scatter(configuration.v, configuration.v_dim, override_strides[2], v);
+
+    deepforge::runtime::VariantPack pack{{1301, q.data()},
+                                          {1302, k.data()},
+                                          {1303, v.data()},
+                                          {1304, o.data()},
+                                          {1305, stats.data()},
+                                          {1306, maximum.data()},
+                                          {1307, sum.data()}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes, override_strides);
+    tests.good(status, "execute runtime shape-override SDPA");
+
+    auto matches_strided = [](std::vector<float> const& actual,
+                              std::array<std::int64_t, 4> const& dimensions,
+                              std::vector<std::int64_t> const& strides,
+                              std::vector<float> const& expected) {
+        std::vector<float> gathered;
+        std::vector<bool> occupied(actual.size(), false);
+        gathered.reserve(expected.size());
+        for (std::int64_t a = 0; a < dimensions[0]; ++a) {
+            for (std::int64_t b = 0; b < dimensions[1]; ++b) {
+                for (std::int64_t c = 0; c < dimensions[2]; ++c) {
+                    for (std::int64_t d = 0; d < dimensions[3]; ++d) {
+                        auto const index =
+                            strided_offset4(strides, a, b, c, d);
+                        occupied[index] = true;
+                        gathered.push_back(actual[index]);
+                    }
+                }
+            }
+        }
+        bool gaps_untouched = true;
+        for (std::size_t index = 0; index < actual.size(); ++index) {
+            gaps_untouched = gaps_untouched &&
+                             (occupied[index] || actual[index] == -99.0F);
+        }
+        return gaps_untouched && close_vectors(gathered, expected);
+    };
+    std::array<std::int64_t, 4> const row_dimensions{1, 2, 2, 1};
+    tests.check(
+        matches_strided(o, configuration.o_dim, override_strides[3],
+                        reference.o) &&
+            matches_strided(stats, row_dimensions, override_strides[4],
+                            reference.stats) &&
+            matches_strided(maximum, row_dimensions, override_strides[5],
+                            reference.maximum) &&
+            matches_strided(sum, row_dimensions, override_strides[6],
+                            reference.sum_exp),
+        "dynamic SDPA honors B/Sq/Skv, GQA, causal masking, row outputs, and non-contiguous strides");
+
+    std::vector<std::uint8_t> artifact;
+    status = deepforge::compiler::serialize_artifact(compilation, artifact);
+    tests.good(status, "serialize runtime shape-override SDPA artifact");
+    std::unique_ptr<deepforge::runtime::Executable> loaded;
+    deepforge::compiler::ArtifactInfo artifact_info;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            artifact, loaded, &artifact_info);
+    }
+    tests.good(status, "load runtime shape-override SDPA artifact");
+    tests.check(
+        artifact_info.format_version ==
+                deepforge::compiler::kArtifactFormatVersion &&
+            artifact_info.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kSdpaForward &&
+            artifact_info.metadata.override_role_uids == override_uids,
+        "artifact v7 preserves ordered SDPA override roles");
+    if (loaded) {
+        std::fill(o.begin(), o.end(), -99.0F);
+        std::fill(stats.begin(), stats.end(), -99.0F);
+        std::fill(maximum.begin(), maximum.end(), -99.0F);
+        std::fill(sum.begin(), sum.end(), -99.0F);
+        status = loaded->execute(nullptr, pack, nullptr, override_uids,
+                                 override_shapes, override_strides);
+        tests.good(status, "execute loaded shape-override SDPA artifact");
+        tests.check(matches_strided(o, configuration.o_dim,
+                                    override_strides[3], reference.o) &&
+                        matches_strided(stats, row_dimensions,
+                                        override_strides[4], reference.stats),
+                    "loaded dynamic SDPA preserves runtime descriptor semantics");
+    }
+
+    std::int64_t workspace_size = -1;
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {1302, 1303},
+        {{2, 1, 3, 2}, {2, 1, 3, 3}},
+        {{8, 8, 2, 1}, {12, 12, 3, 1}});
+    tests.good(status,
+               "partial SDPA override may shrink K and V sequence together");
+    tests.check(workspace_size == 0,
+                "partial SDPA override preserves the static workspace bound");
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {1301}, {{1, 2, 2, 2}},
+        {{12, 6, 2, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "partial SDPA override must preserve Q/K/V/O relations");
+
+    auto invalid_shapes = override_shapes;
+    invalid_shapes[3] = {1, 2, 1, 3};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, invalid_shapes, override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "dynamic SDPA rejects an O sequence inconsistent with Q");
+    invalid_shapes = override_shapes;
+    invalid_shapes[2] = {1, 1, 2, 3};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, invalid_shapes, override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "dynamic SDPA rejects inconsistent K/V sequence lengths");
+    invalid_shapes = override_shapes;
+    invalid_shapes[0] = {1, 1, 2, 2};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, invalid_shapes, override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "dynamic SDPA rejects runtime head-count changes");
+    invalid_shapes = override_shapes;
+    invalid_shapes[4] = {1, 2, 1, 1};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, invalid_shapes, override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "dynamic SDPA rejects a row output inconsistent with Q");
+
+    deepforge::compiler::CompilationResult rejected;
+    auto minimal = dynamic_sdpa_graph();
+    minimal["nodes"][0]["outputs"].erase("Stats");
+    minimal["nodes"][0]["outputs"].erase("Max");
+    minimal["nodes"][0]["outputs"].erase("Sum_exp");
+    minimal["nodes"][0]["generate_stats"] = false;
+    minimal["nodes"][0]["right_bound"] = nullptr;
+    status = compile_document(minimal, rejected);
+    tests.good(status, "compile minimal unmasked four-role SDPA override");
+    tests.check(
+        rejected.metadata.override_role_uids ==
+            std::vector<std::int64_t>({1301, 1302, 1303, 1304}),
+        "minimal SDPA override records only Q/K/V/O roles");
+    auto padded = dynamic_sdpa_graph();
+    padded["nodes"][0]["padding_mask"] = true;
+    status = compile_document(padded, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA overrides reject padding and sequence metadata");
+    auto bottom_right = dynamic_sdpa_graph();
+    bottom_right["nodes"][0]["diagonal_alignment"] = "BOTTOM_RIGHT";
+    status = compile_document(bottom_right, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA overrides reject bottom-right masking");
+    auto dropout = dynamic_sdpa_graph();
+    dropout["nodes"][0]["dropout_probability"] = 0.1;
+    status = compile_document(dropout, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA overrides reject probability dropout");
+    auto virtual_q = dynamic_sdpa_graph();
+    virtual_q["tensors"]["1305"]["is_virtual"] = true;
+    status = compile_document(virtual_q, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA overrides reject virtual role tensors");
+    auto composed = dynamic_sdpa_graph();
+    composed["tensors"]["1308"] = tensor("postprocessed", 1308,
+                                           {2, 2, 3, 3});
+    composed["nodes"].push_back(
+        Json{{"tag", "POINTWISE"},
+             {"name", "postprocess"},
+             {"inputs", Json::object({{"IN_0", 1304}})},
+             {"outputs", Json::object({{"OUT_0", 1308}})},
+             {"compute_data_type", "FLOAT"},
+             {"mode", "IDENTITY"},
+             {"axis", nullptr},
+             {"relu_lower_clip", nullptr},
+             {"relu_upper_clip", nullptr},
+             {"relu_lower_clip_slope", nullptr},
+             {"swish_beta", nullptr},
+             {"elu_alpha", nullptr},
+             {"softplus_beta", nullptr}});
+    status = compile_document(composed, rejected);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "SDPA overrides reject composed graphs");
 }
 
 void run_ragged_attention_tests(TestRunner& tests) {
@@ -2303,6 +2600,7 @@ int main() {
     run_rng_tests(tests);
     run_rope_tests(tests);
     run_feature_attention_tests(tests);
+    run_dynamic_attention_tests(tests);
     run_ragged_attention_tests(tests);
     run_paged_attention_tests(tests);
     run_block_mask_tests(tests);

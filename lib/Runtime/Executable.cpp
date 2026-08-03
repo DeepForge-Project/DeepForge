@@ -221,6 +221,63 @@ Status resolve_overrides(
                     "MATMUL override batch dimensions are not broadcast compatible");
             }
         }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kSdpaForward) {
+        auto const role_count = metadata.override_role_uids.size();
+        if (role_count < 4 || role_count > 7) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "SDPA override role metadata is malformed");
+        }
+        std::vector<ResolvedArgument const*> roles;
+        std::vector<compiler::TensorArgumentMetadata const*> compiled_roles;
+        roles.reserve(role_count);
+        compiled_roles.reserve(role_count);
+        for (auto uid : metadata.override_role_uids) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == uid;
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "SDPA override role UID is unresolved");
+            }
+            auto const index = static_cast<std::size_t>(
+                argument - metadata.arguments.begin());
+            roles.push_back(&resolved[index]);
+            compiled_roles.push_back(&*argument);
+        }
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const& dimensions = roles[role]->dimensions;
+            auto const& compiled = compiled_roles[role]->dimensions;
+            if (dimensions.size() != 4 || dimensions[1] != compiled[1] ||
+                dimensions[3] != compiled[3]) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "SDPA overrides may change only batch and sequence dimensions");
+            }
+        }
+        auto const& q = roles[0]->dimensions;
+        auto const& k = roles[1]->dimensions;
+        auto const& v = roles[2]->dimensions;
+        auto const& o = roles[3]->dimensions;
+        if (q[0] != k[0] || q[0] != v[0] || q[0] != o[0] ||
+            q[1] != o[1] || q[2] != o[2] || q[3] != k[3] ||
+            k[2] != v[2] || o[3] != v[3] || q[1] % k[1] != 0 ||
+            q[1] % v[1] != 0) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "SDPA Q/K/V/O runtime dimensions are inconsistent");
+        }
+        std::vector<std::int64_t> const row_dimensions{q[0], q[1], q[2], 1};
+        for (std::size_t role = 4; role < roles.size(); ++role) {
+            if (roles[role]->dimensions != row_dimensions) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "SDPA row outputs must have runtime dimensions [B,Hq,Sq,1]");
+            }
+        }
     }
     output = std::move(resolved);
     return Status::ok();

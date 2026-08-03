@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs and one standard-f32 `MATMUL` support shape override arrays, while MATMUL also has separate extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -77,15 +77,15 @@ documented in the runtime section. The pinned v1.24.0 schema exposes no paged
 backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the two override subsets below.
+block-scale and MXFP8 ports and the three override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
 
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
-supported by both operations. Dynamic execution outside the pointwise and
-MATMUL override subsets, explicit aliasing, unsupported pass-by-value
+supported by both operations. Dynamic execution outside the pointwise, MATMUL,
+and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
 descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
@@ -483,6 +483,31 @@ are legal when these relations remain true. DeepForge requires dimensions and
 byte spans to fit the serialized maxima even though the upstream sample can
 grow beyond a fake cache shape: the UID-map ABI has pointers but no allocation
 lengths with which to validate a larger descriptor.
+
+One dense standard-f32 `SDPA` forward can override external plain rank-4 Q, K,
+V, O and optional Stats/Max/Sum_exp descriptors. It may be unmasked or use
+top-left causal `right_bound=0`; bias, padding and sequence lengths, ALiBi,
+sliding or bottom-right windows, dropout, paging/ragged storage, sink/block
+masks, virtual tensors, and composed graphs are excluded. A typical complete
+call uses:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{
+    q_uid, k_uid, v_uid, o_uid, stats_uid, max_uid, sum_exp_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {b, hq, sq, dqk}, {b, hk, skv, dqk}, {b, hv, skv, dv},
+    {b, hq, sq, dv}, {b, hq, sq, 1}, {b, hq, sq, 1},
+    {b, hq, sq, 1}};
+deepforge::runtime::OverrideStrides override_strides{
+    q_strides, k_strides, v_strides, o_strides,
+    stats_strides, max_strides, sum_exp_strides};
+```
+
+Only B, Sq, and Skv may differ from the compiled descriptors; all head and
+embedding dimensions remain fixed. Q/K/V/O batches are equal, Q/O share Hq and
+Sq, K/V share Skv, Q/K share Dqk, O/V share Dv, and Hq must be divisible by Hk
+and Hv. Optional row outputs are `[B,Hq,Sq,1]`. Partial overrides are accepted
+only when the final descriptors preserve every relation.
 
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static. Conversely,

@@ -505,9 +505,21 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     selection. Artifact v6 records ordered A/B/C role UIDs while v1-v5 remain
     readable. Reload, malformed relation/graph cases, Release, ASan, and UBSan
     cover the increment without changing the public execute/workspace ABI.
+19. Completed C6.11 bounded SDPA-forward descriptor override. One dense
+    standard-f32 `SDPA` accepts Frontend Q/K/V/O and optional
+    Stats/Max/Sum_exp UID, shape, and stride arrays for external plain rank-4
+    tensors. Runtime validation allows only B, Sq, and Skv to change within
+    serialized dimension/byte-span maxima while preserving fixed heads,
+    embeddings, GQA, and row-output relations. The operation is unmasked or
+    top-left causal; optional attention features, virtual roles, and composed
+    graphs are rejected. Artifact v7 records ordered roles while v1-v6 remain
+    readable. Non-contiguous execution, reload, partial and malformed
+    overrides, Release, ASan, and UBSan cover the increment without changing
+    the public execute/workspace ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
-exact-pointwise and single standard-f32 MATMUL descriptor-override subsets.
+exact-pointwise, single standard-f32 MATMUL, and dense standard-f32
+SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to
 the legacy backend/filter path; neither has a reachable modern serialized-Graph

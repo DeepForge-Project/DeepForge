@@ -236,9 +236,12 @@ private globals, disappear from public arguments, and persist in the existing
 artifact objects.
 Standard f32 SDPA now supports ragged forward data/row
 outputs and backward data/gradients, independently paged K/V with compact page
-tables, forward block masks, and forward/backward sink tokens. Dynamic behavior
-outside the delivered pointwise and MATMUL descriptor-override subsets,
-threading, and broad fusion remain. `INT8x32`
+tables, forward block masks, and forward/backward sink tokens. One dense
+standard-f32 SDPA forward also accepts bounded descriptor overrides for B, Sq,
+and Skv while preserving fixed heads, embeddings, GQA, and row-output
+relations. Dynamic behavior outside the delivered pointwise, MATMUL, and
+SDPA-forward descriptor-override subsets, threading, and broad fusion remain.
+`INT8x32`
 and `F16x16` stay non-executable until a modern serialized-Graph producer defines
 both a reachable port and physical mapping.
 Paged backward cannot be represented by the pinned v1.24.0 serializer and is

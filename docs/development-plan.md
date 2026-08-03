@@ -455,9 +455,18 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     partial override；动态执行使用 runtime C/K extent 与 singleton-batch 选择。
     Artifact v6 记录有序 A/B/C role UID，同时保持 v1-v5 可读。Reload、错误关系/图、
     Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace ABI 不变。
+19. 已完成：C6.11 有界 SDPA-forward descriptor override。单个 dense 标准 f32
+    `SDPA` 接受 external plain rank-4 Q/K/V/O 与可选 Stats/Max/Sum_exp 的
+    Frontend UID、shape、stride array。Runtime 只允许 B、Sq、Skv 在序列化
+    dimension/byte-span 上界内变化，并保持固定 head、embedding、GQA 与 row-output
+    关系。Operation 可无 mask 或使用 top-left causal；其他可选 attention 特性、
+    virtual role 和组合图均被拒绝。Artifact v7 记录有序 role，同时保持 v1-v6
+    可读。非连续 stride 执行、reload、partial/错误 override、Release、ASan 和 UBSan
+    覆盖该增量，公开 execute/workspace ABI 不变。
 
-剩余 C6 功能工作是已交付 exact-pointwise 与单个标准 f32 MATMUL descriptor-override
-子集之外的 dynamic 行为。除 enum 转换外，固定 v1.24.0 中的 `F16x16` 只有
+剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL 与 dense 标准 f32
+SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
+v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`
 helper 只存在于 legacy backend/filter 路径；两者都没有可达的现代 serialized Graph
 port 加物理映射。它们是等待 producer 契约和生成 fixture 的兼容 gate，不应在本项目

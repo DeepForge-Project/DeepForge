@@ -15,7 +15,8 @@ inline constexpr std::uint32_t kStaticMetadataArtifactFormatVersion = 2;
 inline constexpr std::uint32_t kShapeOverrideArtifactFormatVersion = 3;
 inline constexpr std::uint32_t kRaggedArtifactFormatVersion = 4;
 inline constexpr std::uint32_t kRaggedSequenceArtifactFormatVersion = 5;
-inline constexpr std::uint32_t kArtifactFormatVersion = 6;
+inline constexpr std::uint32_t kMatmulOverrideArtifactFormatVersion = 6;
+inline constexpr std::uint32_t kArtifactFormatVersion = 7;
 inline constexpr double kDefaultAbsoluteTolerance = 1.0e-4;
 inline constexpr double kDefaultRelativeTolerance = 1.0e-3;
 

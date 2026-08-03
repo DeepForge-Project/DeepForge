@@ -38,6 +38,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
         case ShapeOverridePolicy::kNone:
         case ShapeOverridePolicy::kPointwiseExact:
         case ShapeOverridePolicy::kMatmul:
+        case ShapeOverridePolicy::kSdpaForward:
             return true;
     }
     return false;
@@ -107,6 +108,32 @@ bool valid_matmul_dimensions(TensorArgumentMetadata const& a,
         }
     }
     return true;
+}
+
+bool valid_sdpa_dimensions(
+    std::vector<TensorArgumentMetadata const*> const& roles) {
+    if (roles.size() < 4 || roles.size() > 7 ||
+        std::any_of(roles.begin(), roles.end(), [](auto const* argument) {
+            return argument->dimensions.size() != 4;
+        })) {
+        return false;
+    }
+    auto const& q = roles[0]->dimensions;
+    auto const& k = roles[1]->dimensions;
+    auto const& v = roles[2]->dimensions;
+    auto const& o = roles[3]->dimensions;
+    if (q[1] <= 0 || k[1] <= 0 || v[1] <= 0 ||
+        q[0] != k[0] || q[0] != v[0] || q[0] != o[0] ||
+        q[1] != o[1] || q[2] != o[2] || q[3] != k[3] ||
+        k[2] != v[2] || o[3] != v[3] || q[1] % k[1] != 0 ||
+        q[1] % v[1] != 0) {
+        return false;
+    }
+    std::vector<std::int64_t> const row_dimensions{q[0], q[1], q[2], 1};
+    return std::all_of(roles.begin() + 4, roles.end(),
+                       [&](auto const* argument) {
+                           return argument->dimensions == row_dimensions;
+                       });
 }
 
 }  // namespace
@@ -190,8 +217,9 @@ import::Status validate_graph_compile_metadata(
             "exact-pointwise override metadata requires inputs and one output");
     }
     if (metadata.override_policy != ShapeOverridePolicy::kMatmul &&
+        metadata.override_policy != ShapeOverridePolicy::kSdpaForward &&
         !metadata.override_role_uids.empty()) {
-        return fail("override role UIDs require the MATMUL policy");
+        return fail("override role UIDs require a role-based policy");
     }
     if (metadata.override_policy == ShapeOverridePolicy::kMatmul) {
         if (metadata.arguments.size() != 3 ||
@@ -225,6 +253,44 @@ import::Status validate_graph_compile_metadata(
             c->storage_policy != TensorStoragePolicy::kStrided ||
             !valid_matmul_dimensions(*a, *b, *c)) {
             return fail("MATMUL override roles or maximum shapes are invalid");
+        }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kSdpaForward) {
+        auto const role_count = metadata.override_role_uids.size();
+        if (role_count < 4 || role_count > 7 ||
+            metadata.arguments.size() != role_count ||
+            std::set<std::int64_t>(metadata.override_role_uids.begin(),
+                                   metadata.override_role_uids.end())
+                    .size() != role_count) {
+            return fail(
+                "SDPA override metadata requires distinct Q/K/V/O and optional row-output role UIDs");
+        }
+        std::vector<TensorArgumentMetadata const*> roles;
+        roles.reserve(role_count);
+        for (auto uid : metadata.override_role_uids) {
+            auto const role = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == uid;
+                });
+            if (role == metadata.arguments.end()) {
+                return fail("SDPA override role UID is unresolved");
+            }
+            roles.push_back(&*role);
+        }
+        bool valid_roles = valid_sdpa_dimensions(roles);
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const* argument = roles[role];
+            valid_roles =
+                valid_roles &&
+                argument->data_type == import::DataType::kFloat32 &&
+                argument->storage_policy == TensorStoragePolicy::kStrided &&
+                argument->access ==
+                    (role < 3 ? TensorAccess::kRead : TensorAccess::kWrite) &&
+                (role >= 4 || argument->strides[3] == 1);
+        }
+        if (!valid_roles) {
+            return fail("SDPA override roles or maximum shapes are invalid");
         }
     }
     for (auto const& argument : metadata.arguments) {

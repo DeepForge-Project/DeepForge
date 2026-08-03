@@ -1301,6 +1301,38 @@ Status emit_flat_loop(::mlir::OpBuilder& builder,
     return Status::ok();
 }
 
+template <typename Body>
+Status emit_dynamic_loop(::mlir::OpBuilder& builder,
+                         ::mlir::Location location,
+                         ::mlir::Value extent_source,
+                         std::size_t rank,
+                         Body&& body) {
+    llvm::SmallVector<::mlir::Value> lowers;
+    llvm::SmallVector<::mlir::Value> uppers;
+    llvm::SmallVector<::mlir::Value> steps;
+    lowers.reserve(rank);
+    uppers.reserve(rank);
+    steps.reserve(rank);
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+        lowers.push_back(index_constant(builder, location, 0));
+        uppers.push_back(::mlir::memref::DimOp::create(
+            builder, location, extent_source,
+            index_constant(builder, location,
+                           static_cast<std::int64_t>(axis))));
+        steps.push_back(index_constant(builder, location, 1));
+    }
+    auto loop_nest = ::mlir::scf::buildLoopNest(
+        builder, location, lowers, uppers, steps,
+        [&](::mlir::OpBuilder& body_builder,
+            ::mlir::Location body_location,
+            ::mlir::ValueRange induction_variables) {
+            body(body_builder, body_location,
+                 llvm::SmallVector<::mlir::Value>(induction_variables));
+        });
+    builder.setInsertionPointAfter(loop_nest.loops.front());
+    return Status::ok();
+}
+
 ::mlir::Value linear_index(
     ::mlir::OpBuilder& builder,
     ::mlir::Location location,
@@ -1588,13 +1620,13 @@ Status emit_rope(OperationTag tag,
 template <typename Body>
 ::mlir::Value reduce_extent(::mlir::OpBuilder& builder,
                             ::mlir::Location location,
-                            std::int64_t extent,
+                            ::mlir::Value extent,
                             ::mlir::Value initial,
                             Body&& body) {
     auto reduction = ::mlir::scf::buildLoopNest(
         builder, location,
         ::mlir::ValueRange{index_constant(builder, location, 0)},
-        ::mlir::ValueRange{index_constant(builder, location, extent)},
+        ::mlir::ValueRange{extent},
         ::mlir::ValueRange{index_constant(builder, location, 1)},
         ::mlir::ValueRange{initial},
         [&](::mlir::OpBuilder& reduction_builder,
@@ -1606,6 +1638,17 @@ template <typename Body>
         });
     builder.setInsertionPointAfter(reduction.loops.front());
     return reduction.results.front();
+}
+
+template <typename Body>
+::mlir::Value reduce_extent(::mlir::OpBuilder& builder,
+                            ::mlir::Location location,
+                            std::int64_t extent,
+                            ::mlir::Value initial,
+                            Body&& body) {
+    return reduce_extent(builder, location,
+                         index_constant(builder, location, extent), initial,
+                         std::forward<Body>(body));
 }
 
 template <typename Body>
@@ -2207,6 +2250,7 @@ SoftmaxRow compute_softmax_row(
     ::mlir::Location location,
     AttentionDescription const& attention,
     AttentionEmissionValues const& emission_values,
+    ::mlir::Value kv_extent,
     llvm::SmallVector<::mlir::Value> const& row_indices,
     std::map<std::int64_t, ::mlir::Value> const& values) {
     ::mlir::Value sink;
@@ -2222,7 +2266,7 @@ SoftmaxRow compute_softmax_row(
         initial_maximum = sink;
     }
     auto maximum = reduce_extent(
-        builder, location, attention.s_kv,
+        builder, location, kv_extent,
         initial_maximum,
         [&](::mlir::OpBuilder& reduction_builder,
             ::mlir::Location reduction_location, ::mlir::Value kv,
@@ -2243,7 +2287,7 @@ SoftmaxRow compute_softmax_row(
             ::mlir::arith::SubFOp::create(builder, location, sink, maximum));
     }
     auto sum = reduce_extent(
-        builder, location, attention.s_kv,
+        builder, location, kv_extent,
         initial_sum,
         [&](::mlir::OpBuilder& reduction_builder,
             ::mlir::Location reduction_location, ::mlir::Value kv,
@@ -2374,7 +2418,8 @@ Status emit_sdpa_forward(
     ::mlir::Location location,
     GenericOperationDesc const& operation,
     AttentionDescription const& attention,
-    std::map<std::int64_t, ::mlir::Value> const& values) {
+    std::map<std::int64_t, ::mlir::Value> const& values,
+    bool dynamic) {
     auto execution_values = values;
     for (auto const& [uid, tensor] :
          std::array<std::pair<std::int64_t, TensorDesc const*>, 4>{
@@ -2408,6 +2453,12 @@ Status emit_sdpa_forward(
     auto status = emit_rng_dump(builder, location, attention, emission_values,
                                 execution_values);
     if (status.is_bad()) return status;
+    ::mlir::Value kv_extent =
+        dynamic
+            ? ::mlir::memref::DimOp::create(
+                  builder, location, execution_values.at(attention.k_uid),
+                  index_constant(builder, location, 2))
+            : index_constant(builder, location, attention.s_kv);
 
     std::int64_t max_uid = 0;
     std::int64_t sum_uid = 0;
@@ -2424,104 +2475,110 @@ Status emit_sdpa_forward(
     if (attention.stats != nullptr || has_max || has_sum) {
         std::vector<std::int64_t> const row_dimensions{
             attention.q->dim[0], attention.q->dim[1], attention.q->dim[2]};
-        status = emit_flat_loop(
-            builder, location, row_dimensions, "SDPA.softmax_rows",
-            [&](::mlir::OpBuilder& body_builder,
-                ::mlir::Location body_location,
-                llvm::SmallVector<::mlir::Value> const& row_indices) {
-                auto row = compute_softmax_row(
-                    body_builder, body_location, attention, emission_values,
-                    row_indices, execution_values);
-                llvm::SmallVector<::mlir::Value> output_indices{
-                    row_indices[0], row_indices[1], row_indices[2],
-                    index_constant(body_builder, body_location, 0)};
-                auto valid = query_position_is_valid(
-                    body_builder, body_location, attention, output_indices,
-                    execution_values);
-                if (attention.stats != nullptr) {
-                    auto stats = ::mlir::arith::AddFOp::create(
-                        body_builder, body_location, row.maximum,
-                        ::mlir::math::LogOp::create(body_builder,
-                                                    body_location,
-                                                    row.sum_exp));
-                    guarded_attention_store(
-                        body_builder, body_location, valid, stats,
-                        attention.stats_uid, *attention.stats, output_indices,
-                        execution_values);
-                }
-                if (has_max) {
-                    guarded_attention_store(
-                        body_builder, body_location, valid, row.maximum,
-                        max_uid, *max_tensor, output_indices,
-                        execution_values);
-                }
-                if (has_sum) {
-                    guarded_attention_store(
-                        body_builder, body_location, valid, row.sum_exp,
-                        sum_uid, *sum_tensor, output_indices,
-                        execution_values);
-                }
-            });
-        if (status.is_bad()) return status;
-    }
-
-    return emit_flat_loop(
-        builder, location, attention.o->dim, "SDPA.O",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& output_indices) {
-            llvm::SmallVector<::mlir::Value> row_indices{
-                output_indices[0], output_indices[1], output_indices[2]};
+        auto emit_row = [&](::mlir::OpBuilder& body_builder,
+                            ::mlir::Location body_location,
+                            llvm::SmallVector<::mlir::Value> const&
+                                row_indices) {
             auto row = compute_softmax_row(
                 body_builder, body_location, attention, emission_values,
-                row_indices, execution_values);
-            auto const value_head = query_to_source_head(
-                body_builder, body_location, output_indices[1],
-                attention.q->dim[1], attention.v->dim[1]);
-            auto result = reduce_extent(
-                body_builder, body_location, attention.s_kv,
-                float_constant(body_builder, body_location, 0.0F),
-                [&](::mlir::OpBuilder& reduction_builder,
-                    ::mlir::Location reduction_location, ::mlir::Value kv,
-                    ::mlir::Value accumulator) {
-                    llvm::SmallVector<::mlir::Value> score_indices{
-                        output_indices[0], output_indices[1],
-                        output_indices[2], kv};
-                    auto probability = forward_probability(
-                        reduction_builder, reduction_location, attention,
-                        emission_values, score_indices, row,
-                        execution_values);
-                    auto dropout_mask = dropout_mask_value(
-                        reduction_builder, reduction_location, attention,
-                        emission_values, score_indices, execution_values);
-                    auto weighted_probability = ::mlir::arith::MulFOp::create(
-                        reduction_builder, reduction_location,
-                        ::mlir::arith::MulFOp::create(
-                            reduction_builder, reduction_location,
-                            probability, dropout_mask),
-                        emission_values.dropout_scale);
-                    llvm::SmallVector<::mlir::Value> v_indices{
-                        output_indices[0], value_head, kv, output_indices[3]};
-                    auto source_valid = score_is_valid(
-                        reduction_builder, reduction_location, attention,
-                        score_indices, execution_values);
-                    auto v_value = guarded_attention_load(
-                        reduction_builder, reduction_location, source_valid,
-                        attention.v_uid, *attention.v, attention.page_v,
-                        attention.page_v_uid, v_indices, execution_values);
-                    return ::mlir::arith::AddFOp::create(
-                        reduction_builder, reduction_location, accumulator,
-                        ::mlir::arith::MulFOp::create(
-                            reduction_builder, reduction_location,
-                            weighted_probability, v_value));
-                });
+                kv_extent, row_indices, execution_values);
+            llvm::SmallVector<::mlir::Value> output_indices{
+                row_indices[0], row_indices[1], row_indices[2],
+                index_constant(body_builder, body_location, 0)};
             auto valid = query_position_is_valid(
                 body_builder, body_location, attention, output_indices,
                 execution_values);
-            guarded_attention_store(
-                body_builder, body_location, valid, result, attention.o_uid,
-                *attention.o, output_indices, execution_values);
-        });
+            if (attention.stats != nullptr) {
+                auto stats = ::mlir::arith::AddFOp::create(
+                    body_builder, body_location, row.maximum,
+                    ::mlir::math::LogOp::create(
+                        body_builder, body_location, row.sum_exp));
+                guarded_attention_store(
+                    body_builder, body_location, valid, stats,
+                    attention.stats_uid, *attention.stats, output_indices,
+                    execution_values);
+            }
+            if (has_max) {
+                guarded_attention_store(
+                    body_builder, body_location, valid, row.maximum, max_uid,
+                    *max_tensor, output_indices, execution_values);
+            }
+            if (has_sum) {
+                guarded_attention_store(
+                    body_builder, body_location, valid, row.sum_exp, sum_uid,
+                    *sum_tensor, output_indices, execution_values);
+            }
+        };
+        status = dynamic
+                     ? emit_dynamic_loop(
+                           builder, location,
+                           execution_values.at(attention.q_uid), 3, emit_row)
+                     : emit_flat_loop(builder, location, row_dimensions,
+                                      "SDPA.softmax_rows", emit_row);
+        if (status.is_bad()) return status;
+    }
+
+    auto emit_output = [&](::mlir::OpBuilder& body_builder,
+                           ::mlir::Location body_location,
+                           llvm::SmallVector<::mlir::Value> const&
+                               output_indices) {
+        llvm::SmallVector<::mlir::Value> row_indices{
+            output_indices[0], output_indices[1], output_indices[2]};
+        auto row = compute_softmax_row(
+            body_builder, body_location, attention, emission_values, kv_extent,
+            row_indices, execution_values);
+        auto const value_head = query_to_source_head(
+            body_builder, body_location, output_indices[1],
+            attention.q->dim[1], attention.v->dim[1]);
+        auto result = reduce_extent(
+            body_builder, body_location, kv_extent,
+            float_constant(body_builder, body_location, 0.0F),
+            [&](::mlir::OpBuilder& reduction_builder,
+                ::mlir::Location reduction_location, ::mlir::Value kv,
+                ::mlir::Value accumulator) {
+                llvm::SmallVector<::mlir::Value> score_indices{
+                    output_indices[0], output_indices[1], output_indices[2],
+                    kv};
+                auto probability = forward_probability(
+                    reduction_builder, reduction_location, attention,
+                    emission_values, score_indices, row, execution_values);
+                auto dropout_mask = dropout_mask_value(
+                    reduction_builder, reduction_location, attention,
+                    emission_values, score_indices, execution_values);
+                auto weighted_probability = ::mlir::arith::MulFOp::create(
+                    reduction_builder, reduction_location,
+                    ::mlir::arith::MulFOp::create(
+                        reduction_builder, reduction_location, probability,
+                        dropout_mask),
+                    emission_values.dropout_scale);
+                llvm::SmallVector<::mlir::Value> v_indices{
+                    output_indices[0], value_head, kv, output_indices[3]};
+                auto source_valid = score_is_valid(
+                    reduction_builder, reduction_location, attention,
+                    score_indices, execution_values);
+                auto v_value = guarded_attention_load(
+                    reduction_builder, reduction_location, source_valid,
+                    attention.v_uid, *attention.v, attention.page_v,
+                    attention.page_v_uid, v_indices, execution_values);
+                return ::mlir::arith::AddFOp::create(
+                    reduction_builder, reduction_location, accumulator,
+                    ::mlir::arith::MulFOp::create(
+                        reduction_builder, reduction_location,
+                        weighted_probability, v_value));
+            });
+        auto valid = query_position_is_valid(
+            body_builder, body_location, attention, output_indices,
+            execution_values);
+        guarded_attention_store(body_builder, body_location, valid, result,
+                                attention.o_uid, *attention.o, output_indices,
+                                execution_values);
+    };
+    return dynamic
+               ? emit_dynamic_loop(builder, location,
+                                   execution_values.at(attention.o_uid), 4,
+                                   emit_output)
+               : emit_flat_loop(builder, location, attention.o->dim, "SDPA.O",
+                                emit_output);
 }
 
 ::mlir::Value output_gradient_dot(
@@ -2940,7 +2997,9 @@ Status emit_attention(
     if (status.is_bad()) return status;
     if (tag == OperationTag::kSdpa) {
         return emit_sdpa_forward(builder, location, operation, attention,
-                                 values);
+                                 values,
+                                 graph.context.is_override_shape_enabled
+                                     .value_or(false));
     }
     return emit_sdpa_backward(builder, location, attention, values);
 }

@@ -7,14 +7,16 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `6`; the reader also
-accepts version `5` ragged-sequence artifacts, version `4` ragged-storage
+generated kernel. The current writer emits format version `7`; the reader also
+accepts version `6` MATMUL-override artifacts, version `5` ragged-sequence
+artifacts, version `4` ragged-storage
 artifacts, version `3` shape-override artifacts, version `2` static-metadata
 artifacts, and version `1` Conv2D artifacts. For version `1`, it reconstructs
 the argument table; versions `1` and `2` default all dynamic and override
 metadata to disabled. Versions `1` through `3` default tensor storage to plain
 strided addressing, version `4` defaults every ragged sequence divisor to one,
-and versions `1` through `5` default override role UIDs to empty.
+and versions `1` through `5` default override role UIDs to empty. Version `6`
+retains its ordered MATMUL role UIDs.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -44,7 +46,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 6
+u32 format_version = 7
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -55,9 +57,9 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 exact pointwise, 2 MATMUL
-u32 override_role_count      # 3 for policy 2, otherwise 0
-i64 override_role_uids[override_role_count] # ordered A, B, C
+u32 shape_override_policy    # 0 none, 1 exact pointwise, 2 MATMUL, 3 SDPA FWD
+u32 override_role_count      # 3 for policy 2; 4..7 for policy 3; otherwise 0
+i64 override_role_uids[override_role_count] # policy-specific order below
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -156,8 +158,16 @@ Version `6` adds an ordered override-role UID list. Policy `2` is limited to a
 single standard-f32 MATMUL and stores exactly three distinct UIDs in A, B, C
 order. The runtime uses these roles after artifact reload to validate M/N/K
 relations and batch broadcasting for partial or complete descriptor overrides.
-Other policies require an empty role list. Versions `1` through `5` cannot
-encode policy `2` and are read with an empty role list.
+Policies `0` and `1` require an empty role list. Versions `1` through `5`
+cannot encode policy `2` and are read with an empty role list.
+
+Version `7` adds policy `3` for one dense standard-f32 SDPA forward operation.
+It stores distinct Q, K, V, O UIDs followed, when present, by Stats, Max, and
+Sum_exp in that order. Runtime descriptors may change only B, Sq, and Skv;
+heads and embedding dimensions stay equal to their compiled values. Reloaded
+artifacts validate Q/K/V/O batch, sequence, embedding, GQA, and optional
+`[B,Hq,Sq,1]` row-output relations before dispatch. Version `6` cannot encode
+policy `3` and rejects it while preserving policy `2` role metadata.
 
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
@@ -202,5 +212,5 @@ inconsistent shape or padding, invalid workspace alignment, ranges or
 lifetimes, invalid argument tables or adapter payloads, invalid variant symbols
 or features, duplicate variants, empty objects, truncation, trailing payload,
 and checksum mismatch. Changes to the top-level encoding must increment the
-format version. Versions `1` through `5` have frozen field order and semantics
-and are read-only. New compilations write version `6`.
+format version. Versions `1` through `6` have frozen field order and semantics
+and are read-only. New compilations write version `7`.

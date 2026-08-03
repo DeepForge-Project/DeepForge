@@ -273,7 +273,12 @@ External argument 是只读 input 加唯一只写 output；virtual 中间值通�
 packed workspace view 获得公共 runtime shape。Shape override 也支持单个标准 f32
 `MATMUL`，其 A/B/C 必须是相同且至少为 2 的 rank 的 external plain tensor。最终
 descriptor 必须保持 M/N/K 关系与 batch broadcast；不支持组合图、virtual tensor 或
-同时使用 M/N/K extent 端口。编译 dimension 是上界；runtime dimension 必须为正且
+同时使用 M/N/K extent 端口。Shape override 还支持单个 dense 标准 f32 `SDPA`
+forward，其 Q/K/V/O 和可选 Stats/Max/Sum_exp 必须是 external plain tensor。它可
+无 mask 或使用 top-left causal，只能改变 B、Sq、Skv；head、embedding、GQA 和全部
+跨 tensor 关系保持固定。Padding/sequence metadata、bias、ALiBi、其他 window、
+dropout、paging/ragged storage、sink/block mask、virtual tensor 和组合图均被拒绝。
+编译 dimension 是上界；runtime dimension 必须为正且
 不超过该上界，runtime stride 必须满足当前支持的正且不重叠条件，每个 external
 storage span 必须位于编译 bound 内。dynamic flag 单独出现时只持久化 metadata，
 不改变静态 descriptor 语义。
@@ -282,9 +287,9 @@ MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们�
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
 value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
 子集外的 ragged tensor，以及固定版本现代 Graph producer 未生成的物理 reorder
-契约延后。新 artifact 使用 format v6 记录有序 MATMUL override role，同时保留 v4
-ragged reference 和 v5 逻辑 sequence divisor；v1-v5 继续可读，其中 v4 divisor
-默认为 1，v6 之前的 role list 为空。
+契约延后。新 artifact 使用 format v7 记录有序 SDPA-forward override role，同时
+保留 v6 MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v6 继续
+可读，其中 v4 divisor 默认为 1，v6 之前的 role list 为空。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集
 以外的属性组合返回 `kUnsupportedOperation`，而不是 `kUnsupportedNode`。

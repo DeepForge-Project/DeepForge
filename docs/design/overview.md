@@ -204,8 +204,10 @@ pass-by-value payload 使用相同 descriptor 子集，并在根级 `pass_by_val
 精确 typed Frontend variant；它被 lowering 为 graph-owned private global，从公开
 argument 中移除，并持久化在现有 artifact object 中。标准 f32 SDPA 已
 支持 ragged forward data/row output 和 backward data/gradient、带紧凑 page table
-的独立 paged K/V、forward block mask 及 forward/backward sink token。已交付的
-pointwise 和 MATMUL descriptor-override 子集之外的 dynamic 行为、threading 和
+的独立 paged K/V、forward block mask 及 forward/backward sink token。
+单个 dense 标准 f32 SDPA forward 还可在保持固定 head、embedding、GQA 和 row-output
+关系时，对 B、Sq、Skv 使用有界 descriptor override。已交付的 pointwise、MATMUL
+和 SDPA-forward descriptor-override 子集之外的 dynamic 行为、threading 和
 广泛 fusion 仍待实现。`INT8x32`/`F16x16`
 需等待现代 serialized Graph producer 同时定义可达端口和物理映射，当前保持不可执行。
 固定使用的 v1.24.0 serializer 无法表达 paged backward，因此它属于未来 schema

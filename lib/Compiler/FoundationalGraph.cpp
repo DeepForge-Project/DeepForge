@@ -1202,6 +1202,76 @@ Status validate_shape_override_subset(
         return Status::ok();
     }
     if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kConcatenate) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        if (operation == nullptr || !operation->input_lists.empty() ||
+            operation->inputs.empty() || operation->inputs.size() > 63 ||
+            operation->outputs.size() != 1 ||
+            !operation->outputs.contains("Y")) {
+            return unsupported(
+                "nodes[0]",
+                "runtime CONCATENATE overrides require 1..63 indexed inputs and Y");
+        }
+        std::int64_t axis = 0;
+        std::optional<std::int64_t> in_place_index;
+        if (!read_integer_attribute(*operation, "axis", axis) ||
+            !read_optional_integer_attribute(*operation, "in_place_index",
+                                             in_place_index)) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "CONCATENATE override attributes are malformed");
+        }
+        if (in_place_index) {
+            return unsupported(
+                "nodes[0]",
+                "runtime CONCATENATE overrides do not support in-place aliasing");
+        }
+
+        std::vector<std::int64_t> concatenate_roles;
+        concatenate_roles.reserve(operation->inputs.size() + 1);
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime CONCATENATE overrides require external plain f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            concatenate_roles.push_back(uid);
+            return Status::ok();
+        };
+        for (std::size_t input = 0; input < operation->inputs.size(); ++input) {
+            auto const port = std::to_string(input);
+            auto const item = operation->inputs.find(port);
+            if (item == operation->inputs.end()) {
+                return fail(ErrorCode::kInvalidValue, "nodes[0].inputs",
+                            "CONCATENATE input ports must be contiguous from zero");
+            }
+            auto status = check_role(item->second,
+                                     "nodes[0].inputs." + port);
+            if (status.is_bad()) return status;
+        }
+        auto status = check_role(operation->outputs.at("Y"),
+                                 "nodes[0].outputs.Y");
+        if (status.is_bad()) return status;
+        policy = ShapeOverridePolicy::kConcatenate;
+        role_uids = std::move(concatenate_roles);
+        axis_map.clear();
+        axis_map.push_back(axis);
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
         graph.nodes.front().tag == OperationTag::kReduction) {
         auto const* operation =
             std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
@@ -2239,32 +2309,56 @@ Status emit_concatenate(
     auto const y_uid = std::get<std::int64_t>(operation.outputs.at("Y"));
     std::int64_t axis = 0;
     (void)read_integer_attribute(operation, "axis", axis);
-    std::int64_t axis_offset = 0;
+    auto const dynamic =
+        graph.context.is_override_shape_enabled.value_or(false);
+    std::int64_t static_axis_offset = 0;
+    ::mlir::Value dynamic_axis_offset;
+    if (dynamic) {
+        dynamic_axis_offset = index_constant(builder, location, 0);
+    }
     for (std::size_t input_index = 0;
          input_index < operation.inputs.size(); ++input_index) {
         auto const uid = std::get<std::int64_t>(
             operation.inputs.at(std::to_string(input_index)));
         auto const& input = graph.tensors.at(uid);
-        auto status = emit_flat_loop(
-            builder, location, input.dim, "CONCATENATE",
-            [&](::mlir::OpBuilder& body_builder,
-                ::mlir::Location body_location,
-                llvm::SmallVector<::mlir::Value> const& input_indices) {
-                auto output_indices = input_indices;
-                auto const axis_index = static_cast<std::size_t>(axis);
-                output_indices[axis_index] = ::mlir::arith::AddIOp::create(
-                    body_builder, body_location, input_indices[axis_index],
-                    index_constant(body_builder, body_location, axis_offset));
-                auto value = ::mlir::memref::LoadOp::create(
-                    body_builder, body_location, values.at(uid), input_indices);
-                ::mlir::memref::StoreOp::create(
-                    body_builder, body_location, value, values.at(y_uid),
-                    output_indices);
-            });
+        auto body = [&](::mlir::OpBuilder& body_builder,
+                        ::mlir::Location body_location,
+                        llvm::SmallVector<::mlir::Value> const& input_indices) {
+            auto output_indices = input_indices;
+            auto const axis_index = static_cast<std::size_t>(axis);
+            auto offset =
+                dynamic
+                    ? dynamic_axis_offset
+                    : index_constant(body_builder, body_location,
+                                     static_axis_offset);
+            output_indices[axis_index] = ::mlir::arith::AddIOp::create(
+                body_builder, body_location, input_indices[axis_index],
+                offset);
+            auto value = ::mlir::memref::LoadOp::create(
+                body_builder, body_location, values.at(uid), input_indices);
+            ::mlir::memref::StoreOp::create(
+                body_builder, body_location, value, values.at(y_uid),
+                output_indices);
+        };
+        auto status =
+            dynamic
+                ? emit_dynamic_loop(builder, location, values.at(uid),
+                                    input.dim.size(), body)
+                : emit_flat_loop(builder, location, input.dim, "CONCATENATE",
+                                 body);
         if (status.is_bad()) {
             return status;
         }
-        axis_offset += input.dim[static_cast<std::size_t>(axis)];
+        if (dynamic) {
+            auto extent = ::mlir::memref::DimOp::create(
+                builder, location, values.at(uid),
+                index_constant(builder, location, axis));
+            dynamic_axis_offset = ::mlir::arith::AddIOp::create(
+                builder, location, dynamic_axis_offset, extent);
+        } else {
+            static_axis_offset +=
+                input.dim[static_cast<std::size_t>(axis)];
+        }
     }
     return Status::ok();
 }

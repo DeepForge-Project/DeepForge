@@ -369,6 +369,15 @@ fixed. Virtual, pass-by-value, ragged, reordered, or additional tensors are
 rejected, as are composed graphs. Metadata records X/Y role UIDs and the
 output-axis to input-axis permutation.
 
+The CONCATENATE policy accepts exactly one standard-f32 operation with one
+through 63 inputs on contiguous numeric ports `0..N-1`. Every input and Y is an
+external plain strided tensor with the same fixed rank from one through 64;
+inputs are read-only and Y is write-only. The serialized non-negative axis is
+fixed. In-place mode, virtual, pass-by-value, ragged, reordered, or additional
+tensors are rejected, as are composed graphs. All role UIDs are distinct.
+Metadata records the input role UIDs in numeric port order, then Y, and records
+the concatenation axis.
+
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
 external argument UIDs. Each supplied shape preserves rank, has positive
@@ -398,10 +407,13 @@ runtime X and Y extents remain equal. Complete and partial overrides preserve
 this classification. For TRANSPOSE, every final descriptor pair satisfies
 `Y[i] == X[permutation[i]]`. The permutation and rank cannot change; complete
 and partial overrides may change dimensions and strides only when that final
-relation still holds.
+relation still holds. For CONCATENATE, every final input and Y descriptor keeps
+the same rank. All extents are equal on every non-concatenation axis, and the
+checked sum of all input extents on the fixed concatenation axis equals Y.
+Complete and partial overrides must preserve both relations.
 
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
-loop bounds under all six policies. Runtime descriptors carry the resolved values
+loop bounds under all seven policies. Runtime descriptors carry the resolved values
 to in-process and artifact-loaded objects. Pointwise virtual intermediates use
 the common runtime dimensions and internal packed views over workspace sized
 for serialized maxima. MATMUL loops use runtime C extents, runtime K, and
@@ -411,6 +423,8 @@ the runtime Y extent and map each lexicographic linear index back into the
 runtime X descriptor. REDUCTION loops use runtime Y output extents and runtime X
 reduction extents; AVG derives its divisor from the latter. TRANSPOSE loops use
 runtime Y extents and map each output index through the fixed permutation to X.
+CONCATENATE loops use each runtime input extent and a checked cumulative offset
+on the fixed axis while using Y extents on all other axes.
 Alias checks use
 resolved external byte spans. Workspace
 remains statically bounded, and workspace query performs the same validation
@@ -420,10 +434,11 @@ Artifact formats `3` through `5` record both context flags and pointwise policy
 `1`; v6 adds MATMUL policy `2` and its ordered role UIDs; v7 adds SDPA-forward
 policy `3` using the same role-list field; v8 adds logical-RESHAPE policy `4`
 with X/Y role UIDs; v9 adds REDUCTION policy `5` with X/Y role UIDs; v10 adds
-TRANSPOSE policy `6`, X/Y role UIDs, and the fixed permutation. The v1/v2
+TRANSPOSE policy `6`, X/Y role UIDs, and the fixed permutation; v11 adds
+CONCATENATE policy `7`, ordered input/Y role UIDs, and the fixed axis. The v1/v2
 readers default override metadata to disabled, v1-v5 readers default role UIDs
-to empty, and v6-v9 remain readable with their role metadata while old formats
-default the axis map to empty. The
+to empty, and v6-v10 remain readable with their role metadata while formats
+before v10 default the policy-specific axis map to empty. The
 pinned Frontend MATMUL sample can execute shapes larger than its fake cache
 shape, but DeepForge deliberately requires every runtime dimension and byte
 span to fit the serialized maxima: the public UID-map ABI carries pointers, not
@@ -488,7 +503,7 @@ sink input.
 Artifact format `5` introduced the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
 one; compact page tables use the corresponding cache block size. Formats v6
-through v10 retain those fields, and the reader accepts v1-v9 with v4 divisors
+through v11 retain those fields, and the reader accepts v1-v10 with v4 divisors
 defaulted to one.
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value Extension

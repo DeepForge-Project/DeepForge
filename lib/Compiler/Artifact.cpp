@@ -727,6 +727,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version != kSdpaOverrideArtifactFormatVersion &&
         version != kReshapeOverrideArtifactFormatVersion &&
         version != kReductionOverrideArtifactFormatVersion &&
+        version != kTransposeOverrideArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -759,6 +760,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version == kSdpaOverrideArtifactFormatVersion ||
         version == kReshapeOverrideArtifactFormatVersion ||
         version == kReductionOverrideArtifactFormatVersion ||
+        version == kTransposeOverrideArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -778,8 +780,10 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             maximum_policy = ShapeOverridePolicy::kReshape;
         } else if (version == kReductionOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kReduction;
-        } else if (version == kArtifactFormatVersion) {
+        } else if (version == kTransposeOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kTranspose;
+        } else if (version == kArtifactFormatVersion) {
+            maximum_policy = ShapeOverridePolicy::kConcatenate;
         }
         if (override_policy >
             static_cast<std::uint32_t>(maximum_policy)) {
@@ -793,6 +797,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             version == kSdpaOverrideArtifactFormatVersion ||
             version == kReshapeOverrideArtifactFormatVersion ||
             version == kReductionOverrideArtifactFormatVersion ||
+            version == kTransposeOverrideArtifactFormatVersion ||
             version == kArtifactFormatVersion) {
             std::uint32_t role_count = 0;
             if (!reader.read_u32(role_count) || role_count > 64) {
@@ -805,7 +810,8 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                 }
             }
         }
-        if (version == kArtifactFormatVersion) {
+        if (version == kTransposeOverrideArtifactFormatVersion ||
+            version == kArtifactFormatVersion) {
             std::uint32_t axis_count = 0;
             if (!reader.read_u32(axis_count) || axis_count > 64) {
                 return parse_failure("override axis metadata is malformed");
@@ -843,6 +849,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                  version == kSdpaOverrideArtifactFormatVersion ||
                  version == kReshapeOverrideArtifactFormatVersion ||
                  version == kReductionOverrideArtifactFormatVersion ||
+                 version == kTransposeOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
@@ -857,6 +864,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                  version == kSdpaOverrideArtifactFormatVersion ||
                  version == kReshapeOverrideArtifactFormatVersion ||
                  version == kReductionOverrideArtifactFormatVersion ||
+                 version == kTransposeOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_i64(argument.ragged_sequence_divisor) ||
                  argument.ragged_sequence_divisor <= 0)) {

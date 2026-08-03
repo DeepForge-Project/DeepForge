@@ -6,8 +6,9 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `10`；reader
-同时接受版本 `9` 的 REDUCTION-override artifact、版本 `8` 的 RESHAPE-override artifact、版本 `7` 的 SDPA-override artifact、
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `11`；reader
+同时接受版本 `10` 的 TRANSPOSE-override artifact、版本 `9` 的 REDUCTION-override
+artifact、版本 `8` 的 RESHAPE-override artifact、版本 `7` 的 SDPA-override artifact、
 版本 `6` 的 MATMUL-override artifact、版本 `5` 的 ragged-sequence
 artifact、版本 `4` 的 ragged-storage artifact、
 版本 `3` 的 shape-override artifact、版本 `2` 的静态 metadata artifact 和版本 `1`
@@ -16,8 +17,8 @@ dynamic/override metadata 均默认为关闭，版本 `1` 至 `3` 的 tensor sto
 普通 strided addressing，版本 `4` 的全部 ragged sequence divisor 默认为 1，版本
 `1` 至 `5` 的 override role UID 默认为空；版本 `6` 保留其有序 MATMUL role UID，
 版本 `7` 保留其有序 SDPA-forward role UID，版本 `8` 保留其有序 LOGICAL RESHAPE
-role UID，版本 `9` 保留其有序 REDUCTION role UID；版本 `1` 至 `9` 的 TRANSPOSE
-axis map 默认为空。
+role UID，版本 `9` 保留其有序 REDUCTION role UID，版本 `10` 保留其有序 TRANSPOSE
+role UID 和 permutation；版本 `1` 至 `9` 的 policy-specific axis map 默认为空。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -42,7 +43,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 10
+u32 format_version = 11
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -53,11 +54,11 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE
-u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；policy 4/5/6 为 2；其他为 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE
+u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；policy 4/5/6 为 2；policy 7 为 2..64；其他为 0
 i64 override_role_uids[override_role_count] # 顺序由下述 policy 定义
-u32 override_axis_count      # policy 6 为固定 rank；其他为 0
-i64 override_axis_map[override_axis_count] # output axis -> input axis
+u32 override_axis_count      # policy 6 为固定 rank；policy 7 为 1；其他为 0
+i64 override_axis_map[override_axis_count] # 下述 policy-specific axis
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -174,6 +175,14 @@ loop bound，AVG 按最终 runtime reduction count 求平均。版本 `8` 不能
 正且不重叠的 stride 仍受各自序列化 descriptor byte span 约束。Permutation 必须显式
 持久化，因为最大 shape 中相等的 extent 无法唯一反推出 axis mapping。版本 `9` 不能
 编码 policy `6`，会拒绝该值，同时继续保留 policy `5` 的 role metadata。
+
+版本 `11` 为具有 1 至 63 个输入的单个标准 f32 CONCATENATE 增加 policy `7`。Role
+list 按数字端口顺序保存全部不同 input UID，最后保存 Y，并另行保存唯一固定 concat
+axis。全部 role 保持相同固定 rank。每个非 concat axis 上，全部最终 input extent 必须
+等于 Y；concat axis 上，全部最终 input extent 的受检求和必须等于 Y。完整和 partial
+override 仅可在保持这些最终关系时使用各自独立、正且不重叠并位于序列化 byte bound
+内的 stride。版本 `10` 不能编码 policy `7`，会拒绝该值，同时继续保留 policy `6`
+的 role 和 permutation。
 
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper

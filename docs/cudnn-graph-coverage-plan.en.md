@@ -128,13 +128,15 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
   roles. Version 7 adds the SDPA-forward override policy, version 8 adds the
   logical-RESHAPE override policy, and version 9 adds the REDUCTION override
   policy. Version 10 adds the TRANSPOSE override policy and fixed permutation
-  metadata while retaining prior-version read compatibility.
+  metadata. Version 11 adds the CONCATENATE override policy, ordered input/Y
+  roles, and fixed axis while retaining prior-version read compatibility.
 
 The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic,
 format-v3 shape-override, format-v4 ragged-storage, and format-v5
 ragged-sequence artifacts, plus format-v6 MATMUL-override, format-v7
-SDPA-override, and format-v8 RESHAPE-override artifacts. Current compilations
-also read format-v9 REDUCTION-override artifacts and write format v10. Unknown
+  SDPA-override, and format-v8 RESHAPE-override artifacts. Current compilations
+  also read format-v9 REDUCTION-override and format-v10 TRANSPOSE-override
+  artifacts and write format v11. Unknown
 artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
@@ -334,9 +336,18 @@ strides may change within serialized bounds when final descriptors preserve
 permutation. Non-contiguous and maximum execution, reload, partial overrides,
 malformed permutations/relations/graphs, Release, ASan, and UBSan form its
 acceptance set.
+The fifteenth implements bounded descriptor overrides for one standard-f32
+CONCATENATE with one through 63 ordered external plain inputs and Y. All roles
+retain the same fixed rank and fixed axis. Runtime extents remain equal on every
+non-concatenation axis, and the checked input-extent sum on the concatenation
+axis equals Y. Artifact v11 persists the ordered input/Y roles and fixed axis.
+Independent non-contiguous strides, maximum and partial overrides, reload,
+malformed relations/layouts/graphs, Release, ASan, and UBSan form its acceptance
+set.
 
 **Work:** expand dynamic behavior beyond the delivered exact-pointwise,
-single standard-f32 MATMUL, logical-RESHAPE, REDUCTION, TRANSPOSE, and SDPA-forward descriptor
+single standard-f32 MATMUL, logical-RESHAPE, REDUCTION, TRANSPOSE, CONCATENATE,
+and SDPA-forward descriptor
 overrides, and MATMUL extent-override subsets; then evaluate fusion, threading,
 additional vector schedules, and
 family-specific cost models

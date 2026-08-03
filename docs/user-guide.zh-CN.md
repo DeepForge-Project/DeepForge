@@ -14,7 +14,7 @@ DeepForge `0.1.0` 当前支持：
 | 平台 | Linux x86-64 |
 | 输入 | cuDNN Frontend `v1.24.0` 生成的 Graph JSON 或 canonical UBJSON |
 | Graph schema | `json_version == "1.0"`，`cudnn_frontend_version == 12400` |
-| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG、单个标准 f32 `MATMUL`、单个标准 f32 LOGICAL `RESHAPE`、单个标准 f32 `REDUCTION`、单个标准 f32 `TRANSPOSE` 和单个 dense 标准 f32 `SDPA` forward 支持 shape override array，MATMUL 另有独立 extent-override tensor 端口 |
+| 算子 | v1.24.0 全部 39 个 serialized tag 的已验证 CPU 子集；exact-shape f32 纯 `POINTWISE` DAG、单个标准 f32 `MATMUL`、单个标准 f32 LOGICAL `RESHAPE`、单个标准 f32 `REDUCTION`、单个标准 f32 `TRANSPOSE`、单个标准 f32 `CONCATENATE` 和单个 dense 标准 f32 `SDPA` forward 支持 shape override array，MATMUL 另有独立 extent-override tensor 端口 |
 | 通用 Tensor | rank 1-64 f32 data、显式 UID；allocation 仍为静态；文档指定的 metadata 可为 INT32/INT64；支持 virtual 中间值 |
 | 通用布局 | 正且不重叠的任意 stride；文档指定的标准 f32 SDPA tensor 可使用 ragged batch-prefix storage；`F8_128x4` 只用于下述 scale 端口 |
 | C5 特殊 storage | 文档指定端口支持 FLOAT16、BFLOAT16、FP8 E4M3/E5M2/E8M0、packed FP4 E2M1/INT4 及 FLOAT control |
@@ -29,7 +29,7 @@ DeepForge `0.1.0` 当前支持：
 | `RESHAPE` | 仅 `LOGICAL`，元素数相同；单个标准 f32 operation 支持有界 X/Y descriptor override |
 | `TRANSPOSE` | 完整静态 permutation；单个标准 f32 operation 支持有界 X/Y descriptor override |
 | `SLICE` | 半开区间不越界，stride 为正整数 |
-| `CONCATENATE` | 编号输入、非负 axis、无 in-place mode |
+| `CONCATENATE` | 编号输入、非负 axis、无 in-place mode；单个标准 f32 operation 支持有界 input/Y descriptor override |
 | `POINTWISE` | v1.24.0 全部 50 个 mode，尾维对齐的 NumPy broadcast |
 | `REDUCTION` | 全部 9 个 mode；输入输出 rank 相同，被归约维度为 1；单个标准 f32 operation 支持有界 X/Y descriptor override |
 | `MATMUL` | 相同且 >= 2 的 rank、batch broadcast、可选 per-batch INT32 M/N/K override，以及有限 f32 padding value |
@@ -74,14 +74,15 @@ paged，每个 INT32 page table 可为 plain storage 或使用独立 prefix 紧�
 schema 没有 paged backward page-table 端口，因此该形式不属于输入契约。
 C5 FP8 attention 仍将 padding、dropout、ALiBi 和可选端口延后；C6 也已为文档指定
 的 block-scale/MXFP8 端口实现 producer 生成的 `F8_128x4` scale reorder，并实现
-下述六类 override 子集。
+下述七类 override 子集。
 v1.24.0 标准 SDPA 的 bottom-right
 causal 路径不与 bias、ALiBi 或 dropout 组合。CPU RNG 在 DeepForge variant 间可
 复现，但不承诺匹配 cuDNN GPU Philox bit pattern。
 
 Comparison、logical 和 generated-index pointwise 输出仍使用 f32 `0`/`1` 或 f32
 index。连接 tensor 类型同时受两端操作支持时，C2-C6 tag 可在同一个图中混合。
-不支持 pointwise、MATMUL、RESHAPE、REDUCTION、TRANSPOSE 和 SDPA-forward override 子集之外的动态执行、显式
+不支持 pointwise、MATMUL、RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE 和
+SDPA-forward override 子集之外的动态执行、显式
 alias、不满足下述
 约束的 pass-by-value descriptor、
 文档子集外的 ragged/reordered tensor、分布式 peer statistics、GPU 执行、CUDA
@@ -534,6 +535,26 @@ deepforge::runtime::OverrideStrides override_strides{
 包括 partial override 在内，每组最终 descriptor 都必须满足
 `Y[i] == X[permutation[i]]`。X/Y stride 可以不同，但各自必须为正、不重叠且位于
 序列化 byte bound 内；permutation 本身不能 override。
+
+单个标准 f32 `CONCATENATE` 可 override 1 至 63 个 external plain input descriptor 和
+external plain Y。Input 只读、Y 只写，全部 role 保持相同的编译 rank 1 至 64，序列化
+非负 axis 固定不变。Role UID 必须不同，input port 必须连续编号为 `0..N-1`；不支持 in-place、virtual、
+pass-by-value、ragged、reordered、额外 tensor 或组合图。三个 input 在 axis 1 上 concat
+时，一个合法的非连续调用是：
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{
+    x0_uid, x1_uid, x2_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {1, 1, 2}, {1, 2, 2}, {1, 1, 2}, {1, 4, 2}};
+deepforge::runtime::OverrideStrides override_strides{
+    {12, 4, 1}, {15, 4, 1}, {8, 4, 1}, {25, 4, 1}};
+```
+
+每个非 concat axis 上，各最终 input extent 必须等于 Y；固定 concat axis 上，全部最终
+input extent 的受检求和必须等于 Y。Partial override 后也必须保持这些关系。每个 role
+可使用位于自身序列化 byte bound 内、独立且正并不重叠的 stride；input 数量、端口
+顺序、rank 和 axis 均不能 override。
 
 仅设置 `is_dynamic_shape_enabled=true` 而未设置 override flag 时，该信息会写入 plan
 和 `.dfo` metadata，但执行 descriptor 保持静态。反过来，已支持的 descriptor

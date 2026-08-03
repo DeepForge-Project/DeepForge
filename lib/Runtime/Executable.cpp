@@ -418,6 +418,72 @@ Status resolve_overrides(
                     "TRANSPOSE runtime dimensions do not match the permutation");
             }
         }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kConcatenate) {
+        auto const role_count = metadata.override_role_uids.size();
+        if (role_count < 2 || role_count > 64 ||
+            metadata.override_axis_map.size() != 1) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "CONCATENATE override metadata is malformed");
+        }
+        std::vector<ResolvedArgument const*> roles;
+        roles.reserve(role_count);
+        for (auto uid : metadata.override_role_uids) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == uid;
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "CONCATENATE override role UID is unresolved");
+            }
+            roles.push_back(&resolved[static_cast<std::size_t>(
+                argument - metadata.arguments.begin())]);
+        }
+        auto const axis = metadata.override_axis_map.front();
+        auto const& output_dimensions = roles.back()->dimensions;
+        if (output_dimensions.empty() || axis < 0 ||
+            static_cast<std::size_t>(axis) >= output_dimensions.size()) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "CONCATENATE override axis metadata is malformed");
+        }
+        std::int64_t axis_extent = 0;
+        for (std::size_t role = 0; role + 1 < roles.size(); ++role) {
+            auto const& input_dimensions = roles[role]->dimensions;
+            if (input_dimensions.size() != output_dimensions.size()) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "CONCATENATE input and output runtime ranks must match");
+            }
+            for (std::size_t dimension = 0;
+                 dimension < output_dimensions.size(); ++dimension) {
+                if (dimension != static_cast<std::size_t>(axis) &&
+                    input_dimensions[dimension] !=
+                        output_dimensions[dimension]) {
+                    return fail(
+                        ErrorCode::kInvalidShape, "runtime.override",
+                        "CONCATENATE non-axis runtime dimensions must match Y");
+                }
+            }
+            auto const extent =
+                input_dimensions[static_cast<std::size_t>(axis)];
+            if (extent >
+                std::numeric_limits<std::int64_t>::max() - axis_extent) {
+                return fail(ErrorCode::kInvalidShape, "runtime.override",
+                            "CONCATENATE runtime axis extent overflows int64");
+            }
+            axis_extent += extent;
+        }
+        if (axis_extent !=
+            output_dimensions[static_cast<std::size_t>(axis)]) {
+            return fail(
+                ErrorCode::kInvalidShape, "runtime.override",
+                "CONCATENATE runtime Y axis extent must equal the input sum");
+        }
     }
     output = std::move(resolved);
     return Status::ok();

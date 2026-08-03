@@ -547,10 +547,21 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     maximum-shape execution, reload, malformed permutation/relation/graph cases,
     Release, ASan, and UBSan cover the increment without changing the public
     execute/workspace ABI.
+23. Completed C6.15 bounded CONCATENATE descriptor override. One standard-f32
+    `CONCATENATE` accepts one through 63 ordered external plain f32 inputs plus
+    Y with a common fixed rank and fixed axis. Complete and partial Frontend
+    overrides require equal non-axis extents and require the checked sum of
+    input extents on the concatenation axis to equal Y. Dynamic loops use each
+    resolved input extent and cumulative output-axis offsets while every role
+    may use an independent positive non-overlapping stride within its serialized
+    byte bound. Artifact v11 records ordered input/Y roles and the fixed axis
+    while v1-v10 remain readable. Non-contiguous and maximum-shape execution,
+    reload, malformed relation/layout/graph cases, Release, ASan, and UBSan
+    cover the increment without changing the public execute/workspace ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
 exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, REDUCTION,
-TRANSPOSE, and dense
+TRANSPOSE, CONCATENATE, and dense
 standard-f32 SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to

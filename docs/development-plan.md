@@ -486,8 +486,17 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     permutation，同时保持 v1-v9 可读。非连续和最大 shape 执行、reload、错误
     permutation/关系/图、Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace
     ABI 不变。
+23. 已完成：C6.15 有界 CONCATENATE descriptor override。单个标准 f32
+    `CONCATENATE` 接受 1 至 63 个有序 external plain f32 input 和 Y，全部 role 保持
+    相同固定 rank 和固定 axis。完整及 partial Frontend override 要求非 concat axis
+    extent 相同，并要求 concat axis 上 input extent 的受检求和等于 Y。Dynamic loop
+    使用每个最终 input extent 和累计 output-axis offset；每个 role 可使用位于自身
+    序列化 byte bound 内的独立、正且不重叠 stride。Artifact v11 记录有序 input/Y
+    role 和固定 axis，同时保持 v1-v10 可读。非连续和最大 shape 执行、reload、错误
+    关系/layout/图、Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace ABI
+    不变。
 
-剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE
+剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE
 与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
 v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`

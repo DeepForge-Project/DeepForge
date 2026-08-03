@@ -1527,7 +1527,7 @@ void run_dynamic_attention_tests(TestRunner& tests) {
             artifact_info.metadata.override_policy ==
                 deepforge::compiler::ShapeOverridePolicy::kSdpaForward &&
             artifact_info.metadata.override_role_uids == override_uids,
-        "artifact v10 preserves ordered SDPA override roles");
+        "artifact v11 preserves ordered SDPA override roles");
     if (loaded) {
         std::fill(o.begin(), o.end(), -99.0F);
         std::fill(stats.begin(), stats.end(), -99.0F);

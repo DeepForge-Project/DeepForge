@@ -164,7 +164,7 @@ execution subset:
 | `RESHAPE` | `LOGICAL` mode, equal element counts; `VIEW_ONLY` aliasing is deferred |
 | `TRANSPOSE` | Complete permutation containing every axis exactly once; one standard-f32 operation supports bounded X/Y descriptor overrides |
 | `SLICE` | Rank-preserving, in-range half-open bounds and positive integer strides |
-| `CONCATENATE` | Static indexed inputs and non-negative axis; no `in_place_index` |
+| `CONCATENATE` | Indexed inputs and non-negative axis; no `in_place_index`; one standard-f32 operation supports bounded input/Y descriptor overrides |
 | `POINTWISE` | All 50 modes, f32 outputs, trailing-dimension NumPy broadcasting |
 | `REDUCTION` | All 9 modes, rank-preserving output with reduced extents set to one |
 | `MATMUL` | Equal rank of at least two, broadcast batch dimensions, optional per-batch INT32 M/N/K overrides, finite f32 padding value |
@@ -330,6 +330,14 @@ permutation. Runtime dimensions and independent non-overlapping strides may
 change within serialized storage bounds only when final descriptors satisfy
 `Y[i] == X[permutation[i]]`. Pass-by-value, ragged or reordered storage,
 virtual tensors, additional tensors, and composed graphs are rejected.
+Shape override is also executable for one standard-f32 `CONCATENATE` with one
+through 63 contiguous indexed inputs. All external plain inputs and Y retain
+the same fixed rank and the serialized axis. Runtime extents are equal on every
+non-concatenation axis, and the checked sum of input extents on the fixed axis
+equals Y. Each role may use an independent positive non-overlapping stride
+within its serialized storage bound. In-place, pass-by-value, ragged or
+reordered storage, virtual tensors, additional tensors, and composed graphs are
+rejected.
 Compiled dimensions are maxima; runtime dimensions must be positive and no
 larger, runtime strides
 must satisfy the supported positive non-overlap condition, and each external
@@ -342,10 +350,11 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v10 for ordered TRANSPOSE roles and its fixed
-permutation while retaining v9 REDUCTION roles, v8 logical-RESHAPE roles, v7
+New artifacts use format v11 for ordered CONCATENATE input/Y roles and its
+fixed axis while retaining v10 TRANSPOSE roles/permutation, v9 REDUCTION roles,
+v8 logical-RESHAPE roles, v7
 SDPA-forward roles, v6 MATMUL roles, v4 ragged references, and v5
-logical-sequence divisors; v1-v9 remain readable, with v4
+logical-sequence divisors; v1-v10 remain readable, with v4
 divisors defaulted to one and pre-v6 role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or

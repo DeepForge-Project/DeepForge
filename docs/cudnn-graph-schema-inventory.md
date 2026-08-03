@@ -154,7 +154,7 @@ Pointwise mode 的输入元数被严格验证：
 | `RESHAPE` | `LOGICAL` mode、元素数相同；`VIEW_ONLY` alias 延后 |
 | `TRANSPOSE` | 静态完整 permutation，每个轴恰好出现一次；单个标准 f32 operation 支持有界 X/Y descriptor override |
 | `SLICE` | rank 保持、半开区间不越界、正整数 stride |
-| `CONCATENATE` | 静态编号输入和非负 axis；不支持 `in_place_index` |
+| `CONCATENATE` | 编号输入和非负 axis；不支持 `in_place_index`；单个标准 f32 operation 支持有界 input/Y descriptor override |
 | `POINTWISE` | 全部 50 个 mode、f32 输出、尾维对齐的 NumPy broadcast |
 | `REDUCTION` | 全部 9 个 mode，输出保持 rank，被归约维度为 1 |
 | `MATMUL` | 相同且至少为 2 的 rank、batch broadcast、可选 per-batch INT32 M/N/K override、有限 f32 padding value |
@@ -292,6 +292,11 @@ rank 和完整序列化 permutation；runtime dimension 与各自独立的非重
 序列化 storage bound 内改变，但最终 descriptor 必须满足
 `Y[i] == X[permutation[i]]`。Pass-by-value、ragged/reordered storage、virtual tensor、
 额外 tensor 和组合图均被拒绝。
+Shape override 还支持具有 1 至 63 个连续编号 input 的单个标准 f32 `CONCATENATE`。
+全部 external plain input 和 Y 保持相同固定 rank 与序列化 axis。每个非 concat axis
+的 runtime extent 必须相同，固定 axis 上 input extent 的受检求和必须等于 Y。每个
+role 可使用位于自身序列化 storage bound 内、独立且正并不重叠的 stride。不支持
+in-place、pass-by-value、ragged/reordered storage、virtual tensor、额外 tensor 或组合图。
 编译 dimension 是上界；runtime dimension 必须为正且
 不超过该上界，runtime stride 必须满足当前支持的正且不重叠条件，每个 external
 storage span 必须位于编译 bound 内。dynamic flag 单独出现时只持久化 metadata，
@@ -301,9 +306,9 @@ MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们�
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
 value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
 子集外的 ragged tensor，以及固定版本现代 Graph producer 未生成的物理 reorder
-契约延后。新 artifact 使用 format v10 记录有序 TRANSPOSE role 和固定 permutation，
-同时保留 v9 REDUCTION role、v8 LOGICAL RESHAPE role、v7 SDPA-forward role、v6
-MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v9 继续
+契约延后。新 artifact 使用 format v11 记录有序 CONCATENATE input/Y role 和固定
+axis，同时保留 v10 TRANSPOSE role/permutation、v9 REDUCTION role、v8 LOGICAL
+RESHAPE role、v7 SDPA-forward role、v6 MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v10 继续
 可读，其中 v4 divisor 默认为 1，v6 之前的 role list 为空。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集

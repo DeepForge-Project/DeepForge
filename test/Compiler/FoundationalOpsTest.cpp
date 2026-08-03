@@ -113,6 +113,23 @@ Json transpose_node(std::string name,
                 {"permutation", std::move(permutation)}};
 }
 
+Json concatenate_node(std::string name,
+                      std::vector<std::int64_t> inputs,
+                      std::int64_t y,
+                      std::int64_t axis,
+                      Json in_place_index = nullptr) {
+    Json indexed_inputs = Json::object();
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        indexed_inputs[std::to_string(index)] = inputs[index];
+    }
+    return Json{{"tag", "CONCATENATE"},
+                {"name", std::move(name)},
+                {"inputs", std::move(indexed_inputs)},
+                {"outputs", Json::object({{"Y", y}})},
+                {"axis", axis},
+                {"in_place_index", std::move(in_place_index)}};
+}
+
 Json reshape_graph() {
     return Json{
         {"context",
@@ -183,6 +200,31 @@ Json dynamic_transpose_graph() {
          Json::object(
              {{"311", tensor("X", 311, {2, 3, 4}, {20, 6, 1}, false)},
               {"312", tensor("Y", 312, {4, 2, 3}, {9, 4, 1}, false)}})}};
+}
+
+Json dynamic_concatenate_graph() {
+    return Json{
+        {"context",
+         Json{{"name", "dynamic_concatenate"},
+              {"compute_data_type", "FLOAT"},
+              {"intermediate_data_type", "FLOAT"},
+              {"io_data_type", "FLOAT"},
+              {"sm_count", -1},
+              {"is_dynamic_shape_enabled", false},
+              {"is_override_shape_enabled", true}}},
+        {"graph_uid", 2007},
+        {"json_version", "1.0"},
+        {"cudnn_backend_version", "cpu-test"},
+        {"cudnn_frontend_version", 12400},
+        {"nodes",
+         Json::array({concatenate_node("dynamic_concatenate",
+                                       {321, 322, 323}, 324, 1)})},
+        {"tensors",
+         Json::object(
+             {{"321", tensor("X0", 321, {2, 2, 3}, {12, 4, 1}, false)},
+              {"322", tensor("X1", 322, {2, 3, 3}, {15, 4, 1}, false)},
+              {"323", tensor("X2", 323, {2, 1, 3}, {8, 4, 1}, false)},
+              {"324", tensor("Y", 324, {2, 6, 3}, {25, 4, 1}, false)}})}};
 }
 
 Json transform_graph() {
@@ -451,7 +493,7 @@ void run_dynamic_reshape_tests(TestRunner& tests) {
             artifact_info.metadata.override_policy ==
                 deepforge::compiler::ShapeOverridePolicy::kReshape &&
             artifact_info.metadata.override_role_uids == override_uids,
-        "artifact v10 preserves ordered RESHAPE override roles");
+        "artifact v11 preserves ordered RESHAPE override roles");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,
@@ -625,7 +667,7 @@ void run_dynamic_transpose_tests(TestRunner& tests) {
             artifact_info.metadata.override_role_uids == override_uids &&
             artifact_info.metadata.override_axis_map ==
                 std::vector<std::int64_t>({2, 0, 1}),
-        "artifact v10 preserves ordered TRANSPOSE roles and permutation");
+        "artifact v11 preserves ordered TRANSPOSE roles and permutation");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,
@@ -718,6 +760,238 @@ void run_dynamic_transpose_tests(TestRunner& tests) {
     tests.check(status.code() ==
                     deepforge::import::ErrorCode::kUnsupportedOperation,
                 "TRANSPOSE overrides reject composed graphs");
+}
+
+void run_dynamic_concatenate_tests(TestRunner& tests) {
+    deepforge::import::SerializedGraph graph;
+    auto status = parse_graph(dynamic_concatenate_graph(), graph);
+    tests.good(status, "parse runtime shape-override CONCATENATE");
+    deepforge::compiler::CompileOptions options;
+    options.capture_mlir = true;
+    deepforge::compiler::CompilationResult compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(graph, options, compilation);
+    }
+    tests.good(status, "compile runtime shape-override CONCATENATE");
+    if (status.is_bad() || !compilation.executable) return;
+
+    tests.check(
+        !compilation.metadata.dynamic_shape_enabled &&
+            compilation.metadata.override_shape_enabled &&
+            compilation.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kConcatenate &&
+            compilation.metadata.override_role_uids ==
+                std::vector<std::int64_t>({321, 322, 323, 324}) &&
+            compilation.metadata.override_axis_map ==
+                std::vector<std::int64_t>({1}) &&
+            compilation.workspace.size_bytes == 0 &&
+            compilation.imported_mlir.find("memref.dim") !=
+                std::string::npos &&
+            compilation.imported_mlir.find("?x?x?xf32") !=
+                std::string::npos,
+        "CONCATENATE override records ordered roles and axis and emits runtime descriptors");
+
+    std::vector<float> x0(19, -77.0F);
+    std::vector<float> x1(26, -78.0F);
+    std::vector<float> x2(11, -79.0F);
+    std::vector<float> y(48, -99.0F);
+    for (std::int64_t width = 0; width < 2; ++width) {
+        x0[static_cast<std::size_t>(width)] =
+            static_cast<float>(10 + width);
+        x1[static_cast<std::size_t>(width)] =
+            static_cast<float>(20 + width);
+        x1[static_cast<std::size_t>(4 + width)] =
+            static_cast<float>(30 + width);
+        x2[static_cast<std::size_t>(width)] =
+            static_cast<float>(40 + width);
+    }
+    deepforge::runtime::VariantPack pack{{321, x0.data()},
+                                         {322, x1.data()},
+                                         {323, x2.data()},
+                                         {324, y.data()}};
+    deepforge::runtime::OverrideUids const override_uids{321, 322, 323, 324};
+    deepforge::runtime::OverrideShapes const override_shapes{
+        {1, 1, 2}, {1, 2, 2}, {1, 1, 2}, {1, 4, 2}};
+    deepforge::runtime::OverrideStrides const override_strides{
+        {12, 4, 1}, {15, 4, 1}, {8, 4, 1}, {25, 4, 1}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes, override_strides);
+    tests.good(status, "execute runtime shape-override CONCATENATE");
+    auto runtime_output_matches = [&]() {
+        std::vector<bool> occupied(y.size(), false);
+        bool matches = true;
+        for (std::int64_t axis = 0; axis < 4; ++axis) {
+            for (std::int64_t width = 0; width < 2; ++width) {
+                auto const offset =
+                    static_cast<std::size_t>(axis * 4 + width);
+                auto const expected =
+                    static_cast<float>(10 * (axis + 1) + width);
+                occupied[offset] = true;
+                matches = matches && y[offset] == expected;
+            }
+        }
+        for (std::size_t index = 0; index < y.size(); ++index) {
+            matches = matches && (occupied[index] || y[index] == -99.0F);
+        }
+        return matches;
+    };
+    tests.check(runtime_output_matches(),
+                "dynamic CONCATENATE honors runtime extents, offsets, and strides");
+
+    std::vector<std::uint8_t> artifact;
+    status = deepforge::compiler::serialize_artifact(compilation, artifact);
+    tests.good(status,
+               "serialize runtime shape-override CONCATENATE artifact");
+    deepforge::compiler::ArtifactInfo artifact_info;
+    std::unique_ptr<deepforge::runtime::Executable> loaded;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            artifact, loaded, &artifact_info);
+    }
+    tests.good(status, "load runtime shape-override CONCATENATE artifact");
+    tests.check(
+        artifact_info.format_version ==
+                deepforge::compiler::kArtifactFormatVersion &&
+            artifact_info.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kConcatenate &&
+            artifact_info.metadata.override_role_uids == override_uids &&
+            artifact_info.metadata.override_axis_map ==
+                std::vector<std::int64_t>({1}),
+        "artifact v11 preserves ordered CONCATENATE roles and axis");
+    if (loaded) {
+        std::fill(y.begin(), y.end(), -99.0F);
+        status = loaded->execute(nullptr, pack, nullptr, override_uids,
+                                 override_shapes, override_strides);
+        tests.good(status,
+                   "execute loaded shape-override CONCATENATE artifact");
+        tests.check(runtime_output_matches(),
+                    "loaded CONCATENATE artifact uses runtime descriptors");
+    }
+
+    std::fill(x0.begin(), x0.end(), -77.0F);
+    std::fill(x1.begin(), x1.end(), -78.0F);
+    std::fill(x2.begin(), x2.end(), -79.0F);
+    std::fill(y.begin(), y.end(), -99.0F);
+    auto fill_input = [](std::vector<float>& input, std::int64_t batch_stride,
+                         std::int64_t axis_extent, float base) {
+        for (std::int64_t batch = 0; batch < 2; ++batch) {
+            for (std::int64_t axis = 0; axis < axis_extent; ++axis) {
+                for (std::int64_t width = 0; width < 3; ++width) {
+                    input[static_cast<std::size_t>(batch * batch_stride +
+                                                   axis * 4 + width)] =
+                        base + static_cast<float>(100 * batch + 10 * axis +
+                                                  width);
+                }
+            }
+        }
+    };
+    fill_input(x0, 12, 2, 0.0F);
+    fill_input(x1, 15, 3, 1000.0F);
+    fill_input(x2, 8, 1, 2000.0F);
+    status = compilation.executable->execute(nullptr, pack, nullptr);
+    tests.good(status,
+               "execute shape-override CONCATENATE at compiled maximum descriptors");
+    bool maximum_matches = true;
+    for (std::int64_t batch = 0; batch < 2; ++batch) {
+        for (std::int64_t axis = 0; axis < 6; ++axis) {
+            for (std::int64_t width = 0; width < 3; ++width) {
+                float expected = 0.0F;
+                if (axis < 2) {
+                    expected = static_cast<float>(100 * batch + 10 * axis +
+                                                  width);
+                } else if (axis < 5) {
+                    expected = 1000.0F +
+                               static_cast<float>(100 * batch +
+                                                  10 * (axis - 2) + width);
+                } else {
+                    expected = 2000.0F +
+                               static_cast<float>(100 * batch + width);
+                }
+                maximum_matches =
+                    maximum_matches &&
+                    y[static_cast<std::size_t>(batch * 25 + axis * 4 +
+                                               width)] == expected;
+            }
+        }
+    }
+    tests.check(maximum_matches,
+                "empty CONCATENATE override arrays use compiled maximum descriptors");
+
+    std::int64_t workspace_size = -1;
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {321, 324}, {{2, 1, 3}, {2, 5, 3}},
+        {{12, 4, 1}, {25, 4, 1}});
+    tests.good(status,
+               "partial CONCATENATE override may shrink one input and Y axis");
+    tests.check(workspace_size == 0,
+                "partial CONCATENATE override preserves the static workspace bound");
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {321}, {{2, 1, 3}}, {{12, 4, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "partial CONCATENATE override must preserve the final axis sum");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, {{1, 1, 2}, {1, 2, 2}, {1, 1, 2}, {1, 3, 2}},
+        override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "CONCATENATE rejects an inconsistent runtime axis sum");
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {322}, {{2, 3, 2}}, {{15, 4, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "CONCATENATE rejects inconsistent non-axis dimensions");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr, {321},
+        {{2, 2}}, {{2, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "CONCATENATE override rank must match the compiled role");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes,
+        {{12, 4, 1}, {15, 4, 1}, {8, 4, 1}, {1, 1, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidLayout,
+                "CONCATENATE rejects overlapping runtime strides");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes,
+        {{12, 4, 1}, {15, 4, 1}, {8, 4, 1}, {25, 16, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "CONCATENATE runtime span cannot exceed the compiled byte bound");
+
+    auto virtual_role = dynamic_concatenate_graph();
+    virtual_role["tensors"]["324"]["is_virtual"] = true;
+    status = compile_document(virtual_role);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "CONCATENATE overrides reject virtual role tensors");
+    auto pass_by_value = dynamic_concatenate_graph();
+    pass_by_value["tensors"]["321"]["is_pass_by_value"] = true;
+    status = compile_document(pass_by_value);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "CONCATENATE overrides reject pass-by-value role tensors");
+    auto in_place = dynamic_concatenate_graph();
+    in_place["nodes"][0]["in_place_index"] = 0;
+    status = compile_document(in_place);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "CONCATENATE overrides reject in-place aliasing");
+    auto malformed_ports = dynamic_concatenate_graph();
+    malformed_ports["nodes"][0]["inputs"]["3"] =
+        malformed_ports["nodes"][0]["inputs"]["1"];
+    malformed_ports["nodes"][0]["inputs"].erase("1");
+    status = compile_document(malformed_ports);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidValue,
+                "CONCATENATE overrides require contiguous indexed inputs");
+    auto composed = dynamic_concatenate_graph();
+    composed["tensors"]["325"] =
+        tensor("Z", 325, {2, 6, 3}, {25, 4, 1}, false);
+    composed["nodes"].push_back(
+        concatenate_node("second_concatenate", {324}, 325, 1));
+    status = compile_document(composed);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "CONCATENATE overrides reject composed graphs");
 }
 
 }  // namespace
@@ -871,6 +1145,7 @@ int main() {
 
     run_dynamic_reshape_tests(tests);
     run_dynamic_transpose_tests(tests);
+    run_dynamic_concatenate_tests(tests);
 
     deepforge::import::SerializedGraph dynamic_graph;
     status = parse_graph(dynamic_pointwise_graph(), dynamic_graph);

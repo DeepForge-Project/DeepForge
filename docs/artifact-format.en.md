@@ -7,8 +7,9 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `10`; the reader also
-accepts version `9` REDUCTION-override artifacts, version `8` RESHAPE-override artifacts, version `7` SDPA-override
+generated kernel. The current writer emits format version `11`; the reader also
+accepts version `10` TRANSPOSE-override artifacts, version `9` REDUCTION-override
+artifacts, version `8` RESHAPE-override artifacts, version `7` SDPA-override
 artifacts, version `6` MATMUL-override artifacts, version `5` ragged-sequence
 artifacts, version `4` ragged-storage
 artifacts, version `3` shape-override artifacts, version `2` static-metadata
@@ -19,8 +20,9 @@ strided addressing, version `4` defaults every ragged sequence divisor to one,
 and versions `1` through `5` default override role UIDs to empty. Version `6`
 retains its ordered MATMUL role UIDs, version `7` retains its ordered
 SDPA-forward role UIDs, version `8` retains its ordered logical-RESHAPE role
-UIDs, and version `9` retains its ordered REDUCTION role UIDs. Versions `1`
-through `9` default the TRANSPOSE axis map to empty.
+UIDs, version `9` retains its ordered REDUCTION role UIDs, and version `10`
+retains its ordered TRANSPOSE role UIDs and permutation. Versions `1` through
+`9` default the policy-specific axis map to empty.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -50,7 +52,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 10
+u32 format_version = 11
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -61,11 +63,11 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE
-u32 override_role_count      # policy 2: 3; policy 3: 4..7; policies 4/5/6: 2; else 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION, 6 TRANSPOSE, 7 CONCATENATE
+u32 override_role_count      # policy 2: 3; policy 3: 4..7; policies 4/5/6: 2; policy 7: 2..64; else 0
 i64 override_role_uids[override_role_count] # policy-specific order below
-u32 override_axis_count      # policy 6: fixed rank; else 0
-i64 override_axis_map[override_axis_count] # output axis -> input axis
+u32 override_axis_count      # policy 6: fixed rank; policy 7: 1; else 0
+i64 override_axis_map[override_axis_count] # policy-specific axes below
 
 u32 tensor_argument_count
 repeated tensor_argument {
@@ -200,6 +202,16 @@ positive non-overlapping strides remain bounded by each serialized descriptor's
 byte span. Persisting the permutation is required because equal maximum extents
 do not identify an axis mapping. Version `9` cannot encode policy `6` and rejects
 it while preserving policy `5` role metadata.
+
+Version `11` adds policy `7` for one standard-f32 CONCATENATE operation with
+one through 63 inputs. It stores all distinct input UIDs in numeric port order,
+followed by Y, plus the single fixed concatenation axis. Every role keeps the
+same fixed rank. On each non-concatenation axis, every final input extent equals
+Y; on the concatenation axis, the checked sum of all final input extents equals
+Y. Complete and partial overrides may use independent positive non-overlapping
+strides within their serialized byte bounds only while preserving those final
+relations. Version `10` cannot encode policy `7` and rejects it while retaining
+policy `6` roles and permutation.
 
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,

@@ -42,6 +42,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
         case ShapeOverridePolicy::kReshape:
         case ShapeOverridePolicy::kReduction:
         case ShapeOverridePolicy::kTranspose:
+        case ShapeOverridePolicy::kConcatenate:
             return true;
     }
     return false;
@@ -205,6 +206,35 @@ bool valid_transpose_dimensions(
     return true;
 }
 
+bool valid_concatenate_dimensions(
+    std::vector<TensorArgumentMetadata const*> const& roles,
+    std::int64_t axis) {
+    if (roles.size() < 2 || roles.size() > 64) return false;
+    auto const& output = roles.back()->dimensions;
+    if (output.empty() || axis < 0 ||
+        static_cast<std::size_t>(axis) >= output.size()) {
+        return false;
+    }
+    std::int64_t axis_extent = 0;
+    for (std::size_t role = 0; role + 1 < roles.size(); ++role) {
+        auto const* input = roles[role];
+        if (input->dimensions.size() != output.size()) return false;
+        for (std::size_t dimension = 0; dimension < output.size();
+             ++dimension) {
+            if (dimension != static_cast<std::size_t>(axis) &&
+                input->dimensions[dimension] != output[dimension]) {
+                return false;
+            }
+        }
+        auto const extent = input->dimensions[static_cast<std::size_t>(axis)];
+        if (extent > std::numeric_limits<std::int64_t>::max() - axis_extent) {
+            return false;
+        }
+        axis_extent += extent;
+    }
+    return axis_extent == output[static_cast<std::size_t>(axis)];
+}
+
 }  // namespace
 
 import::Status validate_graph_compile_metadata(
@@ -290,12 +320,15 @@ import::Status validate_graph_compile_metadata(
         metadata.override_policy != ShapeOverridePolicy::kReshape &&
         metadata.override_policy != ShapeOverridePolicy::kReduction &&
         metadata.override_policy != ShapeOverridePolicy::kTranspose &&
+        metadata.override_policy != ShapeOverridePolicy::kConcatenate &&
         !metadata.override_role_uids.empty()) {
         return fail("override role UIDs require a role-based policy");
     }
     if (metadata.override_policy != ShapeOverridePolicy::kTranspose &&
+        metadata.override_policy != ShapeOverridePolicy::kConcatenate &&
         !metadata.override_axis_map.empty()) {
-        return fail("override axis map requires the TRANSPOSE policy");
+        return fail(
+            "override axis map requires the TRANSPOSE or CONCATENATE policy");
     }
     if (metadata.override_policy == ShapeOverridePolicy::kMatmul) {
         if (metadata.arguments.size() != 3 ||
@@ -455,6 +488,46 @@ import::Status validate_graph_compile_metadata(
                                         metadata.override_axis_map)) {
             return fail(
                 "TRANSPOSE override roles, permutation, or maximum shapes are invalid");
+        }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kConcatenate) {
+        auto const role_count = metadata.override_role_uids.size();
+        if (role_count < 2 || role_count > 64 ||
+            metadata.arguments.size() != role_count ||
+            metadata.override_axis_map.size() != 1 ||
+            std::set<std::int64_t>(metadata.override_role_uids.begin(),
+                                   metadata.override_role_uids.end())
+                    .size() != role_count) {
+            return fail(
+                "CONCATENATE override metadata requires ordered distinct input/Y roles and one axis");
+        }
+        std::vector<TensorArgumentMetadata const*> roles;
+        roles.reserve(role_count);
+        for (auto uid : metadata.override_role_uids) {
+            auto const role = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == uid;
+                });
+            if (role == metadata.arguments.end()) {
+                return fail("CONCATENATE override role UID is unresolved");
+            }
+            roles.push_back(&*role);
+        }
+        bool valid_roles = valid_concatenate_dimensions(
+            roles, metadata.override_axis_map.front());
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            valid_roles =
+                valid_roles &&
+                roles[role]->data_type == import::DataType::kFloat32 &&
+                roles[role]->storage_policy == TensorStoragePolicy::kStrided &&
+                roles[role]->access ==
+                    (role + 1 == roles.size() ? TensorAccess::kWrite
+                                              : TensorAccess::kRead);
+        }
+        if (!valid_roles) {
+            return fail(
+                "CONCATENATE override roles, axis, or maximum shapes are invalid");
         }
     }
     for (auto const& argument : metadata.arguments) {

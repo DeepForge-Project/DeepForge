@@ -206,6 +206,9 @@ plain X/Y 的有界 descriptor override，同时保持各自的编译 rank 和�
 单个标准 f32 TRANSPOSE 支持相同固定 rank 的 external plain X/Y 有界 descriptor
 override。Runtime dimension 必须保持固定的序列化 permutation，X/Y 可分别使用独立
 的合法 stride。
+单个标准 f32 CONCATENATE 支持 1 至 63 个有序 external plain input 和相同固定 rank
+Y 的有界 descriptor override，并保持固定 axis。Runtime 非 concat axis extent 相同，
+concat axis 上 input extent 之和等于 Y，每个 role 可分别使用独立合法 stride。
 Runtime scalar pass-by-value input 以 external、仅作为 input、全 1
 dimension tensor 的形式执行，host pointer 由普通 UID 提供。内嵌/fused
 pass-by-value payload 使用相同 descriptor 子集，并在根级 `pass_by_values` 中镜像
@@ -215,7 +218,7 @@ argument 中移除，并持久化在现有 artifact object 中。标准 f32 SDPA
 的独立 paged K/V、forward block mask 及 forward/backward sink token。
 单个 dense 标准 f32 SDPA forward 还可在保持固定 head、embedding、GQA 和 row-output
 关系时，对 B、Sq、Skv 使用有界 descriptor override。已交付的 pointwise、MATMUL、
-RESHAPE、REDUCTION、TRANSPOSE 和 SDPA-forward descriptor-override 子集之外的 dynamic 行为、threading 和
+RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE 和 SDPA-forward descriptor-override 子集之外的 dynamic 行为、threading 和
 广泛 fusion 仍待实现。`INT8x32`/`F16x16`
 需等待现代 serialized Graph producer 同时定义可达端口和物理映射，当前保持不可执行。
 固定使用的 v1.24.0 serializer 无法表达 paged backward，因此它属于未来 schema

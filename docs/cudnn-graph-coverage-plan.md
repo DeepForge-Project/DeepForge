@@ -119,12 +119,14 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
   升到 v4，为 packed logical-sequence divisor 升到 v5，再为有序 MATMUL override
   role 升到 v6。v7 增加 SDPA-forward override policy，v8 增加 LOGICAL RESHAPE
   override policy，v9 增加 REDUCTION override policy，v10 增加 TRANSPOSE override
-  policy 和固定 permutation metadata，并保持旧版本读取兼容。
+  policy 和固定 permutation metadata，v11 增加 CONCATENATE override policy、有序
+  input/Y role 和固定 axis，并保持旧版本读取兼容。
 
 兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override、
 format-v4 ragged-storage 和 format-v5 ragged-sequence artifact；当前新编译 graph 写
-format v10，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override、
-format-v8 RESHAPE-override 和 format-v9 REDUCTION-override artifact。未知 artifact version
+format v11，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override、
+format-v8 RESHAPE-override、format-v9 REDUCTION-override 和 format-v10
+TRANSPOSE-override artifact。未知 artifact version
 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
@@ -298,9 +300,14 @@ stride 可在序列化 bound 内变化，但最终 descriptor 必须满足
 `Y[i] == X[permutation[i]]`。Artifact v10 持久化 X/Y role 和 permutation。非连续与
 最大 shape 执行、reload、partial override、错误 permutation/关系/图、Release、ASan
 和 UBSan 构成验收集。
+第十五个为具有 1 至 63 个有序 external plain input 和 Y 的单个标准 f32
+CONCATENATE 实现有界 descriptor override。全部 role 保持相同固定 rank 和固定 axis；
+每个非 concat axis 的 runtime extent 相同，concat axis 上 input extent 的受检求和
+等于 Y。Artifact v11 持久化有序 input/Y role 和固定 axis。独立非连续 stride、最大与
+partial override、reload、错误关系/layout/图、Release、ASan 和 UBSan 构成验收集。
 
 **工作内容**：将动态行为扩展到已交付 exact-pointwise、单个标准 f32 MATMUL 与
-LOGICAL RESHAPE、REDUCTION、TRANSPOSE、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
+LOGICAL RESHAPE、REDUCTION、TRANSPOSE、CONCATENATE、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
 之外；随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
 除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
 `INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成

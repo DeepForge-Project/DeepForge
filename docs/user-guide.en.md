@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, one standard-f32 `REDUCTION`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, one standard-f32 `REDUCTION`, one standard-f32 `TRANSPOSE`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -28,7 +28,7 @@ The foundational operation subset is:
 | Tag | Current constraints |
 |---|---|
 | `RESHAPE` | `LOGICAL` only; equal element count; one standard-f32 operation supports bounded X/Y descriptor overrides |
-| `TRANSPOSE` | Complete static permutation |
+| `TRANSPOSE` | Complete static permutation; one standard-f32 operation supports bounded X/Y descriptor overrides |
 | `SLICE` | In-range half-open bounds and positive integer strides |
 | `CONCATENATE` | Numbered inputs, non-negative axis, no in-place mode |
 | `POINTWISE` | All 50 v1.24.0 modes with trailing-dimension NumPy broadcasting |
@@ -77,7 +77,7 @@ documented in the runtime section. The pinned v1.24.0 schema exposes no paged
 backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the five override subsets below.
+block-scale and MXFP8 ports and the six override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -85,7 +85,7 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic execution outside the pointwise, MATMUL,
-RESHAPE, REDUCTION, and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
+RESHAPE, REDUCTION, TRANSPOSE, and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
 descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
@@ -553,6 +553,28 @@ deepforge::runtime::OverrideStrides override_strides{
 Partial overrides must preserve the same axis relations. AVG divides by the
 resolved runtime reduction count, not the serialized maximum count. All common
 dimension, stride, and storage-span bounds still apply.
+
+One standard-f32 `TRANSPOSE` can override external plain X and Y descriptors.
+X is read-only, Y is write-only, and both retain the same compiled rank from
+one through 64. Virtual, pass-by-value, ragged, reordered, additional tensors,
+and composed graphs are excluded. The complete serialized permutation is fixed;
+for permutation `[2,0,1]`, serialized X `[2,3,4]`, and Y `[4,2,3]`, one valid
+non-contiguous call is:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{x_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {1, 2, 3},
+    {3, 1, 2}};
+deepforge::runtime::OverrideStrides override_strides{
+    {20, 5, 1},
+    {7, 4, 1}};
+```
+
+Every final descriptor pair, including after a partial override, must satisfy
+`Y[i] == X[permutation[i]]`. X and Y strides may differ as long as each layout
+is positive, non-overlapping, and within its serialized byte bound. The
+permutation itself cannot be overridden.
 
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static. Conversely,

@@ -41,6 +41,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
         case ShapeOverridePolicy::kSdpaForward:
         case ShapeOverridePolicy::kReshape:
         case ShapeOverridePolicy::kReduction:
+        case ShapeOverridePolicy::kTranspose:
             return true;
     }
     return false;
@@ -180,6 +181,30 @@ bool valid_reduction_dimensions(TensorArgumentMetadata const& x,
                            std::numeric_limits<std::int64_t>::max());
 }
 
+bool valid_transpose_dimensions(
+    TensorArgumentMetadata const& x,
+    TensorArgumentMetadata const& y,
+    std::vector<std::int64_t> const& permutation) {
+    auto const rank = x.dimensions.size();
+    if (rank == 0 || y.dimensions.size() != rank ||
+        permutation.size() != rank) {
+        return false;
+    }
+    std::vector<bool> seen(rank, false);
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+        auto const source_axis = permutation[axis];
+        if (source_axis < 0 ||
+            static_cast<std::size_t>(source_axis) >= rank ||
+            seen[static_cast<std::size_t>(source_axis)] ||
+            y.dimensions[axis] !=
+                x.dimensions[static_cast<std::size_t>(source_axis)]) {
+            return false;
+        }
+        seen[static_cast<std::size_t>(source_axis)] = true;
+    }
+    return true;
+}
+
 }  // namespace
 
 import::Status validate_graph_compile_metadata(
@@ -264,8 +289,13 @@ import::Status validate_graph_compile_metadata(
         metadata.override_policy != ShapeOverridePolicy::kSdpaForward &&
         metadata.override_policy != ShapeOverridePolicy::kReshape &&
         metadata.override_policy != ShapeOverridePolicy::kReduction &&
+        metadata.override_policy != ShapeOverridePolicy::kTranspose &&
         !metadata.override_role_uids.empty()) {
         return fail("override role UIDs require a role-based policy");
+    }
+    if (metadata.override_policy != ShapeOverridePolicy::kTranspose &&
+        !metadata.override_axis_map.empty()) {
+        return fail("override axis map requires the TRANSPOSE policy");
     }
     if (metadata.override_policy == ShapeOverridePolicy::kMatmul) {
         if (metadata.arguments.size() != 3 ||
@@ -395,6 +425,36 @@ import::Status validate_graph_compile_metadata(
             !valid_reduction_dimensions(*x, *y)) {
             return fail(
                 "REDUCTION override roles or maximum shapes are invalid");
+        }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kTranspose) {
+        if (metadata.arguments.size() != 2 ||
+            metadata.override_role_uids.size() != 2 ||
+            metadata.override_role_uids[0] ==
+                metadata.override_role_uids[1]) {
+            return fail(
+                "TRANSPOSE override metadata requires distinct X/Y role UIDs");
+        }
+        auto find_role = [&](std::size_t role) {
+            return std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == metadata.override_role_uids[role];
+                });
+        };
+        auto const x = find_role(0);
+        auto const y = find_role(1);
+        if (x == metadata.arguments.end() || y == metadata.arguments.end() ||
+            x->data_type != import::DataType::kFloat32 ||
+            y->data_type != import::DataType::kFloat32 ||
+            x->access != TensorAccess::kRead ||
+            y->access != TensorAccess::kWrite ||
+            x->storage_policy != TensorStoragePolicy::kStrided ||
+            y->storage_policy != TensorStoragePolicy::kStrided ||
+            !valid_transpose_dimensions(*x, *y,
+                                        metadata.override_axis_map)) {
+            return fail(
+                "TRANSPOSE override roles, permutation, or maximum shapes are invalid");
         }
     }
     for (auto const& argument : metadata.arguments) {

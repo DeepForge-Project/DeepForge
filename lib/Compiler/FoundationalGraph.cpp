@@ -1076,9 +1076,11 @@ Status validate_operation(OperationTag tag,
 Status validate_shape_override_subset(
     SerializedGraph const& graph,
     ShapeOverridePolicy& policy,
-    std::vector<std::int64_t>& role_uids) {
+    std::vector<std::int64_t>& role_uids,
+    std::vector<std::int64_t>& axis_map) {
     policy = ShapeOverridePolicy::kNone;
     role_uids.clear();
+    axis_map.clear();
     if (!graph.context.is_override_shape_enabled.value_or(false)) {
         return Status::ok();
     }
@@ -1138,6 +1140,65 @@ Status validate_shape_override_subset(
                             "nodes[0].outputs.Y");
         if (status.is_bad()) return status;
         policy = ShapeOverridePolicy::kReshape;
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kTranspose) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        if (operation == nullptr || !operation->input_lists.empty() ||
+            operation->inputs.size() != 1 ||
+            !operation->inputs.contains("X") ||
+            operation->outputs.size() != 1 ||
+            !operation->outputs.contains("Y")) {
+            return unsupported(
+                "nodes[0]",
+                "runtime TRANSPOSE overrides require exactly X and Y");
+        }
+        std::string_view compute_type;
+        std::vector<std::int64_t> permutation;
+        if (!read_string_attribute(*operation, "compute_data_type",
+                                   compute_type) ||
+            !read_integer_array(*operation, "permutation", permutation)) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "TRANSPOSE override attributes are malformed");
+        }
+        if (compute_type != "FLOAT") {
+            return unsupported(
+                "nodes[0]",
+                "runtime TRANSPOSE overrides require standard-f32 semantics");
+        }
+
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime TRANSPOSE overrides require external plain f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            role_uids.push_back(uid);
+            return Status::ok();
+        };
+        auto status = check_role(operation->inputs.at("X"),
+                                 "nodes[0].inputs.X");
+        if (status.is_bad()) return status;
+        status = check_role(operation->outputs.at("Y"),
+                            "nodes[0].outputs.Y");
+        if (status.is_bad()) return status;
+        policy = ShapeOverridePolicy::kTranspose;
+        axis_map = std::move(permutation);
         return Status::ok();
     }
     if (graph.nodes.size() == 1 &&
@@ -1424,8 +1485,9 @@ Status analyze_graph(SerializedGraph const& graph,
     }
     ShapeOverridePolicy override_policy = ShapeOverridePolicy::kNone;
     std::vector<std::int64_t> override_role_uids;
+    std::vector<std::int64_t> override_axis_map;
     auto status = validate_shape_override_subset(
-        graph, override_policy, override_role_uids);
+        graph, override_policy, override_role_uids, override_axis_map);
     if (status.is_bad()) return status;
     auto const has_specialized_operation = std::any_of(
         graph.nodes.begin(), graph.nodes.end(), [](import::NodeDesc const& node) {
@@ -1747,6 +1809,7 @@ Status analyze_graph(SerializedGraph const& graph,
         graph.context.is_override_shape_enabled.value_or(false);
     candidate.override_policy = override_policy;
     candidate.override_role_uids = std::move(override_role_uids);
+    candidate.override_axis_map = std::move(override_axis_map);
     for (auto const& [uid, info] : usage) {
         auto const tensor_it = graph.tensors.find(uid);
         if (tensor_it == graph.tensors.end()) {
@@ -2107,23 +2170,27 @@ Status emit_transpose(::mlir::OpBuilder& builder,
     auto const x_uid = std::get<std::int64_t>(operation.inputs.at("X"));
     auto const y_uid = std::get<std::int64_t>(operation.outputs.at("Y"));
     auto const& y = graph.tensors.at(y_uid);
+    auto const dynamic =
+        graph.context.is_override_shape_enabled.value_or(false);
     std::vector<std::int64_t> permutation;
     (void)read_integer_array(operation, "permutation", permutation);
-    return emit_flat_loop(
-        builder, location, y.dim, "TRANSPOSE",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& y_indices) {
-            llvm::SmallVector<::mlir::Value> x_indices(y_indices.size());
-            for (std::size_t index = 0; index < permutation.size(); ++index) {
-                x_indices[static_cast<std::size_t>(permutation[index])] =
-                    y_indices[index];
-            }
-            auto value = ::mlir::memref::LoadOp::create(
-                body_builder, body_location, values.at(x_uid), x_indices);
-            ::mlir::memref::StoreOp::create(body_builder, body_location, value,
-                                            values.at(y_uid), y_indices);
-        });
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& y_indices) {
+        llvm::SmallVector<::mlir::Value> x_indices(y_indices.size());
+        for (std::size_t index = 0; index < permutation.size(); ++index) {
+            x_indices[static_cast<std::size_t>(permutation[index])] =
+                y_indices[index];
+        }
+        auto value = ::mlir::memref::LoadOp::create(
+            body_builder, body_location, values.at(x_uid), x_indices);
+        ::mlir::memref::StoreOp::create(body_builder, body_location, value,
+                                        values.at(y_uid), y_indices);
+    };
+    return dynamic
+               ? emit_dynamic_loop(builder, location, values.at(y_uid),
+                                   y.dim.size(), body)
+               : emit_flat_loop(builder, location, y.dim, "TRANSPOSE", body);
 }
 
 Status emit_slice(::mlir::OpBuilder& builder,

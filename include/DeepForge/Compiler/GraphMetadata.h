@@ -27,6 +27,7 @@ enum class ShapeOverridePolicy : std::uint8_t {
     kSdpaForward,
     kReshape,
     kReduction,
+    kTranspose,
 };
 
 enum class TensorStoragePolicy : std::uint8_t {
@@ -58,6 +59,7 @@ struct GraphCompileMetadata {
     bool override_shape_enabled = false;
     ShapeOverridePolicy override_policy = ShapeOverridePolicy::kNone;
     std::vector<std::int64_t> override_role_uids;
+    std::vector<std::int64_t> override_axis_map;
 
     bool operator==(GraphCompileMetadata const&) const = default;
 };

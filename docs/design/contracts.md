@@ -311,6 +311,11 @@ REDUCTION policy 只接受单个标准 f32 operation，支持已有的全部 9 �
 pass-by-value、ragged、reordered 或额外 tensor 均被拒绝，也不支持组合图。Metadata
 按 X、Y 顺序记录两个不同的 role UID。
 
+TRANSPOSE policy 只接受单个标准 f32 operation。X/Y 必须是相同固定 rank 1 至 64 的
+external plain strided tensor；X 只读，Y 只写。序列化 permutation 完整且固定。
+Virtual、pass-by-value、ragged、reordered、额外 tensor 和组合图均被拒绝。Metadata
+记录 X/Y role UID 及 output-axis 到 input-axis 的 permutation。
+
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
 override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
 rank，dimension 为正且不超过编译上界；stride 为正并满足当前支持的不重叠条件，
@@ -332,8 +337,11 @@ dimension 可以在固定 axis 间重新分配该元素总数；完整和 partia
 保持该关系。REDUCTION 的 axis 分类由编译 X/Y extent 冻结：二者不同时为归约 axis，
 且编译 Y extent 为 1；runtime Y 仍为 1，runtime X 可缩小。其他 axis 的 runtime X/Y
 extent 必须相同。完整和 partial override 都必须保持该分类。
+TRANSPOSE 的每组最终 descriptor 必须满足 `Y[i] == X[permutation[i]]`；rank 和
+permutation 不能改变，完整或 partial override 只有在最终关系仍成立时才能改变
+dimension 和 stride。
 
-编译器为五个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
+编译器为六个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
 loop bound。Runtime descriptor 将解析结果传给进程内对象和 artifact-loaded 对象。
 Pointwise virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
 规划的 workspace 上建立内部 packed view；MATMUL loop 使用 runtime C extent、
@@ -341,15 +349,17 @@ runtime K 和 runtime singleton-batch 选择；SDPA loop 使用 runtime Q/O exte
 runtime K sequence length 执行 softmax 和 V reduction。RESHAPE loop 遍历 runtime Y
 extent，并将每个 lexicographic linear index 映射回 runtime X descriptor。REDUCTION
 loop 使用 runtime Y output extent 和 runtime X reduction extent；AVG 从后者计算
-divisor。Alias 检查
+divisor。TRANSPOSE loop 使用 runtime Y extent，并通过固定 permutation 将每个 output
+index 映射到 X。Alias 检查
 使用本次解析出的 external byte span。Workspace 保持静态上界，workspace query 与
 execute 使用同一套校验。
 
 Artifact format `3` 至 `5` 记录两个 context flag 和 pointwise policy `1`；v6 增加
 MATMUL policy `2` 及其有序 role UID；v7 使用同一 role-list 字段增加 SDPA-forward
 policy `3`；v8 以 X/Y role UID 增加 LOGICAL RESHAPE policy `4`；v9 以 X/Y role UID
-增加 REDUCTION policy `5`。v1/v2 reader 默认关闭 override metadata，v1-v5 reader
-默认 role UID 为空，v6-v8 仍可分别连同 MATMUL/SDPA/RESHAPE role 读取。固定
+增加 REDUCTION policy `5`；v10 增加 TRANSPOSE policy `6`、X/Y role UID 和固定
+permutation。v1/v2 reader 默认关闭 override metadata，v1-v5 reader 默认 role UID
+为空，v6-v9 仍可连同各自 role metadata 读取，旧格式的 axis map 默认为空。固定
 Frontend MATMUL sample 可执行大于 fake cache shape
 的 descriptor，但 DeepForge 明确要求每个 runtime dimension 和 byte span 都位于
 序列化上界内：公开 UID-map ABI 只携带 pointer，没有 allocation length，因而无法
@@ -404,7 +414,7 @@ tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，
 
 Artifact format `5` 首次持久化 ragged storage policy、offset/sequence UID 和正的
 逻辑 sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用
-对应 cache block size。Format v6 至 v9 保留这些字段，reader 接受 v1-v8，其中 v4
+对应 cache block size。Format v6 至 v10 保留这些字段，reader 接受 v1-v9，其中 v4
 divisor 默认为 1。
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value 扩展

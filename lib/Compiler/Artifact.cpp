@@ -602,11 +602,22 @@ Status serialize_artifact(CompilationResult const& compilation,
     append_u32(bytes, compilation.metadata.override_shape_enabled ? 1U : 0U);
     append_u32(bytes,
                static_cast<std::uint32_t>(compilation.metadata.override_policy));
-    append_u32(
-        bytes,
-        static_cast<std::uint32_t>(compilation.metadata.override_role_uids.size()));
+    if (compilation.metadata.override_role_uids.size() >
+            std::numeric_limits<std::uint32_t>::max() ||
+        compilation.metadata.override_axis_map.size() >
+            std::numeric_limits<std::uint32_t>::max()) {
+        return fail(ErrorCode::kDimensionOverflow, "artifact.override",
+                    "override metadata is too large");
+    }
+    append_u32(bytes, static_cast<std::uint32_t>(
+                          compilation.metadata.override_role_uids.size()));
     for (auto uid : compilation.metadata.override_role_uids) {
         append_i64(bytes, uid);
+    }
+    append_u32(bytes, static_cast<std::uint32_t>(
+                          compilation.metadata.override_axis_map.size()));
+    for (auto axis : compilation.metadata.override_axis_map) {
+        append_i64(bytes, axis);
     }
 
     if (compilation.metadata.arguments.size() >
@@ -715,6 +726,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version != kMatmulOverrideArtifactFormatVersion &&
         version != kSdpaOverrideArtifactFormatVersion &&
         version != kReshapeOverrideArtifactFormatVersion &&
+        version != kReductionOverrideArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -746,6 +758,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version == kMatmulOverrideArtifactFormatVersion ||
         version == kSdpaOverrideArtifactFormatVersion ||
         version == kReshapeOverrideArtifactFormatVersion ||
+        version == kReductionOverrideArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -763,8 +776,10 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             maximum_policy = ShapeOverridePolicy::kSdpaForward;
         } else if (version == kReshapeOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kReshape;
-        } else if (version == kArtifactFormatVersion) {
+        } else if (version == kReductionOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kReduction;
+        } else if (version == kArtifactFormatVersion) {
+            maximum_policy = ShapeOverridePolicy::kTranspose;
         }
         if (override_policy >
             static_cast<std::uint32_t>(maximum_policy)) {
@@ -777,6 +792,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         if (version == kMatmulOverrideArtifactFormatVersion ||
             version == kSdpaOverrideArtifactFormatVersion ||
             version == kReshapeOverrideArtifactFormatVersion ||
+            version == kReductionOverrideArtifactFormatVersion ||
             version == kArtifactFormatVersion) {
             std::uint32_t role_count = 0;
             if (!reader.read_u32(role_count) || role_count > 64) {
@@ -786,6 +802,19 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             for (auto& uid : result.metadata.override_role_uids) {
                 if (!reader.read_i64(uid)) {
                     return parse_failure("override role metadata is truncated");
+                }
+            }
+        }
+        if (version == kArtifactFormatVersion) {
+            std::uint32_t axis_count = 0;
+            if (!reader.read_u32(axis_count) || axis_count > 64) {
+                return parse_failure("override axis metadata is malformed");
+            }
+            result.metadata.override_axis_map.resize(axis_count);
+            for (auto& axis : result.metadata.override_axis_map) {
+                if (!reader.read_i64(axis)) {
+                    return parse_failure(
+                        "override axis metadata is truncated");
                 }
             }
         }
@@ -813,6 +842,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                  version == kMatmulOverrideArtifactFormatVersion ||
                  version == kSdpaOverrideArtifactFormatVersion ||
                  version == kReshapeOverrideArtifactFormatVersion ||
+                 version == kReductionOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
@@ -826,6 +856,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
                  version == kMatmulOverrideArtifactFormatVersion ||
                  version == kSdpaOverrideArtifactFormatVersion ||
                  version == kReshapeOverrideArtifactFormatVersion ||
+                 version == kReductionOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_i64(argument.ragged_sequence_divisor) ||
                  argument.ragged_sequence_divisor <= 0)) {

@@ -127,13 +127,14 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
   packed logical-sequence divisors, and version 6 for ordered MATMUL override
   roles. Version 7 adds the SDPA-forward override policy, version 8 adds the
   logical-RESHAPE override policy, and version 9 adds the REDUCTION override
-  policy while retaining prior-version read compatibility.
+  policy. Version 10 adds the TRANSPOSE override policy and fixed permutation
+  metadata while retaining prior-version read compatibility.
 
 The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic,
 format-v3 shape-override, format-v4 ragged-storage, and format-v5
 ragged-sequence artifacts, plus format-v6 MATMUL-override, format-v7
 SDPA-override, and format-v8 RESHAPE-override artifacts. Current compilations
-write format v9. Unknown
+also read format-v9 REDUCTION-override artifacts and write format v10. Unknown
 artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
@@ -325,9 +326,17 @@ there while Y remains one, and retained runtime X/Y extents remain equal.
 Runtime loops use resolved extents and AVG uses the runtime reduction count.
 Artifact v9, non-contiguous execution, maximum and partial overrides, reload,
 malformed relations/graphs, Release, ASan, and UBSan form its acceptance set.
+The fourteenth implements bounded descriptor overrides for one standard-f32
+TRANSPOSE. External plain X/Y tensors retain the same fixed rank and the
+serialized permutation. Runtime dimensions and independent non-overlapping
+strides may change within serialized bounds when final descriptors preserve
+`Y[i] == X[permutation[i]]`. Artifact v10 persists X/Y roles and the
+permutation. Non-contiguous and maximum execution, reload, partial overrides,
+malformed permutations/relations/graphs, Release, ASan, and UBSan form its
+acceptance set.
 
 **Work:** expand dynamic behavior beyond the delivered exact-pointwise,
-single standard-f32 MATMUL, logical-RESHAPE, REDUCTION, and SDPA-forward descriptor
+single standard-f32 MATMUL, logical-RESHAPE, REDUCTION, TRANSPOSE, and SDPA-forward descriptor
 overrides, and MATMUL extent-override subsets; then evaluate fusion, threading,
 additional vector schedules, and
 family-specific cost models

@@ -536,9 +536,21 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     roles while v1-v8 remain readable. Non-contiguous and maximum-shape
     execution, reload, malformed relation/graph cases, Release, ASan, and UBSan
     cover the increment without changing the public execute/workspace ABI.
+22. Completed C6.14 bounded TRANSPOSE descriptor override. One standard-f32
+    `TRANSPOSE` accepts Frontend X/Y UID, shape, and stride arrays for external
+    plain tensors with the same fixed rank. The serialized permutation is
+    persisted in metadata and runtime validation requires every complete or
+    partial override to preserve `Y[i] == X[permutation[i]]`. Dynamic loops use
+    resolved Y extents while X/Y may use independent positive non-overlapping
+    strides within serialized byte bounds. Artifact v10 records ordered X/Y
+    roles and the permutation while v1-v9 remain readable. Non-contiguous and
+    maximum-shape execution, reload, malformed permutation/relation/graph cases,
+    Release, ASan, and UBSan cover the increment without changing the public
+    execute/workspace ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
-exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, REDUCTION, and dense
+exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, REDUCTION,
+TRANSPOSE, and dense
 standard-f32 SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to

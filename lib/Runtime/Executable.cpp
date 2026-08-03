@@ -366,6 +366,58 @@ Status resolve_overrides(
                     "REDUCTION runtime dimensions do not preserve reduced axes");
             }
         }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kTranspose) {
+        if (metadata.override_role_uids.size() != 2) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "TRANSPOSE override role metadata is malformed");
+        }
+        std::array<ResolvedArgument const*, 2> roles{};
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == metadata.override_role_uids[role];
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "TRANSPOSE override role UID is unresolved");
+            }
+            roles[role] = &resolved[static_cast<std::size_t>(
+                argument - metadata.arguments.begin())];
+        }
+        auto const& x = roles[0]->dimensions;
+        auto const& y = roles[1]->dimensions;
+        auto const& permutation = metadata.override_axis_map;
+        if (permutation.size() != x.size()) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "TRANSPOSE override permutation metadata is malformed");
+        }
+        if (x.size() != y.size()) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "TRANSPOSE X and Y runtime ranks must match");
+        }
+        std::vector<bool> seen(x.size(), false);
+        for (std::size_t axis = 0; axis < y.size(); ++axis) {
+            auto const source_axis = permutation[axis];
+            if (source_axis < 0 ||
+                static_cast<std::size_t>(source_axis) >= x.size() ||
+                seen[static_cast<std::size_t>(source_axis)]) {
+                return fail(
+                    ErrorCode::kUnsupportedExecutionMetadata,
+                    "runtime.override",
+                    "TRANSPOSE override permutation metadata is malformed");
+            }
+            seen[static_cast<std::size_t>(source_axis)] = true;
+            if (y[axis] != x[static_cast<std::size_t>(source_axis)]) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "TRANSPOSE runtime dimensions do not match the permutation");
+            }
+        }
     }
     output = std::move(resolved);
     return Status::ok();

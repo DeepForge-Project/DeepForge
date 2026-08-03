@@ -233,6 +233,9 @@ retaining static allocation maxima.
 One standard-f32 REDUCTION also accepts bounded external plain X/Y descriptor
 overrides. Compiled maxima freeze reduced axes; runtime Y stays one there,
 retained X/Y extents stay equal, and AVG uses the runtime reduction count.
+One standard-f32 TRANSPOSE accepts bounded external plain X/Y descriptor
+overrides of the same fixed rank. Runtime dimensions must preserve the fixed
+serialized permutation, while each tensor may use independent valid strides.
 Runtime scalar pass-by-value inputs are accepted as external, input-only,
 all-one tensors whose host pointer is supplied by ordinary UID. Embedded/fused
 pass-by-value payloads use the same descriptor subset with an exact typed
@@ -245,7 +248,7 @@ tables, forward block masks, and forward/backward sink tokens. One dense
 standard-f32 SDPA forward also accepts bounded descriptor overrides for B, Sq,
 and Skv while preserving fixed heads, embeddings, GQA, and row-output
 relations. Dynamic behavior outside the delivered pointwise, MATMUL, RESHAPE,
-REDUCTION, and SDPA-forward descriptor-override subsets, threading, and broad
+REDUCTION, TRANSPOSE, and SDPA-forward descriptor-override subsets, threading, and broad
 fusion remain.
 `INT8x32`
 and `F16x16` stay non-executable until a modern serialized-Graph producer defines

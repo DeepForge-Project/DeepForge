@@ -1011,7 +1011,7 @@ int main() {
                     deepforge::compiler::ShapeOverridePolicy::kReduction &&
                 dynamic_reduction_info.metadata.override_role_uids ==
                     std::vector<std::int64_t>({211, 212}),
-            "artifact v9 preserves REDUCTION override metadata");
+            "artifact v10 preserves REDUCTION override metadata");
         if (dynamic_reduction_loaded) {
             std::fill(dynamic_x.begin(), dynamic_x.end(), -77.0F);
             std::fill(dynamic_y.begin(), dynamic_y.end(), -99.0F);
@@ -1304,7 +1304,7 @@ int main() {
                     deepforge::compiler::kArtifactFormatVersion &&
                 dynamic_matmul_info.metadata.override_role_uids ==
                     std::vector<std::int64_t>({312, 313, 314}),
-            "artifact v9 preserves MATMUL role UIDs");
+            "artifact v10 preserves MATMUL role UIDs");
         if (dynamic_matmul_loaded) {
             std::fill(dynamic_c.begin(), dynamic_c.end(), -99.0F);
             status = dynamic_matmul_loaded->execute(

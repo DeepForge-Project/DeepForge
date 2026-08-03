@@ -478,8 +478,16 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     count。Artifact v9 记录有序 X/Y role，同时保持 v1-v8 可读。非连续和最大 shape
     执行、reload、错误关系/图、Release、ASan 和 UBSan 覆盖该增量，公开
     execute/workspace ABI 不变。
+22. 已完成：C6.14 有界 TRANSPOSE descriptor override。单个标准 f32 `TRANSPOSE`
+    接受相同固定 rank 的 external plain X/Y Frontend UID、shape、stride array。
+    Metadata 持久化序列化 permutation；完整或 partial override 都必须保持
+    `Y[i] == X[permutation[i]]`。Dynamic loop 使用最终 Y extent，X/Y 可分别使用位于
+    序列化 byte bound 内的正且不重叠 stride。Artifact v10 记录有序 X/Y role 和
+    permutation，同时保持 v1-v9 可读。非连续和最大 shape 执行、reload、错误
+    permutation/关系/图、Release、ASan 和 UBSan 覆盖该增量，公开 execute/workspace
+    ABI 不变。
 
-剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION
+剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION、TRANSPOSE
 与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
 v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`

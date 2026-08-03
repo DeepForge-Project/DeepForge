@@ -152,7 +152,7 @@ Pointwise mode 的输入元数被严格验证：
 | `CONV_DGRAD` | 同一 convolution 子集的 X 梯度 |
 | `CONV_WGRAD` | 同一 convolution 子集的 W 梯度 |
 | `RESHAPE` | `LOGICAL` mode、元素数相同；`VIEW_ONLY` alias 延后 |
-| `TRANSPOSE` | 静态 permutation，每个轴恰好出现一次 |
+| `TRANSPOSE` | 静态完整 permutation，每个轴恰好出现一次；单个标准 f32 operation 支持有界 X/Y descriptor override |
 | `SLICE` | rank 保持、半开区间不越界、正整数 stride |
 | `CONCATENATE` | 静态编号输入和非负 axis；不支持 `in_place_index` |
 | `POINTWISE` | 全部 50 个 mode、f32 输出、尾维对齐的 NumPy broadcast |
@@ -287,6 +287,11 @@ plain X/Y 保持相同固定 rank；编译 X/Y 最大 shape 冻结归约 axis，
 axis 保持 1 而 runtime X 可缩小，保留 axis 的 runtime X/Y extent 保持相同。AVG
 使用最终 runtime reduction count。Pass-by-value、ragged/reordered storage、virtual
 tensor 和组合图均被拒绝。
+Shape override 还支持单个标准 f32 `TRANSPOSE`。External plain X/Y 保持相同固定
+rank 和完整序列化 permutation；runtime dimension 与各自独立的非重叠 stride 可在
+序列化 storage bound 内改变，但最终 descriptor 必须满足
+`Y[i] == X[permutation[i]]`。Pass-by-value、ragged/reordered storage、virtual tensor、
+额外 tensor 和组合图均被拒绝。
 编译 dimension 是上界；runtime dimension 必须为正且
 不超过该上界，runtime stride 必须满足当前支持的正且不重叠条件，每个 external
 storage span 必须位于编译 bound 内。dynamic flag 单独出现时只持久化 metadata，
@@ -296,9 +301,9 @@ MATMUL/MATMUL_FP8 独立支持可选 external plain INT32 M/N/K input；它们�
 上界内选择输出和 reduction extent；标准 MATMUL 在 M/N 外使用有限 f32 padding
 value，MATMUL_FP8 使用零。显式 alias、其他动态 operation、文档所列标准 f32 SDPA
 子集外的 ragged tensor，以及固定版本现代 Graph producer 未生成的物理 reorder
-契约延后。新 artifact 使用 format v9 记录有序 REDUCTION override role，同时保留
-v8 LOGICAL RESHAPE role、v7 SDPA-forward role、v6 MATMUL role、v4 ragged reference
-和 v5 逻辑 sequence divisor；v1-v8 继续
+契约延后。新 artifact 使用 format v10 记录有序 TRANSPOSE role 和固定 permutation，
+同时保留 v9 REDUCTION role、v8 LOGICAL RESHAPE role、v7 SDPA-forward role、v6
+MATMUL role、v4 ragged reference 和 v5 逻辑 sequence divisor；v1-v9 继续
 可读，其中 v4 divisor 默认为 1，v6 之前的 role list 为空。
 
 Schema 识别通过不表示该 tag 的每一种配置都可 lowering 或在 CPU 执行。声明子集

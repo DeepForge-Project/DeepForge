@@ -118,12 +118,13 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
   后续为 dynamic policy metadata 将 writer 升到 v3，为 ragged storage reference
   升到 v4，为 packed logical-sequence divisor 升到 v5，再为有序 MATMUL override
   role 升到 v6。v7 增加 SDPA-forward override policy，v8 增加 LOGICAL RESHAPE
-  override policy，v9 增加 REDUCTION override policy，并保持旧版本读取兼容。
+  override policy，v9 增加 REDUCTION override policy，v10 增加 TRANSPOSE override
+  policy 和固定 permutation metadata，并保持旧版本读取兼容。
 
 兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override、
 format-v4 ragged-storage 和 format-v5 ragged-sequence artifact；当前新编译 graph 写
-format v9，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override 和
-format-v8 RESHAPE-override artifact。未知 artifact version
+format v10，同时继续读取 format-v6 MATMUL-override、format-v7 SDPA-override、
+format-v8 RESHAPE-override 和 format-v9 REDUCTION-override artifact。未知 artifact version
 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
@@ -291,9 +292,15 @@ axis，runtime X 可在该 axis 缩小而 Y 保持 1，保留 axis 的 runtime X
 相同。Loop 使用最终 runtime extent，AVG 使用 runtime reduction count。Artifact
 v9、非连续 stride、最大/partial override、reload、错误关系/图、Release、ASan 和
 UBSan 构成验收集。
+第十四个为单个标准 f32 TRANSPOSE 实现有界 descriptor override。External plain X/Y
+tensor 保持相同固定 rank 和序列化 permutation；runtime dimension 与各自独立的非重叠
+stride 可在序列化 bound 内变化，但最终 descriptor 必须满足
+`Y[i] == X[permutation[i]]`。Artifact v10 持久化 X/Y role 和 permutation。非连续与
+最大 shape 执行、reload、partial override、错误 permutation/关系/图、Release、ASan
+和 UBSan 构成验收集。
 
 **工作内容**：将动态行为扩展到已交付 exact-pointwise、单个标准 f32 MATMUL 与
-LOGICAL RESHAPE、REDUCTION、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
+LOGICAL RESHAPE、REDUCTION、TRANSPOSE、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
 之外；随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
 除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
 `INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成

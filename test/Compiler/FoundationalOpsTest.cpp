@@ -101,6 +101,18 @@ Json reshape_node(std::string name,
                 {"reshape_mode", "LOGICAL"}};
 }
 
+Json transpose_node(std::string name,
+                    std::int64_t x,
+                    std::int64_t y,
+                    std::vector<std::int64_t> permutation) {
+    return Json{{"tag", "TRANSPOSE"},
+                {"name", std::move(name)},
+                {"inputs", Json::object({{"X", x}})},
+                {"outputs", Json::object({{"Y", y}})},
+                {"compute_data_type", "FLOAT"},
+                {"permutation", std::move(permutation)}};
+}
+
 Json reshape_graph() {
     return Json{
         {"context",
@@ -148,6 +160,29 @@ Json dynamic_reshape_graph() {
          Json::object(
              {{"301", tensor("X", 301, {2, 3, 4}, {20, 6, 1}, false)},
               {"302", tensor("Y", 302, {4, 6}, {8, 1}, false)}})}};
+}
+
+Json dynamic_transpose_graph() {
+    return Json{
+        {"context",
+         Json{{"name", "dynamic_transpose"},
+              {"compute_data_type", "FLOAT"},
+              {"intermediate_data_type", "FLOAT"},
+              {"io_data_type", "FLOAT"},
+              {"sm_count", -1},
+              {"is_dynamic_shape_enabled", false},
+              {"is_override_shape_enabled", true}}},
+        {"graph_uid", 2006},
+        {"json_version", "1.0"},
+        {"cudnn_backend_version", "cpu-test"},
+        {"cudnn_frontend_version", 12400},
+        {"nodes",
+         Json::array(
+             {transpose_node("dynamic_transpose", 311, 312, {2, 0, 1})})},
+        {"tensors",
+         Json::object(
+             {{"311", tensor("X", 311, {2, 3, 4}, {20, 6, 1}, false)},
+              {"312", tensor("Y", 312, {4, 2, 3}, {9, 4, 1}, false)}})}};
 }
 
 Json transform_graph() {
@@ -416,7 +451,7 @@ void run_dynamic_reshape_tests(TestRunner& tests) {
             artifact_info.metadata.override_policy ==
                 deepforge::compiler::ShapeOverridePolicy::kReshape &&
             artifact_info.metadata.override_role_uids == override_uids,
-        "artifact v9 preserves ordered RESHAPE override roles");
+        "artifact v10 preserves ordered RESHAPE override roles");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,
@@ -504,6 +539,185 @@ void run_dynamic_reshape_tests(TestRunner& tests) {
     tests.check(status.code() ==
                     deepforge::import::ErrorCode::kUnsupportedOperation,
                 "RESHAPE overrides reject composed graphs");
+}
+
+void run_dynamic_transpose_tests(TestRunner& tests) {
+    deepforge::import::SerializedGraph graph;
+    auto status = parse_graph(dynamic_transpose_graph(), graph);
+    tests.good(status, "parse runtime shape-override TRANSPOSE");
+    deepforge::compiler::CompileOptions options;
+    options.capture_mlir = true;
+    deepforge::compiler::CompilationResult compilation;
+    if (status.is_good()) {
+        status = deepforge::compiler::compile_graph(graph, options, compilation);
+    }
+    tests.good(status, "compile runtime shape-override TRANSPOSE");
+    if (status.is_bad() || !compilation.executable) return;
+
+    tests.check(
+        !compilation.metadata.dynamic_shape_enabled &&
+            compilation.metadata.override_shape_enabled &&
+            compilation.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kTranspose &&
+            compilation.metadata.override_role_uids ==
+                std::vector<std::int64_t>({311, 312}) &&
+            compilation.metadata.override_axis_map ==
+                std::vector<std::int64_t>({2, 0, 1}) &&
+            compilation.workspace.size_bytes == 0 &&
+            compilation.imported_mlir.find("memref.dim") !=
+                std::string::npos &&
+            compilation.imported_mlir.find("?x?x?xf32") !=
+                std::string::npos,
+        "TRANSPOSE override records roles and permutation and emits runtime descriptors");
+
+    std::vector<float> x(36, -77.0F);
+    std::vector<float> y(34, -99.0F);
+    for (std::int64_t b = 0; b < 2; ++b) {
+        for (std::int64_t c = 0; c < 3; ++c) {
+            x[static_cast<std::size_t>(b * 5 + c)] =
+                static_cast<float>(10 * b + c);
+        }
+    }
+    deepforge::runtime::VariantPack pack{{311, x.data()}, {312, y.data()}};
+    deepforge::runtime::OverrideUids const override_uids{311, 312};
+    deepforge::runtime::OverrideShapes const override_shapes{{1, 2, 3},
+                                                              {3, 1, 2}};
+    deepforge::runtime::OverrideStrides const override_strides{{20, 5, 1},
+                                                                {7, 4, 1}};
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes, override_strides);
+    tests.good(status, "execute runtime shape-override TRANSPOSE");
+    auto runtime_output_matches = [&]() {
+        std::vector<bool> occupied(y.size(), false);
+        bool matches = true;
+        for (std::int64_t c = 0; c < 3; ++c) {
+            for (std::int64_t b = 0; b < 2; ++b) {
+                auto const offset = static_cast<std::size_t>(c * 7 + b);
+                occupied[offset] = true;
+                matches = matches &&
+                          y[offset] == static_cast<float>(10 * b + c);
+            }
+        }
+        for (std::size_t index = 0; index < y.size(); ++index) {
+            matches = matches && (occupied[index] || y[index] == -99.0F);
+        }
+        return matches;
+    };
+    tests.check(runtime_output_matches(),
+                "dynamic TRANSPOSE honors permutation and non-contiguous strides");
+
+    std::vector<std::uint8_t> artifact;
+    status = deepforge::compiler::serialize_artifact(compilation, artifact);
+    tests.good(status, "serialize runtime shape-override TRANSPOSE artifact");
+    deepforge::compiler::ArtifactInfo artifact_info;
+    std::unique_ptr<deepforge::runtime::Executable> loaded;
+    if (status.is_good()) {
+        status = deepforge::compiler::load_artifact_executable(
+            artifact, loaded, &artifact_info);
+    }
+    tests.good(status, "load runtime shape-override TRANSPOSE artifact");
+    tests.check(
+        artifact_info.format_version ==
+                deepforge::compiler::kArtifactFormatVersion &&
+            artifact_info.metadata.override_policy ==
+                deepforge::compiler::ShapeOverridePolicy::kTranspose &&
+            artifact_info.metadata.override_role_uids == override_uids &&
+            artifact_info.metadata.override_axis_map ==
+                std::vector<std::int64_t>({2, 0, 1}),
+        "artifact v10 preserves ordered TRANSPOSE roles and permutation");
+    if (loaded) {
+        std::fill(y.begin(), y.end(), -99.0F);
+        status = loaded->execute(nullptr, pack, nullptr, override_uids,
+                                 override_shapes, override_strides);
+        tests.good(status, "execute loaded shape-override TRANSPOSE artifact");
+        tests.check(runtime_output_matches(),
+                    "loaded TRANSPOSE artifact uses runtime descriptors");
+    }
+
+    std::fill(x.begin(), x.end(), -77.0F);
+    std::fill(y.begin(), y.end(), -99.0F);
+    for (std::int64_t a = 0; a < 2; ++a) {
+        for (std::int64_t b = 0; b < 3; ++b) {
+            for (std::int64_t c = 0; c < 4; ++c) {
+                x[static_cast<std::size_t>(a * 20 + b * 6 + c)] =
+                    static_cast<float>(100 * a + 10 * b + c);
+            }
+        }
+    }
+    status = compilation.executable->execute(nullptr, pack, nullptr);
+    tests.good(status,
+               "execute shape-override TRANSPOSE at compiled maximum descriptors");
+    bool maximum_matches = true;
+    for (std::int64_t c = 0; c < 4; ++c) {
+        for (std::int64_t a = 0; a < 2; ++a) {
+            for (std::int64_t b = 0; b < 3; ++b) {
+                maximum_matches =
+                    maximum_matches &&
+                    y[static_cast<std::size_t>(c * 9 + a * 4 + b)] ==
+                        static_cast<float>(100 * a + 10 * b + c);
+            }
+        }
+    }
+    tests.check(maximum_matches,
+                "empty TRANSPOSE override arrays use compiled maximum descriptors");
+
+    std::int64_t workspace_size = -1;
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {311}, {{2, 3, 4}}, {{18, 5, 1}});
+    tests.good(status,
+               "partial TRANSPOSE override may change only X strides");
+    tests.check(workspace_size == 0,
+                "partial TRANSPOSE override preserves the static workspace bound");
+    status = compilation.executable->get_workspace_size(
+        nullptr, workspace_size, {311}, {{1, 3, 4}}, {{20, 6, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "partial TRANSPOSE shapes must preserve the final permutation relation");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, {{1, 2, 3}, {3, 1, 1}}, override_strides);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "TRANSPOSE rejects runtime dimensions that violate the permutation");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr, {311},
+        {{2, 3}}, {{3, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "TRANSPOSE override rank must match the compiled role");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes, {{20, 5, 1}, {1, 1, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidLayout,
+                "TRANSPOSE rejects overlapping runtime strides");
+    status = compilation.executable->execute_variant(
+        deepforge::runtime::CpuVariant::kScalar, nullptr, pack, nullptr,
+        override_uids, override_shapes, {{20, 5, 1}, {17, 4, 1}});
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "TRANSPOSE runtime span cannot exceed the compiled byte bound");
+
+    auto virtual_role = dynamic_transpose_graph();
+    virtual_role["tensors"]["312"]["is_virtual"] = true;
+    status = compile_document(virtual_role);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "TRANSPOSE overrides reject virtual role tensors");
+    auto pass_by_value = dynamic_transpose_graph();
+    pass_by_value["tensors"]["311"]["is_pass_by_value"] = true;
+    status = compile_document(pass_by_value);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "TRANSPOSE overrides reject pass-by-value role tensors");
+    auto malformed_permutation = dynamic_transpose_graph();
+    malformed_permutation["nodes"][0]["permutation"] =
+        Json::array({2, 2, 0});
+    status = compile_document(malformed_permutation);
+    tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                "TRANSPOSE overrides reject malformed permutations");
+    auto composed = transform_graph();
+    composed["context"]["is_override_shape_enabled"] = true;
+    status = compile_document(composed);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "TRANSPOSE overrides reject composed graphs");
 }
 
 }  // namespace
@@ -656,6 +870,7 @@ int main() {
     }
 
     run_dynamic_reshape_tests(tests);
+    run_dynamic_transpose_tests(tests);
 
     deepforge::import::SerializedGraph dynamic_graph;
     status = parse_graph(dynamic_pointwise_graph(), dynamic_graph);

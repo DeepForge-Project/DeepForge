@@ -312,6 +312,12 @@ Stats/Max/Sum_exp. It is unmasked or top-left causal and may change only B, Sq,
 and Skv; heads, embeddings, GQA, and all cross-tensor relations remain fixed.
 Padding/sequence metadata, bias, ALiBi, other windows, dropout, paging/ragged
 storage, sink/block masks, virtual tensors, and composed graphs are rejected.
+Shape override is also executable for one standard-f32 `RESHAPE` with
+`reshape_mode=LOGICAL`. X and Y are external plain tensors whose independently
+fixed ranks may differ. Runtime dimensions and non-overlapping strides may
+change within serialized storage bounds, but the resolved X and Y element
+counts must be equal. Pass-by-value, ragged or reordered storage, virtual
+tensors, and composed graphs are rejected.
 Compiled dimensions are maxima; runtime dimensions must be positive and no
 larger, runtime strides
 must satisfy the supported positive non-overlap condition, and each external
@@ -324,10 +330,10 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v7 for ordered SDPA-forward override roles while
-retaining v6 MATMUL roles, v4 ragged references, and v5 logical-sequence
-divisors; v1-v6 remain readable, with v4 divisors defaulted to one and pre-v6
-role lists empty.
+New artifacts use format v8 for ordered logical-RESHAPE override roles while
+retaining v7 SDPA-forward roles, v6 MATMUL roles, v4 ragged references, and v5
+logical-sequence divisors; v1-v7 remain readable, with v4 divisors defaulted to
+one and pre-v6 role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

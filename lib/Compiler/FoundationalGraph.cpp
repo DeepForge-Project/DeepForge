@@ -1083,6 +1083,64 @@ Status validate_shape_override_subset(
         return Status::ok();
     }
     if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kReshape) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        if (operation == nullptr || !operation->input_lists.empty() ||
+            operation->inputs.size() != 1 ||
+            !operation->inputs.contains("X") ||
+            operation->outputs.size() != 1 ||
+            !operation->outputs.contains("Y")) {
+            return unsupported(
+                "nodes[0]",
+                "runtime RESHAPE overrides require exactly X and Y");
+        }
+        std::string_view compute_type;
+        std::string_view mode;
+        if (!read_string_attribute(*operation, "compute_data_type",
+                                   compute_type) ||
+            !read_string_attribute(*operation, "reshape_mode", mode)) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "RESHAPE override attributes are malformed");
+        }
+        if (compute_type != "FLOAT" || mode != "LOGICAL") {
+            return unsupported(
+                "nodes[0]",
+                "runtime RESHAPE overrides require standard-f32 LOGICAL semantics");
+        }
+
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime RESHAPE overrides require external plain f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            role_uids.push_back(uid);
+            return Status::ok();
+        };
+        auto status = check_role(operation->inputs.at("X"),
+                                 "nodes[0].inputs.X");
+        if (status.is_bad()) return status;
+        status = check_role(operation->outputs.at("Y"),
+                            "nodes[0].outputs.Y");
+        if (status.is_bad()) return status;
+        policy = ShapeOverridePolicy::kReshape;
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
         graph.nodes.front().tag == OperationTag::kSdpa) {
         auto const* operation =
             std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
@@ -1930,28 +1988,53 @@ Status emit_reshape(::mlir::OpBuilder& builder,
     auto const y_uid = std::get<std::int64_t>(operation.outputs.at("Y"));
     auto const& x = graph.tensors.at(x_uid);
     auto const& y = graph.tensors.at(y_uid);
-    return emit_flat_loop(
-        builder, location, y.dim, "RESHAPE",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& y_indices) {
-            auto linear = index_constant(body_builder, body_location, 0);
-            for (std::size_t index = 0; index < y.dim.size(); ++index) {
-                linear = ::mlir::arith::AddIOp::create(
-                    body_builder, body_location,
-                    ::mlir::arith::MulIOp::create(
-                        body_builder, body_location, linear,
-                        index_constant(body_builder, body_location,
-                                       y.dim[index])),
-                    y_indices[index]);
+    auto const dynamic =
+        graph.context.is_override_shape_enabled.value_or(false);
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& y_indices) {
+        auto linear = index_constant(body_builder, body_location, 0);
+        for (std::size_t axis = 0; axis < y.dim.size(); ++axis) {
+            ::mlir::Value extent =
+                dynamic
+                    ? ::mlir::memref::DimOp::create(
+                          body_builder, body_location, values.at(y_uid),
+                          index_constant(body_builder, body_location,
+                                         static_cast<std::int64_t>(axis)))
+                    : index_constant(body_builder, body_location, y.dim[axis]);
+            linear = ::mlir::arith::AddIOp::create(
+                body_builder, body_location,
+                ::mlir::arith::MulIOp::create(
+                    body_builder, body_location, linear, extent),
+                y_indices[axis]);
+        }
+        llvm::SmallVector<::mlir::Value> x_indices;
+        if (dynamic) {
+            x_indices.resize(x.dim.size());
+            auto remaining = linear;
+            for (std::size_t axis = x.dim.size(); axis > 0; --axis) {
+                auto extent = ::mlir::memref::DimOp::create(
+                    body_builder, body_location, values.at(x_uid),
+                    index_constant(body_builder, body_location,
+                                   static_cast<std::int64_t>(axis - 1)));
+                x_indices[axis - 1] = ::mlir::arith::RemUIOp::create(
+                    body_builder, body_location, remaining, extent);
+                remaining = ::mlir::arith::DivUIOp::create(
+                    body_builder, body_location, remaining, extent);
             }
-            auto x_indices = logical_indices(body_builder, body_location,
-                                             linear, x.dim);
-            auto value = ::mlir::memref::LoadOp::create(
-                body_builder, body_location, values.at(x_uid), x_indices);
-            ::mlir::memref::StoreOp::create(body_builder, body_location, value,
-                                            values.at(y_uid), y_indices);
-        });
+        } else {
+            x_indices = logical_indices(body_builder, body_location, linear,
+                                        x.dim);
+        }
+        auto value = ::mlir::memref::LoadOp::create(
+            body_builder, body_location, values.at(x_uid), x_indices);
+        ::mlir::memref::StoreOp::create(body_builder, body_location, value,
+                                        values.at(y_uid), y_indices);
+    };
+    return dynamic
+               ? emit_dynamic_loop(builder, location, values.at(y_uid),
+                                   y.dim.size(), body)
+               : emit_flat_loop(builder, location, y.dim, "RESHAPE", body);
 }
 
 Status emit_transpose(::mlir::OpBuilder& builder,

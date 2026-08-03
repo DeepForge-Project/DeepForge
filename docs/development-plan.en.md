@@ -516,10 +516,20 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     readable. Non-contiguous execution, reload, partial and malformed
     overrides, Release, ASan, and UBSan cover the increment without changing
     the public execute/workspace ABI.
+20. Completed C6.12 bounded LOGICAL RESHAPE descriptor override. One
+    standard-f32 `RESHAPE` accepts Frontend X/Y UID, shape, and stride arrays
+    for external plain tensors whose independently fixed ranks may differ.
+    Runtime validation enforces serialized dimension/byte-span maxima,
+    supported non-overlapping strides, and equal resolved element counts after
+    complete or partial overrides. Dynamic execution preserves lexicographic
+    reshape order. Artifact v8 records ordered X/Y roles while v1-v7 remain
+    readable. Non-contiguous execution, reload, malformed span/relation/graph
+    cases, Release, ASan, and UBSan cover the increment without changing the
+    public execute/workspace ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
-exact-pointwise, single standard-f32 MATMUL, and dense standard-f32
-SDPA-forward descriptor-override subsets.
+exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, and dense
+standard-f32 SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to
 the legacy backend/filter path; neither has a reachable modern serialized-Graph

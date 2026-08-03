@@ -463,9 +463,16 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     virtual role 和组合图均被拒绝。Artifact v7 记录有序 role，同时保持 v1-v6
     可读。非连续 stride 执行、reload、partial/错误 override、Release、ASan 和 UBSan
     覆盖该增量，公开 execute/workspace ABI 不变。
+20. 已完成：C6.12 有界 LOGICAL RESHAPE descriptor override。单个标准 f32
+    `RESHAPE` 接受 external plain X/Y 的 Frontend UID、shape、stride array，X/Y 各自
+    的固定 rank 可以不同。Runtime 校验序列化 dimension/byte-span 上界、受支持的
+    非重叠 stride，以及完整或 partial override 后相等的最终元素总数；动态执行保持
+    lexicographic reshape 顺序。Artifact v8 记录有序 X/Y role，同时保持 v1-v7 可读。
+    非连续 stride 执行、reload、错误 span/关系/图、Release、ASan 和 UBSan 覆盖该
+    增量，公开 execute/workspace ABI 不变。
 
-剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL 与 dense 标准 f32
-SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
+剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE
+与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
 v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`
 helper 只存在于 legacy backend/filter 路径；两者都没有可达的现代 serialized Graph

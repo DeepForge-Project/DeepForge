@@ -6,14 +6,16 @@
 
 `.dfo` 是 DeepForge CPU MVP 的可重复编译产物。它保存运行时恢复一个
 `Executable` 所需的编译 metadata、workspace plan 和三个 x86-64 object，而不暴露
-memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `7`；reader
-同时接受版本 `6` 的 MATMUL-override artifact、版本 `5` 的 ragged-sequence
+memref descriptor 或生成 kernel 的裸 ABI。当前 writer 输出格式版本 `8`；reader
+同时接受版本 `7` 的 SDPA-override artifact、版本 `6` 的 MATMUL-override artifact、
+版本 `5` 的 ragged-sequence
 artifact、版本 `4` 的 ragged-storage artifact、
 版本 `3` 的 shape-override artifact、版本 `2` 的静态 metadata artifact 和版本 `1`
 的 Conv2D artifact。版本 `1` 会重建 argument table；版本 `1`、`2` 的
 dynamic/override metadata 均默认为关闭，版本 `1` 至 `3` 的 tensor storage 默认使用
 普通 strided addressing，版本 `4` 的全部 ragged sequence divisor 默认为 1，版本
-`1` 至 `5` 的 override role UID 默认为空；版本 `6` 保留其有序 MATMUL role UID。
+`1` 至 `5` 的 override role UID 默认为空；版本 `6` 保留其有序 MATMUL role UID，
+版本 `7` 保留其有序 SDPA-forward role UID。
 
 写入和读取入口位于 `DeepForge/Compiler/Artifact.h`：
 
@@ -38,7 +40,7 @@ UBJSON 编译所得的完整 artifact。
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 7
+u32 format_version = 8
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -49,8 +51,8 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 exact pointwise, 2 MATMUL, 3 SDPA FWD
-u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；其他为 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE
+u32 override_role_count      # policy 2 为 3；policy 3 为 4..7；policy 4 为 2；其他为 0
 i64 override_role_uids[override_role_count] # 顺序由下述 policy 定义
 
 u32 tensor_argument_count
@@ -149,6 +151,12 @@ Artifact reload 后会在 dispatch 前校验 Q/K/V/O 的 batch、sequence、embe
 GQA 关系及可选 `[B,Hq,Sq,1]` row output。版本 `6` 不能编码 policy `3`，会拒绝
 该值，同时继续保留 policy `2` 的 role metadata。
 
+版本 `8` 为单个标准 f32 LOGICAL RESHAPE 增加 policy `4`，并严格按 X、Y 顺序
+保存两个不同 UID。X/Y 各自保持编译 rank，二者 rank 可以不同；runtime dimension
+和 stride 可在各自序列化 dimension 与 byte-span 上界内改变。Artifact reload 后会在
+dispatch 前校验最终 X/Y 的正元素总数相同。版本 `7` 不能编码 policy `4`，会拒绝
+该值，同时继续保留 policy `3` 的 role metadata。
+
 数值契约固定为 `abs <= 1e-4 + 1e-3 * abs(reference)`。三个符号分别为
 `<base>_scalar`、`<base>_avx2` 和 `<base>_avx512`；object 内的 C-interface wrapper
 为 `_mlir_ciface_<symbol>`。原始函数和 wrapper 都是 ELF `GLOBAL HIDDEN`，不会成为
@@ -183,5 +191,5 @@ reader/loader 拒绝未知 format version、producer 版本、端序、不匹配
 数值契约、重复 UID、不一致 shape/padding、非法 workspace
 alignment/range/lifetime、错误的 argument table 或 adapter payload、variant
 symbol/feature、重复 variant、空 object、截断、尾随 payload 和 checksum 错误。
-顶层编码发生变化时必须增加格式版本。版本 `1` 至 `6` 的字段顺序和语义保持冻结，
-仅用于读取；新编译结果写版本 `7`。
+顶层编码发生变化时必须增加格式版本。版本 `1` 至 `7` 的字段顺序和语义保持冻结，
+仅用于读取；新编译结果写版本 `8`。

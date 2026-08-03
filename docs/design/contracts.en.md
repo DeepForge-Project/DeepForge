@@ -326,7 +326,7 @@ ABI is unchanged.
 `is_dynamic_shape_enabled` and `is_override_shape_enabled` are parsed and
 persisted independently. The dynamic flag alone is plan metadata and does not
 alter a static kernel descriptor, and override execution does not require that
-flag to be set. Enabling override selects one of three explicit policies.
+flag to be set. Enabling override selects one of four explicit policies.
 
 The exact-pointwise policy accepts a nonempty ordered DAG containing only
 `POINTWISE` nodes. Every used tensor is non-ragged, non-reordered,
@@ -349,6 +349,13 @@ unmasked or use top-left causal `right_bound=0`; padding, sequence metadata,
 bias, ALiBi, sliding windows, bottom-right alignment, dropout, paging, ragged
 storage, sink/block masks, virtual tensors, and composed graphs are rejected.
 
+The RESHAPE policy accepts exactly one standard-f32 operation with
+`reshape_mode=LOGICAL`. X and Y are external plain strided tensors whose ranks
+are independently fixed between one and 64 and may differ. X is read-only and
+Y is write-only. Virtual, pass-by-value, ragged, reordered, or additional
+tensors are rejected, as are composed graphs. Metadata records two distinct
+role UIDs in X, Y order.
+
 Compiled dimensions and `size_bytes` are maxima. At workspace query and
 execution, the three Frontend override arrays must have equal counts and unique
 external argument UIDs. Each supplied shape preserves rank, has positive
@@ -367,23 +374,30 @@ partial override such as changing one input batch extent to one while preserving
 the relation. For SDPA, only B, Sq, and Skv may change. All roles have the same
 B; Q/O share Hq and Sq, K/V share Skv, Q/K share Dqk, O/V share Dv, Hq is
 divisible by both source-head counts, and every row output is `[B,Hq,Sq,1]`.
-Heads and embedding dimensions must equal their compiled values.
+Heads and embedding dimensions must equal their compiled values. For RESHAPE,
+each final X and Y descriptor keeps its own compiled rank, and their positive
+element counts must be equal. Runtime dimensions may repartition that element
+count across the fixed axes. This relation applies after complete or partial
+overrides.
 
 The compiler emits dynamic memref dimensions and strides plus `memref.dim`
-loop bounds under all three policies. Runtime descriptors carry the resolved values
+loop bounds under all four policies. Runtime descriptors carry the resolved values
 to in-process and artifact-loaded objects. Pointwise virtual intermediates use
 the common runtime dimensions and internal packed views over workspace sized
 for serialized maxima. MATMUL loops use runtime C extents, runtime K, and
 runtime singleton-batch selection. SDPA loops use runtime Q/O extents and
-runtime K sequence length for softmax and V reduction. Alias checks use resolved external byte
-spans. Workspace remains statically bounded, and workspace query performs the
-same validation as execution.
+runtime K sequence length for softmax and V reduction. RESHAPE loops traverse
+the runtime Y extent and map each lexicographic linear index back into the
+runtime X descriptor. Alias checks use resolved external byte spans. Workspace
+remains statically bounded, and workspace query performs the same validation
+as execution.
 
 Artifact formats `3` through `5` record both context flags and pointwise policy
 `1`; v6 adds MATMUL policy `2` and its ordered role UIDs; v7 adds SDPA-forward
-policy `3` using the same role-list field. The v1/v2 readers default override
-metadata to disabled, v1-v5 readers default role UIDs to empty, and v6 remains
-readable with MATMUL roles. The pinned Frontend MATMUL sample can execute shapes larger than its fake cache
+policy `3` using the same role-list field; v8 adds logical-RESHAPE policy `4`
+with X/Y role UIDs. The v1/v2 readers default override metadata to disabled,
+v1-v5 readers default role UIDs to empty, and v6/v7 remain readable with their
+MATMUL/SDPA roles. The pinned Frontend MATMUL sample can execute shapes larger than its fake cache
 shape, but DeepForge deliberately requires every runtime dimension and byte
 span to fit the serialized maxima: the public UID-map ABI carries pointers, not
 allocation lengths, so larger descriptors cannot be validated safely.
@@ -447,7 +461,7 @@ sink input.
 Artifact format `5` introduced the ragged storage policy, offset/sequence UIDs,
 and a positive logical-sequence divisor. Ordinary ragged arguments use divisor
 one; compact page tables use the corresponding cache block size. Formats v6
-and v7 retain those fields, and the reader accepts v1-v6 with v4 divisors
+through v8 retain those fields, and the reader accepts v1-v7 with v4 divisors
 defaulted to one.
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value Extension

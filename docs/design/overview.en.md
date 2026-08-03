@@ -225,7 +225,9 @@ the schema inventory. C6 has added `F8_128x4` physical scale decoding on its
 documented block/MXFP8 ports and runtime override for an exact-shape f32
 `POINTWISE`-only DAG with virtual intermediates. One standard-f32 MATMUL also
 accepts bounded Frontend descriptor-override arrays for external plain A/B/C,
-with runtime M/N/K and batch-broadcast validation. Standard and FP8 MATMUL
+with runtime M/N/K and batch-broadcast validation. One standard-f32 LOGICAL
+RESHAPE accepts bounded external plain X/Y descriptor overrides while keeping
+each tensor's compiled rank and equal runtime element counts. Standard and FP8 MATMUL
 separately accept producer-serialized per-batch INT32 M/N/K extent tensors while
 retaining static allocation maxima.
 Runtime scalar pass-by-value inputs are accepted as external, input-only,
@@ -239,8 +241,8 @@ outputs and backward data/gradients, independently paged K/V with compact page
 tables, forward block masks, and forward/backward sink tokens. One dense
 standard-f32 SDPA forward also accepts bounded descriptor overrides for B, Sq,
 and Skv while preserving fixed heads, embeddings, GQA, and row-output
-relations. Dynamic behavior outside the delivered pointwise, MATMUL, and
-SDPA-forward descriptor-override subsets, threading, and broad fusion remain.
+relations. Dynamic behavior outside the delivered pointwise, MATMUL, RESHAPE,
+and SDPA-forward descriptor-override subsets, threading, and broad fusion remain.
 `INT8x32`
 and `F16x16` stay non-executable until a modern serialized-Graph producer defines
 both a reachable port and physical mapping.

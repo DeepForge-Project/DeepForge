@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -27,7 +27,7 @@ The foundational operation subset is:
 
 | Tag | Current constraints |
 |---|---|
-| `RESHAPE` | `LOGICAL` only; equal element count |
+| `RESHAPE` | `LOGICAL` only; equal element count; one standard-f32 operation supports bounded X/Y descriptor overrides |
 | `TRANSPOSE` | Complete static permutation |
 | `SLICE` | In-range half-open bounds and positive integer strides |
 | `CONCATENATE` | Numbered inputs, non-negative axis, no in-place mode |
@@ -77,7 +77,7 @@ documented in the runtime section. The pinned v1.24.0 schema exposes no paged
 backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the three override subsets below.
+block-scale and MXFP8 ports and the four override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -85,7 +85,7 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic execution outside the pointwise, MATMUL,
-and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
+RESHAPE, and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
 descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
@@ -509,9 +509,31 @@ Sq, K/V share Skv, Q/K share Dqk, O/V share Dv, and Hq must be divisible by Hk
 and Hv. Optional row outputs are `[B,Hq,Sq,1]`. Partial overrides are accepted
 only when the final descriptors preserve every relation.
 
+One standard-f32 `RESHAPE` with `reshape_mode=LOGICAL` can override its external
+plain X and Y descriptors. X is read-only and Y is write-only; virtual,
+pass-by-value, ragged, reordered, additional tensors, and composed graphs are
+excluded. X and Y may have different compiled ranks, but each runtime descriptor
+must keep its own rank. For serialized maxima X `[2,3,4]` and Y `[4,6]`, one
+valid non-contiguous call is:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{x_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {1, 3, 4},
+    {3, 4}};
+deepforge::runtime::OverrideStrides override_strides{
+    {20, 6, 1},
+    {7, 1}};
+```
+
+The resolved positive X and Y element counts must be equal, including after a
+partial override. Execution preserves LOGICAL reshape order: lexicographic X
+elements are written in lexicographic Y order. Dimensions, strides, and storage
+spans remain subject to the common serialized bounds above.
+
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static. Conversely,
-the Frontend MATMUL producer only needs the override flag for this policy.
+the supported descriptor-override policies require only the override flag.
 
 MATMUL extent overrides are a separate mechanism. `M_override`, `N_override`,
 and `K_override` are optional external plain INT32 serialized node inputs passed

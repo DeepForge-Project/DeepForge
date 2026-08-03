@@ -117,11 +117,13 @@ canonical C++ graph model 解决的编译时间或优化问题时，才重新评
 - `.dfo` format v2，保存通用 tensor/argument table 和各 CPU variant symbol；C6
   后续为 dynamic policy metadata 将 writer 升到 v3，为 ragged storage reference
   升到 v4，为 packed logical-sequence divisor 升到 v5，再为有序 MATMUL override
-  role 升到 v6。v7 增加 SDPA-forward override policy，并保持旧版本读取兼容。
+  role 升到 v6。v7 增加 SDPA-forward override policy，v8 增加 LOGICAL RESHAPE
+  override policy，并保持旧版本读取兼容。
 
 兼容规则继续读取 format-v1 Conv2D、format-v2 generic、format-v3 shape-override、
 format-v4 ragged-storage 和 format-v5 ragged-sequence artifact；当前新编译 graph 写
-format v7，同时继续读取 format-v6 MATMUL-override artifact。未知 artifact version
+format v8，同时继续读取 format-v6 MATMUL-override 和 format-v7 SDPA-override
+artifact。未知 artifact version
 仍然直接报错，不能静默解释。
 
 ### 4.4 Cost model 所在层
@@ -278,10 +280,15 @@ Skv，head、embedding、GQA 和跨 tensor 关系保持固定。该子集只支�
 top-left causal，不支持其他可选 attention 特性或组合图。Artifact v7、非连续
 stride 执行、reload、partial override、错误关系/图、Release、ASan 和 UBSan 构成
 验收集。
+第十二个为单个标准 f32 LOGICAL RESHAPE 实现有界 descriptor override。External
+plain X/Y tensor 各自保持固定 rank，但可在序列化 storage bound 内改变 dimension
+和非重叠 stride；最终 runtime 元素总数必须相同。Artifact v8、改变 reshape 形状的
+执行、reload、partial override、错误 span/关系/图、Release、ASan 和 UBSan 构成
+验收集。
 
 **工作内容**：将动态行为扩展到已交付 exact-pointwise、单个标准 f32 MATMUL 与
-SDPA-forward descriptor-override 和 MATMUL extent-override 子集之外；随后独立评估 fusion、
-threading、其他 vector schedule 和各操作族 cost model。
+LOGICAL RESHAPE、SDPA-forward descriptor-override 和 MATMUL extent-override 子集
+之外；随后独立评估 fusion、threading、其他 vector schedule 和各操作族 cost model。
 除 enum 转换外，固定 v1.24.0 的 `F16x16` 没有可执行 producer mapping，可执行
 `INT8x32` helper 只属于 legacy backend；两者都应等待现代 producer 契约和生成
 fixture，而不是推测实现。固定使用的

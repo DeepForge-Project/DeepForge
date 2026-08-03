@@ -713,6 +713,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version != kRaggedArtifactFormatVersion &&
         version != kRaggedSequenceArtifactFormatVersion &&
         version != kMatmulOverrideArtifactFormatVersion &&
+        version != kSdpaOverrideArtifactFormatVersion &&
         version != kArtifactFormatVersion) {
         return parse_failure("unsupported format version");
     }
@@ -742,6 +743,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         version == kRaggedArtifactFormatVersion ||
         version == kRaggedSequenceArtifactFormatVersion ||
         version == kMatmulOverrideArtifactFormatVersion ||
+        version == kSdpaOverrideArtifactFormatVersion ||
         version == kArtifactFormatVersion) {
         std::uint32_t dynamic_shape_enabled = 0;
         std::uint32_t override_shape_enabled = 0;
@@ -755,8 +757,10 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         auto maximum_policy = ShapeOverridePolicy::kPointwiseExact;
         if (version == kMatmulOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kMatmul;
-        } else if (version == kArtifactFormatVersion) {
+        } else if (version == kSdpaOverrideArtifactFormatVersion) {
             maximum_policy = ShapeOverridePolicy::kSdpaForward;
+        } else if (version == kArtifactFormatVersion) {
+            maximum_policy = ShapeOverridePolicy::kReshape;
         }
         if (override_policy >
             static_cast<std::uint32_t>(maximum_policy)) {
@@ -767,6 +771,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
         result.metadata.override_policy =
             static_cast<ShapeOverridePolicy>(override_policy);
         if (version == kMatmulOverrideArtifactFormatVersion ||
+            version == kSdpaOverrideArtifactFormatVersion ||
             version == kArtifactFormatVersion) {
             std::uint32_t role_count = 0;
             if (!reader.read_u32(role_count) || role_count > 64) {
@@ -801,6 +806,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             if ((version == kRaggedArtifactFormatVersion ||
                  version == kRaggedSequenceArtifactFormatVersion ||
                  version == kMatmulOverrideArtifactFormatVersion ||
+                 version == kSdpaOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_u32(storage_policy) ||
                  !reader.read_i64(argument.ragged_offset_uid) ||
@@ -812,6 +818,7 @@ Status parse_artifact(std::span<std::uint8_t const> input,
             }
             if ((version == kRaggedSequenceArtifactFormatVersion ||
                  version == kMatmulOverrideArtifactFormatVersion ||
+                 version == kSdpaOverrideArtifactFormatVersion ||
                  version == kArtifactFormatVersion) &&
                 (!reader.read_i64(argument.ragged_sequence_divisor) ||
                  argument.ragged_sequence_divisor <= 0)) {

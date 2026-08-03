@@ -1130,7 +1130,7 @@ int main() {
                     deepforge::compiler::kArtifactFormatVersion &&
                 dynamic_matmul_info.metadata.override_role_uids ==
                     std::vector<std::int64_t>({312, 313, 314}),
-            "artifact v7 preserves MATMUL role UIDs");
+            "artifact v8 preserves MATMUL role UIDs");
         if (dynamic_matmul_loaded) {
             std::fill(dynamic_c.begin(), dynamic_c.end(), -99.0F);
             status = dynamic_matmul_loaded->execute(

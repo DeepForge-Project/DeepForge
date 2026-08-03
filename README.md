@@ -8,7 +8,7 @@ subset to LLVM IR and x86-64 machine code, and executes it through the cuDNN
 Frontend-shaped UID variant-pack call interface.
 
 **Current status:** CPU MVP phases P0-P6, post-MVP coverage phases C0-C5, and
-the first eleven C6 increments are implemented. The end-to-end path
+the first twelve C6 increments are implemented. The end-to-end path
 includes a strict JSON/UBJSON importer, standard Tensor/Linalg IR, exactly one
 One-Shot Bufferize run, static workspace planning, scalar/AVX2/AVX-512 object
 generation, CPUID dispatch, a Frontend-shaped runtime, reloadable `.dfo`
@@ -138,8 +138,11 @@ non-broadcasting, plain f32 `POINTWISE`-only DAG with virtual intermediates, and
 for one standard-f32 `MATMUL` with external plain A/B/C tensors. Serialized
 dimensions are maxima; Frontend-shaped override arrays supply positive runtime
 dimensions and strides within compiled storage bounds. MATMUL overrides also
-preserve M/N/K relations and batch broadcasting. One dense standard-f32
-`SDPA` forward also accepts external plain Q/K/V/O and optional row-output
+preserve M/N/K relations and batch broadcasting. One standard-f32 logical
+`RESHAPE` also accepts external plain X/Y descriptors of independently fixed
+ranks; runtime dimensions may shrink or repartition elements while the X/Y
+element counts remain equal. One dense standard-f32 `SDPA` forward also accepts
+external plain Q/K/V/O and optional row-output
 descriptors; runtime B, Sq, and Skv may shrink while heads, embeddings, GQA,
 and cross-tensor relations remain fixed and validated. This subset is unmasked
 or top-left causal and excludes other optional attention features. The
@@ -388,7 +391,7 @@ memref descriptors nor raw generated-kernel signatures.
 | P5 | Complete: AVX2/AVX-512, tails, and CPUID/XGETBV dispatch |
 | P6 | Complete: CLI, reloadable artifacts, CI, benchmark, and quality gates |
 | C0-C5 | Complete: generic graph/runtime foundation and validated subsets for all 39 serialized tags |
-| C6 | In progress: `F8_128x4`, multi-node exact-pointwise plus single standard-f32 MATMUL and dense SDPA-forward descriptor overrides, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; dynamic behavior outside those delivered subsets remains |
+| C6 | In progress: `F8_128x4`, multi-node exact-pointwise plus single standard-f32 MATMUL, LOGICAL RESHAPE, and dense SDPA-forward descriptor overrides, MATMUL M/N/K extent overrides, runtime and embedded scalar pass-by-value, standard f32 SDPA ragged/packed/block-mask/sink metadata, and the first direct-Conv cost model are complete; dynamic behavior outside those delivered subsets remains |
 | Optimize | In progress: target-aware K-output unroll complete; outer-loop tiling, padding fusion, and parallelism remain benchmark-driven |
 | Re-evaluate | Reconsider Machine Dialect only after two backends need a shared abstraction |
 

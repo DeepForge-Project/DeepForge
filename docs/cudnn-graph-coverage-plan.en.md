@@ -125,13 +125,14 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
   per-variant symbols. C6 later advanced the writer to version 3 for dynamic
   policy metadata, version 4 for ragged storage references, version 5 for
   packed logical-sequence divisors, and version 6 for ordered MATMUL override
-  roles. Version 7 adds the SDPA-forward override policy while retaining
-  prior-version read compatibility.
+  roles. Version 7 adds the SDPA-forward override policy, and version 8 adds
+  the logical-RESHAPE override policy while retaining prior-version read
+  compatibility.
 
 The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic,
 format-v3 shape-override, format-v4 ragged-storage, and format-v5
-ragged-sequence artifacts, plus format-v6 MATMUL-override artifacts. Current
-compilations write format v7. Unknown
+ragged-sequence artifacts, plus format-v6 MATMUL-override and format-v7
+SDPA-override artifacts. Current compilations write format v8. Unknown
 artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
@@ -309,10 +310,18 @@ GQA, and cross-tensor relations remain fixed. The subset is unmasked or
 top-left causal and excludes optional attention features and composition.
 Artifact v7, non-contiguous execution, reload, partial overrides, malformed
 relations/graphs, Release, ASan, and UBSan form its acceptance set.
+The twelfth implements bounded descriptor overrides for one standard-f32
+logical RESHAPE. External plain X/Y tensors retain their independently fixed
+ranks but may change dimensions and non-overlapping strides within serialized
+storage bounds; their resolved runtime element counts must remain equal.
+Artifact v8, different-rank X/Y reshape execution, reload, partial overrides,
+malformed spans/relations/graphs, Release, ASan, and UBSan form its acceptance
+set.
 
 **Work:** expand dynamic behavior beyond the delivered exact-pointwise,
-single standard-f32 MATMUL and SDPA-forward descriptor-overrides, and MATMUL extent-override
-subsets; then evaluate fusion, threading, additional vector schedules, and
+single standard-f32 MATMUL, logical-RESHAPE, and SDPA-forward descriptor
+overrides, and MATMUL extent-override subsets; then evaluate fusion, threading,
+additional vector schedules, and
 family-specific cost models
 independently. Beyond enum conversion, `F16x16` has no executable producer
 mapping in pinned v1.24.0, and executable `INT8x32` helper usage is legacy

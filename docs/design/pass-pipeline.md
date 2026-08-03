@@ -248,7 +248,7 @@ workspace planner 在改写前按当前 operation order 计算静态 lifetime；
 
 ## 9. 失败策略
 
-编译期错误：schema/version、超出已声明 pointwise、MATMUL、SDPA-forward override
+编译期错误：schema/version、超出已声明 pointwise、MATMUL、RESHAPE、SDPA-forward override
 policy 的动态行为、layout、dtype、未知 node、unsupported access、无法
 workspace-plan、非法
 vectorization 或最终 dialect residue。

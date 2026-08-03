@@ -98,6 +98,21 @@ bool has_non_overlapping_layout(
     return true;
 }
 
+bool checked_element_count(std::span<std::int64_t const> dimensions,
+                           std::uint64_t& output) {
+    std::uint64_t count = 1;
+    for (auto dimension : dimensions) {
+        if (dimension <= 0 ||
+            static_cast<std::uint64_t>(dimension) >
+                std::numeric_limits<std::uint64_t>::max() / count) {
+            return false;
+        }
+        count *= static_cast<std::uint64_t>(dimension);
+    }
+    output = count;
+    return true;
+}
+
 struct ResolvedArgument {
     std::vector<std::int64_t> dimensions;
     std::vector<std::int64_t> strides;
@@ -277,6 +292,37 @@ Status resolve_overrides(
                     ErrorCode::kInvalidShape, "runtime.override",
                     "SDPA row outputs must have runtime dimensions [B,Hq,Sq,1]");
             }
+        }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kReshape) {
+        if (metadata.override_role_uids.size() != 2) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "RESHAPE override role metadata is malformed");
+        }
+        std::array<ResolvedArgument const*, 2> roles{};
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == metadata.override_role_uids[role];
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "RESHAPE override role UID is unresolved");
+            }
+            roles[role] = &resolved[static_cast<std::size_t>(
+                argument - metadata.arguments.begin())];
+        }
+        std::uint64_t x_elements = 0;
+        std::uint64_t y_elements = 0;
+        if (!checked_element_count(roles[0]->dimensions, x_elements) ||
+            !checked_element_count(roles[1]->dimensions, y_elements) ||
+            x_elements != y_elements) {
+            return fail(
+                ErrorCode::kInvalidShape, "runtime.override",
+                "RESHAPE X and Y runtime element counts must match");
         }
     }
     output = std::move(resolved);

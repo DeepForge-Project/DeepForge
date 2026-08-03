@@ -281,7 +281,7 @@ coordinate；公开 execute 和 workspace ABI 不变。
 
 `is_dynamic_shape_enabled` 与 `is_override_shape_enabled` 独立解析并持久化。仅设置
 dynamic flag 时，它只是 plan metadata，不改变静态 kernel descriptor；override 执行
-也不要求同时设置该 flag。启用 override 后只能选择以下三个明确 policy 之一。
+也不要求同时设置该 flag。启用 override 后只能选择以下四个明确 policy 之一。
 
 Exact-pointwise policy 接受非空且只包含 `POINTWISE` node 的有序 DAG。全部已用
 tensor 必须是编译 dimension 相同的非 ragged、非 reordered、非 pass-by-value FLOAT，
@@ -301,6 +301,11 @@ output。Operation 可无 mask，或使用 top-left causal `right_bound=0`；pad
 metadata、bias、ALiBi、sliding window、bottom-right alignment、dropout、paging、
 ragged storage、sink/block mask、virtual tensor 和组合图均被拒绝。
 
+RESHAPE policy 只接受单个 `reshape_mode=LOGICAL` 的标准 f32 operation。X/Y 必须
+是 external plain strided tensor，各自 rank 固定在 1 至 64 且可以不同；X 只读，Y
+只写。Virtual、pass-by-value、ragged、reordered 或额外 tensor 均被拒绝，也不支持
+组合图。Metadata 按 X、Y 顺序记录两个不同的 role UID。
+
 编译 dimension 和 `size_bytes` 是上界。workspace query 和执行时，三个 Frontend
 override array 数量必须相同，external argument UID 必须唯一。每个 shape 保持
 rank，dimension 为正且不超过编译上界；stride 为正并满足当前支持的不重叠条件，
@@ -316,20 +321,26 @@ override。
 
 SDPA 只能改变 B、Sq、Skv。全部 role 的 B 相同；Q/O 共用 Hq 和 Sq，K/V 共用
 Skv，Q/K 共用 Dqk，O/V 共用 Dv，Hq 可被两个 source-head count 整除，所有 row
-output 都是 `[B,Hq,Sq,1]`。Head 和 embedding dimension 必须保持编译值。
+output 都是 `[B,Hq,Sq,1]`。Head 和 embedding dimension 必须保持编译值。RESHAPE
+的最终 X/Y descriptor 分别保持各自的编译 rank，且正元素总数必须相同。Runtime
+dimension 可以在固定 axis 间重新分配该元素总数；完整和 partial override 都必须
+保持该关系。
 
-编译器为三个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
+编译器为四个 policy 都生成 dynamic memref dimension/stride 和基于 `memref.dim` 的
 loop bound。Runtime descriptor 将解析结果传给进程内对象和 artifact-loaded 对象。
 Pointwise virtual 中间值使用公共 runtime dimension，并在按序列化最大 descriptor
 规划的 workspace 上建立内部 packed view；MATMUL loop 使用 runtime C extent、
 runtime K 和 runtime singleton-batch 选择；SDPA loop 使用 runtime Q/O extent，并以
-runtime K sequence length 执行 softmax 和 V reduction。Alias 检查使用本次解析出的 external byte
-span。Workspace 保持静态上界，workspace query 与 execute 使用同一套校验。
+runtime K sequence length 执行 softmax 和 V reduction。RESHAPE loop 遍历 runtime Y
+extent，并将每个 lexicographic linear index 映射回 runtime X descriptor。Alias 检查
+使用本次解析出的 external byte span。Workspace 保持静态上界，workspace query 与
+execute 使用同一套校验。
 
 Artifact format `3` 至 `5` 记录两个 context flag 和 pointwise policy `1`；v6 增加
 MATMUL policy `2` 及其有序 role UID；v7 使用同一 role-list 字段增加 SDPA-forward
-policy `3`。v1/v2 reader 默认关闭 override metadata，v1-v5 reader 默认 role UID
-为空，v6 仍可连同 MATMUL role 读取。固定 Frontend MATMUL sample 可执行大于 fake cache shape
+policy `3`；v8 以 X/Y role UID 增加 LOGICAL RESHAPE policy `4`。v1/v2 reader 默认
+关闭 override metadata，v1-v5 reader 默认 role UID 为空，v6/v7 仍可分别连同
+MATMUL/SDPA role 读取。固定 Frontend MATMUL sample 可执行大于 fake cache shape
 的 descriptor，但 DeepForge 明确要求每个 runtime dimension 和 byte span 都位于
 序列化上界内：公开 UID-map ABI 只携带 pointer，没有 allocation length，因而无法
 安全校验更大的 descriptor。
@@ -383,7 +394,7 @@ tile；每个 byte 内的 key-tile bit 按 least-significant-bit first 排列，
 
 Artifact format `5` 首次持久化 ragged storage policy、offset/sequence UID 和正的
 逻辑 sequence divisor。普通 ragged argument 的 divisor 为 1，紧凑 page table 使用
-对应 cache block size。Format v6 和 v7 保留这些字段，reader 接受 v1-v6，其中 v4
+对应 cache block size。Format v6 至 v8 保留这些字段，reader 接受 v1-v7，其中 v4
 divisor 默认为 1。
 
 ### 3.8 C6 Runtime Scalar Pass-by-Value 扩展

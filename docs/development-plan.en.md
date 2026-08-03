@@ -526,9 +526,19 @@ P0-P6 and post-MVP C0-C5 completed in this order:
     readable. Non-contiguous execution, reload, malformed span/relation/graph
     cases, Release, ASan, and UBSan cover the increment without changing the
     public execute/workspace ABI.
+21. Completed C6.13 bounded REDUCTION descriptor override. One standard-f32
+    `REDUCTION` in any of the nine supported modes accepts Frontend X/Y UID,
+    shape, and stride arrays for external plain tensors with the same fixed
+    rank. Compiled maxima freeze reduced axes. Runtime Y remains one on those
+    axes while X may shrink; retained X/Y extents stay equal after complete or
+    partial overrides. Dynamic loops use resolved output and reduction extents,
+    and AVG uses the runtime reduction count. Artifact v9 records ordered X/Y
+    roles while v1-v8 remain readable. Non-contiguous and maximum-shape
+    execution, reload, malformed relation/graph cases, Release, ASan, and UBSan
+    cover the increment without changing the public execute/workspace ABI.
 
 The remaining C6 functional work is dynamic behavior outside the delivered
-exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, and dense
+exact-pointwise, single standard-f32 MATMUL, LOGICAL RESHAPE, REDUCTION, and dense
 standard-f32 SDPA-forward descriptor-override subsets.
 Beyond enum conversion, `F16x16` has only attribute round-trip
 coverage in pinned v1.24.0, and executable `INT8x32` helper usage is confined to

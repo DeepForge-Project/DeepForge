@@ -1141,6 +1141,68 @@ Status validate_shape_override_subset(
         return Status::ok();
     }
     if (graph.nodes.size() == 1 &&
+        graph.nodes.front().tag == OperationTag::kReduction) {
+        auto const* operation =
+            std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
+        if (operation == nullptr || !operation->input_lists.empty() ||
+            operation->inputs.size() != 1 ||
+            !operation->inputs.contains("X") ||
+            operation->outputs.size() != 1 ||
+            !operation->outputs.contains("Y")) {
+            return unsupported(
+                "nodes[0]",
+                "runtime REDUCTION overrides require exactly X and Y");
+        }
+        std::string_view compute_type;
+        std::string_view mode;
+        bool deterministic = false;
+        if (!read_string_attribute(*operation, "compute_data_type",
+                                   compute_type) ||
+            !read_string_attribute(*operation, "mode", mode) ||
+            !read_bool_attribute(*operation, "is_deterministic",
+                                 deterministic)) {
+            return fail(ErrorCode::kInvalidValue, "nodes[0]",
+                        "REDUCTION override attributes are malformed");
+        }
+        (void)deterministic;
+        if (compute_type != "FLOAT" || !import::is_reduction_mode(mode)) {
+            return unsupported(
+                "nodes[0]",
+                "runtime REDUCTION overrides require standard-f32 semantics");
+        }
+
+        auto check_role = [&](TensorReference const& reference,
+                              std::string const& path) -> Status {
+            auto const* tensor = graph.find_tensor(reference);
+            if (tensor == nullptr) {
+                return fail(ErrorCode::kMissingUid, path,
+                            "tensor reference is unresolved");
+            }
+            if (tensor->is_virtual || tensor->is_pass_by_value ||
+                tensor->pass_by_value ||
+                tensor->data_type != import::DataType::kFloat32 ||
+                tensor->reordering_type != "NONE" ||
+                tensor->ragged_offset_uid || tensor->ragged_offset_name) {
+                return unsupported(
+                    path,
+                    "runtime REDUCTION overrides require external plain f32 tensors");
+            }
+            std::int64_t uid = 0;
+            auto status = reference_uid(reference, path, uid);
+            if (status.is_bad()) return status;
+            role_uids.push_back(uid);
+            return Status::ok();
+        };
+        auto status = check_role(operation->inputs.at("X"),
+                                 "nodes[0].inputs.X");
+        if (status.is_bad()) return status;
+        status = check_role(operation->outputs.at("Y"),
+                            "nodes[0].outputs.Y");
+        if (status.is_bad()) return status;
+        policy = ShapeOverridePolicy::kReduction;
+        return Status::ok();
+    }
+    if (graph.nodes.size() == 1 &&
         graph.nodes.front().tag == OperationTag::kSdpa) {
         auto const* operation =
             std::get_if<GenericOperationDesc>(&graph.nodes.front().attributes);
@@ -2622,6 +2684,8 @@ Status emit_reduction(
     auto const& y = graph.tensors.at(y_uid);
     std::string_view mode;
     (void)read_string_attribute(operation, "mode", mode);
+    auto const dynamic =
+        graph.context.is_override_shape_enabled.value_or(false);
     std::vector<std::size_t> reduced_axes;
     std::uint64_t reduction_count = 1;
     for (std::size_t dimension = 0; dimension < x.dim.size(); ++dimension) {
@@ -2630,116 +2694,143 @@ Status emit_reduction(
             reduction_count *= static_cast<std::uint64_t>(x.dim[dimension]);
         }
     }
-    return emit_flat_loop(
-        builder, location, y.dim, "REDUCTION",
-        [&](::mlir::OpBuilder& body_builder,
-            ::mlir::Location body_location,
-            llvm::SmallVector<::mlir::Value> const& y_indices) {
-            if (reduced_axes.empty()) {
-                auto value = ::mlir::memref::LoadOp::create(
-                    body_builder, body_location, values.at(x_uid), y_indices);
-                ::mlir::memref::StoreOp::create(
-                    body_builder, body_location, value, values.at(y_uid),
-                    y_indices);
-                return;
-            }
-            float initial_value = 0.0F;
-            if (mode == "MUL" || mode == "MUL_NO_ZEROS") {
-                initial_value = 1.0F;
-            } else if (mode == "MIN") {
-                initial_value = std::numeric_limits<float>::infinity();
-            } else if (mode == "MAX") {
-                initial_value = -std::numeric_limits<float>::infinity();
-            }
-            auto initial =
-                float_constant(body_builder, body_location, initial_value);
-            llvm::SmallVector<::mlir::Value> lowers;
-            llvm::SmallVector<::mlir::Value> uppers;
-            llvm::SmallVector<::mlir::Value> steps;
-            for (auto axis : reduced_axes) {
-                lowers.push_back(index_constant(body_builder, body_location, 0));
-                uppers.push_back(index_constant(body_builder, body_location,
-                                                x.dim[axis]));
-                steps.push_back(index_constant(body_builder, body_location, 1));
-            }
-            auto reduction = ::mlir::scf::buildLoopNest(
-                body_builder, body_location, lowers, uppers, steps,
-                ::mlir::ValueRange{initial},
-                [&](::mlir::OpBuilder& reduction_builder,
-                    ::mlir::Location reduction_location,
-                    ::mlir::ValueRange reduction_indices,
-                    ::mlir::ValueRange iter_args) -> ::mlir::scf::ValueVector {
-                    auto x_indices = y_indices;
-                    for (std::size_t index = 0; index < reduced_axes.size();
-                         ++index) {
-                        x_indices[reduced_axes[index]] = reduction_indices[index];
-                    }
-                    auto value = ::mlir::memref::LoadOp::create(
-                        reduction_builder, reduction_location, values.at(x_uid),
-                        x_indices);
-                    auto accumulator = iter_args.front();
-                    ::mlir::Value next;
-                    if (mode == "ADD" || mode == "AVG") {
-                        next = ::mlir::arith::AddFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            value);
-                    } else if (mode == "MUL") {
-                        next = ::mlir::arith::MulFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            value);
-                    } else if (mode == "MIN") {
-                        next = ::mlir::arith::MinimumFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            value);
-                    } else if (mode == "MAX") {
-                        next = ::mlir::arith::MaximumFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            value);
-                    } else if (mode == "AMAX") {
-                        next = ::mlir::arith::MaximumFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            ::mlir::math::AbsFOp::create(
-                                reduction_builder, reduction_location, value));
-                    } else if (mode == "NORM1") {
-                        next = ::mlir::arith::AddFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            ::mlir::math::AbsFOp::create(
-                                reduction_builder, reduction_location, value));
-                    } else if (mode == "NORM2") {
-                        next = ::mlir::arith::AddFOp::create(
-                            reduction_builder, reduction_location, accumulator,
-                            ::mlir::arith::MulFOp::create(
-                                reduction_builder, reduction_location, value,
-                                value));
-                    } else {
-                        auto nonzero = ::mlir::arith::CmpFOp::create(
-                            reduction_builder, reduction_location,
-                            ::mlir::arith::CmpFPredicate::UNE, value,
-                            float_constant(reduction_builder,
-                                           reduction_location, 0.0F));
-                        next = ::mlir::arith::SelectOp::create(
-                            reduction_builder, reduction_location, nonzero,
-                            ::mlir::arith::MulFOp::create(
-                                reduction_builder, reduction_location,
-                                accumulator, value),
-                            accumulator);
-                    }
-                    return {next};
-                });
-            auto result = reduction.results.front();
-            if (mode == "AVG") {
-                result = ::mlir::arith::DivFOp::create(
-                    body_builder, body_location, result,
-                    float_constant(body_builder, body_location,
-                                   static_cast<float>(reduction_count)));
-            } else if (mode == "NORM2") {
-                result = ::mlir::math::SqrtOp::create(body_builder,
-                                                      body_location, result);
-            }
+    auto body = [&](::mlir::OpBuilder& body_builder,
+                    ::mlir::Location body_location,
+                    llvm::SmallVector<::mlir::Value> const& y_indices) {
+        if (reduced_axes.empty()) {
+            auto value = ::mlir::memref::LoadOp::create(
+                body_builder, body_location, values.at(x_uid), y_indices);
             ::mlir::memref::StoreOp::create(
-                body_builder, body_location, result, values.at(y_uid),
+                body_builder, body_location, value, values.at(y_uid),
                 y_indices);
-        });
+            return;
+        }
+        float initial_value = 0.0F;
+        if (mode == "MUL" || mode == "MUL_NO_ZEROS") {
+            initial_value = 1.0F;
+        } else if (mode == "MIN") {
+            initial_value = std::numeric_limits<float>::infinity();
+        } else if (mode == "MAX") {
+            initial_value = -std::numeric_limits<float>::infinity();
+        }
+        auto initial =
+            float_constant(body_builder, body_location, initial_value);
+        llvm::SmallVector<::mlir::Value> lowers;
+        llvm::SmallVector<::mlir::Value> uppers;
+        llvm::SmallVector<::mlir::Value> steps;
+        for (auto axis : reduced_axes) {
+            lowers.push_back(index_constant(body_builder, body_location, 0));
+            uppers.push_back(
+                dynamic
+                    ? ::mlir::memref::DimOp::create(
+                          body_builder, body_location, values.at(x_uid),
+                          index_constant(
+                              body_builder, body_location,
+                              static_cast<std::int64_t>(axis)))
+                    : index_constant(body_builder, body_location,
+                                     x.dim[axis]));
+            steps.push_back(index_constant(body_builder, body_location, 1));
+        }
+        auto reduction = ::mlir::scf::buildLoopNest(
+            body_builder, body_location, lowers, uppers, steps,
+            ::mlir::ValueRange{initial},
+            [&](::mlir::OpBuilder& reduction_builder,
+                ::mlir::Location reduction_location,
+                ::mlir::ValueRange reduction_indices,
+                ::mlir::ValueRange iter_args) -> ::mlir::scf::ValueVector {
+                auto x_indices = y_indices;
+                for (std::size_t index = 0; index < reduced_axes.size();
+                     ++index) {
+                    x_indices[reduced_axes[index]] = reduction_indices[index];
+                }
+                auto value = ::mlir::memref::LoadOp::create(
+                    reduction_builder, reduction_location, values.at(x_uid),
+                    x_indices);
+                auto accumulator = iter_args.front();
+                ::mlir::Value next;
+                if (mode == "ADD" || mode == "AVG") {
+                    next = ::mlir::arith::AddFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        value);
+                } else if (mode == "MUL") {
+                    next = ::mlir::arith::MulFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        value);
+                } else if (mode == "MIN") {
+                    next = ::mlir::arith::MinimumFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        value);
+                } else if (mode == "MAX") {
+                    next = ::mlir::arith::MaximumFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        value);
+                } else if (mode == "AMAX") {
+                    next = ::mlir::arith::MaximumFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        ::mlir::math::AbsFOp::create(
+                            reduction_builder, reduction_location, value));
+                } else if (mode == "NORM1") {
+                    next = ::mlir::arith::AddFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        ::mlir::math::AbsFOp::create(
+                            reduction_builder, reduction_location, value));
+                } else if (mode == "NORM2") {
+                    next = ::mlir::arith::AddFOp::create(
+                        reduction_builder, reduction_location, accumulator,
+                        ::mlir::arith::MulFOp::create(
+                            reduction_builder, reduction_location, value,
+                            value));
+                } else {
+                    auto nonzero = ::mlir::arith::CmpFOp::create(
+                        reduction_builder, reduction_location,
+                        ::mlir::arith::CmpFPredicate::UNE, value,
+                        float_constant(reduction_builder,
+                                       reduction_location, 0.0F));
+                    next = ::mlir::arith::SelectOp::create(
+                        reduction_builder, reduction_location, nonzero,
+                        ::mlir::arith::MulFOp::create(
+                            reduction_builder, reduction_location,
+                            accumulator, value),
+                        accumulator);
+                }
+                return {next};
+            });
+        auto result = reduction.results.front();
+        if (mode == "AVG") {
+            ::mlir::Value divisor;
+            if (dynamic) {
+                auto count = index_constant(body_builder, body_location, 1);
+                for (auto upper : uppers) {
+                    count = ::mlir::arith::MulIOp::create(
+                        body_builder, body_location, count, upper);
+                }
+                auto integer = ::mlir::arith::IndexCastUIOp::create(
+                    body_builder, body_location,
+                    ::mlir::IntegerType::get(body_builder.getContext(), 64),
+                    count);
+                divisor = ::mlir::arith::UIToFPOp::create(
+                    body_builder, body_location,
+                    ::mlir::Float32Type::get(body_builder.getContext()),
+                    integer);
+            } else {
+                divisor = float_constant(
+                    body_builder, body_location,
+                    static_cast<float>(reduction_count));
+            }
+            result = ::mlir::arith::DivFOp::create(
+                body_builder, body_location, result, divisor);
+        } else if (mode == "NORM2") {
+            result = ::mlir::math::SqrtOp::create(body_builder,
+                                                  body_location, result);
+        }
+        ::mlir::memref::StoreOp::create(
+            body_builder, body_location, result, values.at(y_uid),
+            y_indices);
+    };
+    return dynamic
+               ? emit_dynamic_loop(builder, location, values.at(y_uid),
+                                   y.dim.size(), body)
+               : emit_flat_loop(builder, location, y.dim, "REDUCTION", body);
 }
 
 Status emit_matmul(

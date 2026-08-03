@@ -271,6 +271,26 @@ Json reduction_graph() {
                           std::move(tensors));
 }
 
+Json runtime_shape_override_reduction_graph() {
+    Json tensors = Json::object();
+    tensors["211"] =
+        tensor("DynamicReductionX", 211, {2, 3, 4}, {20, 6, 1});
+    tensors["212"] =
+        tensor("DynamicReductionY", 212, {2, 1, 4}, {7, 7, 1});
+    Json reduction =
+        Json{{"tag", "REDUCTION"},
+             {"name", "runtime_shape_override_reduction"},
+             {"inputs", Json::object({{"X", 211}})},
+             {"outputs", Json::object({{"Y", 212}})},
+             {"compute_data_type", "FLOAT"},
+             {"mode", "AVG"},
+             {"is_deterministic", true}};
+    auto graph = graph_document(2110, "runtime_shape_override_reduction",
+                                Json::array({reduction}), std::move(tensors));
+    graph["context"]["is_override_shape_enabled"] = true;
+    return graph;
+}
+
 Json matmul_graph() {
     Json tensors = Json::object();
     tensors["301"] = tensor("MA", 301, {2, 2, 3}, {6, 3, 1});
@@ -913,6 +933,160 @@ int main() {
                     "reduction with no inferred axes is an identity");
     }
 
+    deepforge::import::SerializedGraph dynamic_reduction;
+    status = parse_graph(runtime_shape_override_reduction_graph(),
+                         dynamic_reduction);
+    tests.good(status, "parse runtime shape-override REDUCTION");
+    deepforge::compiler::CompilationResult dynamic_reduction_compilation;
+    if (status.is_good()) {
+        auto dynamic_reduction_options = options;
+        dynamic_reduction_options.capture_mlir = true;
+        status = deepforge::compiler::compile_graph(
+            dynamic_reduction, dynamic_reduction_options,
+            dynamic_reduction_compilation);
+    }
+    tests.good(status, "compile runtime shape-override REDUCTION");
+    if (dynamic_reduction_compilation.executable) {
+        tests.check(
+            dynamic_reduction_compilation.metadata.override_policy ==
+                    deepforge::compiler::ShapeOverridePolicy::kReduction &&
+                dynamic_reduction_compilation.metadata.override_role_uids ==
+                    std::vector<std::int64_t>({211, 212}),
+            "dynamic REDUCTION records ordered X/Y role metadata");
+        tests.check(
+            !dynamic_reduction_compilation.metadata.dynamic_shape_enabled &&
+                dynamic_reduction_compilation.metadata.override_shape_enabled,
+            "REDUCTION overrides do not require the independent dynamic flag");
+        tests.check(
+            dynamic_reduction_compilation.imported_mlir.find("memref.dim") !=
+                    std::string::npos &&
+                dynamic_reduction_compilation.imported_mlir.find(
+                    "arith.uitofp") != std::string::npos,
+            "dynamic AVG uses runtime loop bounds and a runtime divisor");
+
+        std::vector<float> dynamic_x(36, -77.0F);
+        std::vector<float> dynamic_y(11, -99.0F);
+        dynamic_x[0] = 1.0F;
+        dynamic_x[1] = 2.0F;
+        dynamic_x[2] = 3.0F;
+        dynamic_x[5] = 5.0F;
+        dynamic_x[6] = 7.0F;
+        dynamic_x[7] = 9.0F;
+        deepforge::runtime::VariantPack dynamic_reduction_pack{
+            {211, dynamic_x.data()}, {212, dynamic_y.data()}};
+        deepforge::runtime::OverrideUids dynamic_reduction_uids{211, 212};
+        deepforge::runtime::OverrideShapes dynamic_reduction_shapes{
+            {1, 2, 3}, {1, 1, 3}};
+        deepforge::runtime::OverrideStrides dynamic_reduction_strides{
+            {20, 5, 1}, {7, 7, 1}};
+        status = dynamic_reduction_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_reduction_pack, nullptr, dynamic_reduction_uids,
+            dynamic_reduction_shapes, dynamic_reduction_strides);
+        tests.good(status, "execute runtime shape-override REDUCTION");
+        tests.check(close(dynamic_y[0], 3.0) &&
+                        close(dynamic_y[1], 4.5) &&
+                        close(dynamic_y[2], 6.0) &&
+                        dynamic_y[3] == -99.0F &&
+                        dynamic_y[7] == -99.0F,
+                    "dynamic AVG honors runtime extents, divisor, and strides");
+
+        std::vector<std::uint8_t> dynamic_reduction_artifact;
+        status = deepforge::compiler::serialize_artifact(
+            dynamic_reduction_compilation, dynamic_reduction_artifact);
+        tests.good(status,
+                   "serialize runtime shape-override REDUCTION artifact");
+        std::unique_ptr<deepforge::runtime::Executable> dynamic_reduction_loaded;
+        deepforge::compiler::ArtifactInfo dynamic_reduction_info;
+        if (status.is_good()) {
+            status = deepforge::compiler::load_artifact_executable(
+                dynamic_reduction_artifact, dynamic_reduction_loaded,
+                &dynamic_reduction_info);
+        }
+        tests.good(status, "load runtime shape-override REDUCTION artifact");
+        tests.check(
+            dynamic_reduction_info.format_version ==
+                    deepforge::compiler::kArtifactFormatVersion &&
+                dynamic_reduction_info.metadata.override_policy ==
+                    deepforge::compiler::ShapeOverridePolicy::kReduction &&
+                dynamic_reduction_info.metadata.override_role_uids ==
+                    std::vector<std::int64_t>({211, 212}),
+            "artifact v9 preserves REDUCTION override metadata");
+        if (dynamic_reduction_loaded) {
+            std::fill(dynamic_x.begin(), dynamic_x.end(), -77.0F);
+            std::fill(dynamic_y.begin(), dynamic_y.end(), -99.0F);
+            for (std::size_t outer = 0; outer < 2; ++outer) {
+                for (std::size_t reduced = 0; reduced < 3; ++reduced) {
+                    for (std::size_t inner = 0; inner < 4; ++inner) {
+                        dynamic_x[outer * 20 + reduced * 6 + inner] =
+                            static_cast<float>(outer * 100 + reduced * 10 +
+                                               inner);
+                    }
+                }
+            }
+            status = dynamic_reduction_loaded->execute(
+                nullptr, dynamic_reduction_pack, nullptr);
+            tests.good(status,
+                       "execute loaded REDUCTION artifact at maximum shape");
+            bool maximum_matches = true;
+            for (std::size_t outer = 0; outer < 2; ++outer) {
+                for (std::size_t inner = 0; inner < 4; ++inner) {
+                    maximum_matches =
+                        maximum_matches &&
+                        close(dynamic_y[outer * 7 + inner],
+                              static_cast<double>(outer * 100 + 10 + inner));
+                }
+            }
+            maximum_matches = maximum_matches && dynamic_y[4] == -99.0F &&
+                              dynamic_y[6] == -99.0F;
+            tests.check(maximum_matches,
+                        "empty overrides retain maximum REDUCTION semantics");
+        }
+
+        std::int64_t workspace_size = -1;
+        status = dynamic_reduction_compilation.executable->get_workspace_size(
+            nullptr, workspace_size, {211}, {{2, 3, 4}}, {{18, 5, 1}});
+        tests.good(status,
+                   "partial REDUCTION override may change a bounded stride");
+        tests.check(workspace_size == 0,
+                    "REDUCTION overrides preserve the static workspace bound");
+
+        auto invalid_retained_shapes = dynamic_reduction_shapes;
+        invalid_retained_shapes[1] = {1, 1, 2};
+        status = dynamic_reduction_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_reduction_pack, nullptr, dynamic_reduction_uids,
+            invalid_retained_shapes, dynamic_reduction_strides);
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "dynamic REDUCTION rejects mismatched retained axes");
+        status = dynamic_reduction_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_reduction_pack, nullptr, {211}, {{1, 2, 3}},
+            {{20, 5, 1}});
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "partial REDUCTION overrides must preserve axis relations");
+        status = dynamic_reduction_compilation.executable->execute_variant(
+            deepforge::runtime::CpuVariant::kScalar, nullptr,
+            dynamic_reduction_pack, nullptr, dynamic_reduction_uids,
+            {{1, 2}, {1, 1, 3}}, {{5, 1}, {7, 7, 1}});
+        tests.check(status.code() == deepforge::import::ErrorCode::kInvalidShape,
+                    "dynamic REDUCTION rejects rank changes");
+    }
+
+    auto dynamic_reduction_virtual =
+        runtime_shape_override_reduction_graph();
+    dynamic_reduction_virtual["tensors"]["212"]["is_virtual"] = true;
+    status = compile_document(dynamic_reduction_virtual);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "runtime REDUCTION override rejects virtual arguments");
+    auto composed_dynamic_reduction = reduction_graph();
+    composed_dynamic_reduction["context"]["is_override_shape_enabled"] = true;
+    status = compile_document(composed_dynamic_reduction);
+    tests.check(status.code() ==
+                    deepforge::import::ErrorCode::kUnsupportedOperation,
+                "runtime REDUCTION override rejects composed graphs in C6.13");
+
     deepforge::import::SerializedGraph matmul;
     status = parse_graph(matmul_graph(), matmul);
     tests.good(status, "parse batched matmul with broadcast bias");
@@ -1130,7 +1304,7 @@ int main() {
                     deepforge::compiler::kArtifactFormatVersion &&
                 dynamic_matmul_info.metadata.override_role_uids ==
                     std::vector<std::int64_t>({312, 313, 314}),
-            "artifact v8 preserves MATMUL role UIDs");
+            "artifact v9 preserves MATMUL role UIDs");
         if (dynamic_matmul_loaded) {
             std::fill(dynamic_c.begin(), dynamic_c.end(), -99.0F);
             status = dynamic_matmul_loaded->execute(

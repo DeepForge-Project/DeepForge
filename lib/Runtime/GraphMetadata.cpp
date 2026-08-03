@@ -40,6 +40,7 @@ bool valid_override_policy(ShapeOverridePolicy policy) {
         case ShapeOverridePolicy::kMatmul:
         case ShapeOverridePolicy::kSdpaForward:
         case ShapeOverridePolicy::kReshape:
+        case ShapeOverridePolicy::kReduction:
             return true;
     }
     return false;
@@ -164,6 +165,21 @@ bool valid_reshape_dimensions(TensorArgumentMetadata const& x,
                    std::numeric_limits<std::int64_t>::max());
 }
 
+bool valid_reduction_dimensions(TensorArgumentMetadata const& x,
+                                TensorArgumentMetadata const& y) {
+    if (x.dimensions.size() != y.dimensions.size()) return false;
+    for (std::size_t axis = 0; axis < x.dimensions.size(); ++axis) {
+        if (y.dimensions[axis] != 1 &&
+            y.dimensions[axis] != x.dimensions[axis]) {
+            return false;
+        }
+    }
+    std::uint64_t elements = 0;
+    return checked_element_count(x.dimensions, elements) &&
+           elements <= static_cast<std::uint64_t>(
+                           std::numeric_limits<std::int64_t>::max());
+}
+
 }  // namespace
 
 import::Status validate_graph_compile_metadata(
@@ -247,6 +263,7 @@ import::Status validate_graph_compile_metadata(
     if (metadata.override_policy != ShapeOverridePolicy::kMatmul &&
         metadata.override_policy != ShapeOverridePolicy::kSdpaForward &&
         metadata.override_policy != ShapeOverridePolicy::kReshape &&
+        metadata.override_policy != ShapeOverridePolicy::kReduction &&
         !metadata.override_role_uids.empty()) {
         return fail("override role UIDs require a role-based policy");
     }
@@ -349,6 +366,35 @@ import::Status validate_graph_compile_metadata(
             !valid_reshape_dimensions(*x, *y)) {
             return fail(
                 "RESHAPE override roles or maximum shapes are invalid");
+        }
+    }
+    if (metadata.override_policy == ShapeOverridePolicy::kReduction) {
+        if (metadata.arguments.size() != 2 ||
+            metadata.override_role_uids.size() != 2 ||
+            metadata.override_role_uids[0] ==
+                metadata.override_role_uids[1]) {
+            return fail(
+                "REDUCTION override metadata requires distinct X/Y role UIDs");
+        }
+        auto find_role = [&](std::size_t role) {
+            return std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](TensorArgumentMetadata const& argument) {
+                    return argument.uid == metadata.override_role_uids[role];
+                });
+        };
+        auto const x = find_role(0);
+        auto const y = find_role(1);
+        if (x == metadata.arguments.end() || y == metadata.arguments.end() ||
+            x->data_type != import::DataType::kFloat32 ||
+            y->data_type != import::DataType::kFloat32 ||
+            x->access != TensorAccess::kRead ||
+            y->access != TensorAccess::kWrite ||
+            x->storage_policy != TensorStoragePolicy::kStrided ||
+            y->storage_policy != TensorStoragePolicy::kStrided ||
+            !valid_reduction_dimensions(*x, *y)) {
+            return fail(
+                "REDUCTION override roles or maximum shapes are invalid");
         }
     }
     for (auto const& argument : metadata.arguments) {

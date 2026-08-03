@@ -26,6 +26,7 @@ enum class ShapeOverridePolicy : std::uint8_t {
     kMatmul,
     kSdpaForward,
     kReshape,
+    kReduction,
 };
 
 enum class TensorStoragePolicy : std::uint8_t {

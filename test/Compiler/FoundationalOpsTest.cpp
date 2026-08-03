@@ -416,7 +416,7 @@ void run_dynamic_reshape_tests(TestRunner& tests) {
             artifact_info.metadata.override_policy ==
                 deepforge::compiler::ShapeOverridePolicy::kReshape &&
             artifact_info.metadata.override_role_uids == override_uids,
-        "artifact v8 preserves ordered RESHAPE override roles");
+        "artifact v9 preserves ordered RESHAPE override roles");
     if (loaded) {
         std::fill(y.begin(), y.end(), -99.0F);
         status = loaded->execute(nullptr, pack, nullptr, override_uids,

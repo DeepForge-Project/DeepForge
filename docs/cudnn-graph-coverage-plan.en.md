@@ -125,14 +125,15 @@ Replace the fixed X/W/Y metadata and three rank-4 f32 descriptors with:
   per-variant symbols. C6 later advanced the writer to version 3 for dynamic
   policy metadata, version 4 for ragged storage references, version 5 for
   packed logical-sequence divisors, and version 6 for ordered MATMUL override
-  roles. Version 7 adds the SDPA-forward override policy, and version 8 adds
-  the logical-RESHAPE override policy while retaining prior-version read
-  compatibility.
+  roles. Version 7 adds the SDPA-forward override policy, version 8 adds the
+  logical-RESHAPE override policy, and version 9 adds the REDUCTION override
+  policy while retaining prior-version read compatibility.
 
 The compatibility rule keeps reading format-v1 Conv2D, format-v2 generic,
 format-v3 shape-override, format-v4 ragged-storage, and format-v5
-ragged-sequence artifacts, plus format-v6 MATMUL-override and format-v7
-SDPA-override artifacts. Current compilations write format v8. Unknown
+ragged-sequence artifacts, plus format-v6 MATMUL-override, format-v7
+SDPA-override, and format-v8 RESHAPE-override artifacts. Current compilations
+write format v9. Unknown
 artifact versions remain hard errors.
 
 ### 4.4 Cost model ownership
@@ -254,7 +255,7 @@ block requantization were assigned to C6.
 
 ### C6. Dynamic metadata, optimization, and release qualification
 
-**Status:** in progress. Eleven independently validated increments are complete.
+**Status:** in progress. Thirteen independently validated increments are complete.
 The first implements Frontend/CUTLASS `F8_128x4` physical E4M3/E8M0 scale
 ordering for block-scale conversion and E8M0 MXFP8 descale ports. The second
 implements Frontend-shaped runtime dimensions/strides for the exact-shape,
@@ -317,9 +318,16 @@ storage bounds; their resolved runtime element counts must remain equal.
 Artifact v8, different-rank X/Y reshape execution, reload, partial overrides,
 malformed spans/relations/graphs, Release, ASan, and UBSan form its acceptance
 set.
+The thirteenth implements bounded descriptor overrides for one standard-f32
+REDUCTION in any of the nine supported modes. External plain X/Y tensors retain
+the same fixed rank. Compiled maxima freeze reduced axes; runtime X may shrink
+there while Y remains one, and retained runtime X/Y extents remain equal.
+Runtime loops use resolved extents and AVG uses the runtime reduction count.
+Artifact v9, non-contiguous execution, maximum and partial overrides, reload,
+malformed relations/graphs, Release, ASan, and UBSan form its acceptance set.
 
 **Work:** expand dynamic behavior beyond the delivered exact-pointwise,
-single standard-f32 MATMUL, logical-RESHAPE, and SDPA-forward descriptor
+single standard-f32 MATMUL, logical-RESHAPE, REDUCTION, and SDPA-forward descriptor
 overrides, and MATMUL extent-override subsets; then evaluate fusion, threading,
 additional vector schedules, and
 family-specific cost models

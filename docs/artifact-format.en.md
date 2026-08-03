@@ -7,9 +7,9 @@
 `.dfo` is the reproducible compilation artifact of the DeepForge CPU MVP. It
 stores the compile metadata, workspace plan, and three x86-64 objects needed to
 restore an `Executable` without exposing memref descriptors or the raw ABI of a
-generated kernel. The current writer emits format version `8`; the reader also
-accepts version `7` SDPA-override artifacts, version `6` MATMUL-override
-artifacts, version `5` ragged-sequence
+generated kernel. The current writer emits format version `9`; the reader also
+accepts version `8` RESHAPE-override artifacts, version `7` SDPA-override
+artifacts, version `6` MATMUL-override artifacts, version `5` ragged-sequence
 artifacts, version `4` ragged-storage
 artifacts, version `3` shape-override artifacts, version `2` static-metadata
 artifacts, and version `1` Conv2D artifacts. For version `1`, it reconstructs
@@ -17,8 +17,9 @@ the argument table; versions `1` and `2` default all dynamic and override
 metadata to disabled. Versions `1` through `3` default tensor storage to plain
 strided addressing, version `4` defaults every ragged sequence divisor to one,
 and versions `1` through `5` default override role UIDs to empty. Version `6`
-retains its ordered MATMUL role UIDs, and version `7` retains its ordered
-SDPA-forward role UIDs.
+retains its ordered MATMUL role UIDs, version `7` retains its ordered
+SDPA-forward role UIDs, and version `8` retains its ordered logical-RESHAPE role
+UIDs.
 
 Read and write entry points are declared in
 `DeepForge/Compiler/Artifact.h`:
@@ -48,7 +49,7 @@ UBJSON encoding.
 
 ```text
 magic[8] = "DFOBJ\r\n\x1a"
-u32 format_version = 8
+u32 format_version = 9
 u32 endian_marker = 0x01020304
 
 string deepforge_version
@@ -59,8 +60,8 @@ string public_function_name
 
 u32 dynamic_shape_enabled    # boolean
 u32 override_shape_enabled   # boolean
-u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE
-u32 override_role_count      # policy 2: 3; policy 3: 4..7; policy 4: 2; else 0
+u32 shape_override_policy    # 0 none, 1 pointwise, 2 MATMUL, 3 SDPA FWD, 4 RESHAPE, 5 REDUCTION
+u32 override_role_count      # policy 2: 3; policy 3: 4..7; policies 4/5: 2; else 0
 i64 override_role_uids[override_role_count] # policy-specific order below
 
 u32 tensor_argument_count
@@ -179,6 +180,15 @@ require the resolved positive X and Y element counts to be equal before
 dispatch. Version `7` cannot encode policy `4` and rejects it while preserving
 policy `3` role metadata.
 
+Version `9` adds policy `5` for one standard-f32 REDUCTION operation and stores
+exactly two distinct UIDs in X, Y order. X and Y have the same fixed rank. An
+axis is permanently classified as reduced when its compiled X/Y extents differ;
+the compiled Y extent is one on such an axis. Runtime Y remains one there while
+runtime X may shrink. On every other axis, runtime X and Y extents remain equal.
+All nine supported reduction modes use runtime loop bounds, and AVG divides by
+the resolved runtime reduction count. Version `8` cannot encode policy `5` and
+rejects it while preserving policy `4` role metadata.
+
 The numeric contract is fixed to
 `abs <= 1e-4 + 1e-3 * abs(reference)`. Symbols are `<base>_scalar`,
 `<base>_avx2`, and `<base>_avx512`. The C-interface wrapper in each object is
@@ -222,5 +232,5 @@ inconsistent shape or padding, invalid workspace alignment, ranges or
 lifetimes, invalid argument tables or adapter payloads, invalid variant symbols
 or features, duplicate variants, empty objects, truncation, trailing payload,
 and checksum mismatch. Changes to the top-level encoding must increment the
-format version. Versions `1` through `7` have frozen field order and semantics
-and are read-only. New compilations write version `8`.
+format version. Versions `1` through `8` have frozen field order and semantics
+and are read-only. New compilations write version `9`.

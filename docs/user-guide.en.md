@@ -15,7 +15,7 @@ DeepForge `0.1.0` currently supports:
 | Platform | Linux x86-64 |
 | Input | Graph JSON or canonical UBJSON produced by cuDNN Frontend `v1.24.0` |
 | Graph schema | `json_version == "1.0"`, `cudnn_frontend_version == 12400` |
-| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
+| Operations | Validated CPU subsets for all 39 serialized v1.24.0 tags; exact-shape f32 `POINTWISE` DAGs, one standard-f32 `MATMUL`, one standard-f32 LOGICAL `RESHAPE`, one standard-f32 `REDUCTION`, and one dense standard-f32 `SDPA` forward support shape override arrays, while MATMUL also has separate extent-override tensor ports |
 | Generic tensors | Rank 1-64 f32 data with explicit UID; allocations are otherwise static; documented metadata may be INT32/INT64; virtual intermediates are supported |
 | Generic layout | Positive, non-overlapping arbitrary strides; documented standard f32 SDPA tensors may use ragged batch-prefix storage; `F8_128x4` is enabled only for the scale ports below |
 | C5 specialized storage | FLOAT16, BFLOAT16, FP8 E4M3/E5M2/E8M0, packed FP4 E2M1 and INT4, plus FLOAT controls on documented ports |
@@ -32,7 +32,7 @@ The foundational operation subset is:
 | `SLICE` | In-range half-open bounds and positive integer strides |
 | `CONCATENATE` | Numbered inputs, non-negative axis, no in-place mode |
 | `POINTWISE` | All 50 v1.24.0 modes with trailing-dimension NumPy broadcasting |
-| `REDUCTION` | All 9 modes; same input/output rank and reduced extents equal to one |
+| `REDUCTION` | All 9 modes; same input/output rank and reduced extents equal to one; one standard-f32 operation supports bounded X/Y descriptor overrides |
 | `MATMUL` | Equal rank >= 2, broadcast batch dimensions, optional per-batch INT32 M/N/K overrides, and finite f32 padding value |
 | `RESAMPLE` | Three pooling modes plus integer `NEAREST`; three padding modes and no index output. `BILINEAR` is rejected because v1.24.0 drops fraction denominators during serialization |
 
@@ -77,7 +77,7 @@ documented in the runtime section. The pinned v1.24.0 schema exposes no paged
 backward page-table ports, so that form is outside the input contract. C5 FP8
 attention still defers padding, dropout, ALiBi, and optional ports. C6 also
 implements producer-emitted `F8_128x4` scale reordering for the documented
-block-scale and MXFP8 ports and the four override subsets below.
+block-scale and MXFP8 ports and the five override subsets below.
 The v1.24.0 standard-SDPA bottom-right causal path does not combine with bias,
 ALiBi, or dropout. The CPU RNG is reproducible across DeepForge variants, but
 it is not claimed to match cuDNN GPU Philox bits.
@@ -85,7 +85,7 @@ it is not claimed to match cuDNN GPU Philox bits.
 Comparison, logical, and generated-index pointwise outputs still use f32 `0`/`1`
 or f32 index values. C2-C6 tags can be mixed when connected tensor types are
 supported by both operations. Dynamic execution outside the pointwise, MATMUL,
-RESHAPE, and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
+RESHAPE, REDUCTION, and SDPA-forward override subsets, explicit aliasing, unsupported pass-by-value
 descriptors, ragged/reordered tensors
 outside the documented subset, distributed peer statistics, GPU execution,
 CUDA device pointers, AMX, and internal multithreading are not supported. The maximum input file size is
@@ -530,6 +530,29 @@ The resolved positive X and Y element counts must be equal, including after a
 partial override. Execution preserves LOGICAL reshape order: lexicographic X
 elements are written in lexicographic Y order. Dimensions, strides, and storage
 spans remain subject to the common serialized bounds above.
+
+One standard-f32 `REDUCTION` in any of the nine supported modes can override
+external plain X and Y descriptors. X is read-only, Y is write-only, and both
+keep the same compiled rank; virtual, pass-by-value, ragged, reordered,
+additional tensors, and composed graphs are excluded. Reduction axes are frozen
+from the serialized maxima: an axis is reduced when compiled X and Y differ,
+with compiled Y equal to one. At runtime Y remains one on a reduced axis while X
+may shrink. On every retained axis, final X and Y extents must be equal. For
+serialized X `[2,3,4]` and Y `[2,1,4]`, a valid call is:
+
+```cpp
+deepforge::runtime::OverrideUids override_uids{x_uid, y_uid};
+deepforge::runtime::OverrideShapes override_shapes{
+    {1, 2, 3},
+    {1, 1, 3}};
+deepforge::runtime::OverrideStrides override_strides{
+    {20, 5, 1},
+    {7, 7, 1}};
+```
+
+Partial overrides must preserve the same axis relations. AVG divides by the
+resolved runtime reduction count, not the serialized maximum count. All common
+dimension, stride, and storage-span bounds still apply.
 
 `is_dynamic_shape_enabled=true` without the override flag is persisted in the
 plan and `.dfo` metadata but leaves execution descriptors static. Conversely,

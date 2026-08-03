@@ -318,6 +318,12 @@ fixed ranks may differ. Runtime dimensions and non-overlapping strides may
 change within serialized storage bounds, but the resolved X and Y element
 counts must be equal. Pass-by-value, ragged or reordered storage, virtual
 tensors, and composed graphs are rejected.
+Shape override is also executable for one standard-f32 `REDUCTION` in any of
+the nine supported modes. External plain X/Y have the same fixed rank. Compiled
+X/Y maxima freeze reduced axes; runtime Y remains one there while runtime X may
+shrink, and retained runtime X/Y extents remain equal. AVG uses the resolved
+runtime reduction count. Pass-by-value, ragged or reordered storage, virtual
+tensors, and composed graphs are rejected.
 Compiled dimensions are maxima; runtime dimensions must be positive and no
 larger, runtime strides
 must satisfy the supported positive non-overlap condition, and each external
@@ -330,10 +336,10 @@ within static maxima; standard MATMUL uses a finite f32 padding value outside
 M/N and MATMUL_FP8 uses zero. Explicit aliasing, other dynamic operations,
 ragged tensors outside the documented standard-f32 SDPA subset, and physical
 reorder contracts not emitted by the pinned modern Graph producer are deferred.
-New artifacts use format v8 for ordered logical-RESHAPE override roles while
-retaining v7 SDPA-forward roles, v6 MATMUL roles, v4 ragged references, and v5
-logical-sequence divisors; v1-v7 remain readable, with v4 divisors defaulted to
-one and pre-v6 role lists empty.
+New artifacts use format v9 for ordered REDUCTION override roles while retaining
+v8 logical-RESHAPE roles, v7 SDPA-forward roles, v6 MATMUL roles, v4 ragged
+references, and v5 logical-sequence divisors; v1-v8 remain readable, with v4
+divisors defaulted to one and pre-v6 role lists empty.
 
 Passing schema recognition never implies that every configuration lowers or
 executes on the CPU. An attribute combination outside a declared subset

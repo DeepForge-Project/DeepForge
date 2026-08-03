@@ -182,6 +182,8 @@ std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
             deepforge::compiler::kMatmulOverrideArtifactFormatVersion ||
         version ==
             deepforge::compiler::kSdpaOverrideArtifactFormatVersion ||
+        version ==
+            deepforge::compiler::kReshapeOverrideArtifactFormatVersion ||
         version == deepforge::compiler::kArtifactFormatVersion) {
         offset += 3 * 4;
     }
@@ -189,6 +191,8 @@ std::size_t argument_table_offset(std::span<std::uint8_t const> bytes) {
             deepforge::compiler::kMatmulOverrideArtifactFormatVersion ||
         version ==
             deepforge::compiler::kSdpaOverrideArtifactFormatVersion ||
+        version ==
+            deepforge::compiler::kReshapeOverrideArtifactFormatVersion ||
         version == deepforge::compiler::kArtifactFormatVersion) {
         auto const role_count = read_u32(bytes, offset);
         offset += static_cast<std::size_t>(role_count) * 8;
@@ -212,6 +216,8 @@ std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
                 deepforge::compiler::kMatmulOverrideArtifactFormatVersion ||
             version ==
                 deepforge::compiler::kSdpaOverrideArtifactFormatVersion ||
+            version ==
+                deepforge::compiler::kReshapeOverrideArtifactFormatVersion ||
             version == deepforge::compiler::kArtifactFormatVersion) {
             offset += 4 + 8 + 8;
         }
@@ -221,6 +227,8 @@ std::size_t adapter_kind_offset(std::span<std::uint8_t const> bytes) {
                 deepforge::compiler::kMatmulOverrideArtifactFormatVersion ||
             version ==
                 deepforge::compiler::kSdpaOverrideArtifactFormatVersion ||
+            version ==
+                deepforge::compiler::kReshapeOverrideArtifactFormatVersion ||
             version == deepforge::compiler::kArtifactFormatVersion) {
             offset += 8;
         }
@@ -312,6 +320,15 @@ std::vector<std::uint8_t> make_sdpa_override_v7(
               deepforge::compiler::kSdpaOverrideArtifactFormatVersion);
     refresh_checksum(version_seven);
     return version_seven;
+}
+
+std::vector<std::uint8_t> make_reshape_override_v8(
+    std::span<std::uint8_t const> current) {
+    std::vector<std::uint8_t> version_eight(current.begin(), current.end());
+    write_u32(version_eight, 8,
+              deepforge::compiler::kReshapeOverrideArtifactFormatVersion);
+    refresh_checksum(version_eight);
+    return version_eight;
 }
 
 std::vector<std::uint8_t> make_ragged_v4(
@@ -537,7 +554,7 @@ int main(int argc, char** argv) {
                    "parse serialized artifact");
         tests.check(parsed.format_version ==
                         deepforge::compiler::kArtifactFormatVersion,
-                    "writer emits artifact format v8");
+                    "writer emits artifact format v9");
         tests.check(parsed.adapter_kind ==
                         deepforge::compiler::ArtifactAdapterKind::
                             kConv2DRankedMemref,
@@ -599,13 +616,13 @@ int main(int argc, char** argv) {
                      deepforge::compiler::TensorAccess::kRead);
         set_argument(2, 9003, "C", {2, 4}, {4, 1}, 32,
                      deepforge::compiler::TensorAccess::kWrite);
-        std::vector<std::uint8_t> matmul_v8;
+        std::vector<std::uint8_t> matmul_v9;
         tests.good(deepforge::compiler::serialize_artifact(compilation,
-                                                           matmul_v8),
+                                                           matmul_v9),
                    "serialize role-based MATMUL artifact for compatibility");
         compilation.adapter_kind = saved_matmul_adapter;
         compilation.metadata = saved_matmul_metadata;
-        auto matmul_v6 = make_matmul_override_v6(matmul_v8);
+        auto matmul_v6 = make_matmul_override_v6(matmul_v9);
         deepforge::compiler::ArtifactInfo matmul_v6_info;
         tests.good(deepforge::compiler::parse_artifact(matmul_v6,
                                                        matmul_v6_info),
@@ -644,13 +661,13 @@ int main(int argc, char** argv) {
                      deepforge::compiler::TensorAccess::kRead);
         set_argument(3, 9104, "O", {1, 2, 3, 3}, {18, 9, 3, 1}, 72,
                      deepforge::compiler::TensorAccess::kWrite);
-        std::vector<std::uint8_t> sdpa_v8;
+        std::vector<std::uint8_t> sdpa_v9;
         tests.good(deepforge::compiler::serialize_artifact(compilation,
-                                                           sdpa_v8),
+                                                           sdpa_v9),
                    "serialize role-based SDPA artifact for compatibility");
         compilation.adapter_kind = saved_matmul_adapter;
         compilation.metadata = saved_matmul_metadata;
-        auto sdpa_v7 = make_sdpa_override_v7(sdpa_v8);
+        auto sdpa_v7 = make_sdpa_override_v7(sdpa_v9);
         deepforge::compiler::ArtifactInfo sdpa_v7_info;
         tests.good(deepforge::compiler::parse_artifact(sdpa_v7,
                                                        sdpa_v7_info),
@@ -671,16 +688,59 @@ int main(int argc, char** argv) {
                                                       parsed);
         tests.parse_error(status,
                           "format-v7 rejects the format-v8 RESHAPE policy");
-        auto malformed_v8_reshape_roles = sdpa_v8;
-        auto const v8_flags =
-            metadata_numbers_offset(malformed_v8_reshape_roles);
-        write_u32(malformed_v8_reshape_roles, v8_flags + 8, 4);
-        refresh_checksum(malformed_v8_reshape_roles);
+
+        compilation.adapter_kind =
+            deepforge::compiler::ArtifactAdapterKind::
+                kGenericRankedMemrefPointerTable;
+        compilation.metadata.dynamic_shape_enabled = false;
+        compilation.metadata.override_shape_enabled = true;
+        compilation.metadata.override_policy =
+            deepforge::compiler::ShapeOverridePolicy::kReshape;
+        compilation.metadata.override_role_uids = {9201, 9202};
+        compilation.metadata.arguments.resize(2);
+        set_argument(0, 9201, "X", {2, 3, 4}, {12, 4, 1}, 96,
+                     deepforge::compiler::TensorAccess::kRead);
+        set_argument(1, 9202, "Y", {4, 6}, {6, 1}, 96,
+                     deepforge::compiler::TensorAccess::kWrite);
+        std::vector<std::uint8_t> reshape_v9;
+        tests.good(deepforge::compiler::serialize_artifact(compilation,
+                                                           reshape_v9),
+                   "serialize role-based RESHAPE artifact for compatibility");
+        compilation.adapter_kind = saved_matmul_adapter;
+        compilation.metadata = saved_matmul_metadata;
+        auto reshape_v8 = make_reshape_override_v8(reshape_v9);
+        deepforge::compiler::ArtifactInfo reshape_v8_info;
+        tests.good(deepforge::compiler::parse_artifact(reshape_v8,
+                                                       reshape_v8_info),
+                   "parse RESHAPE override format-v8 artifact");
+        tests.check(
+            reshape_v8_info.format_version ==
+                    deepforge::compiler::
+                        kReshapeOverrideArtifactFormatVersion &&
+                reshape_v8_info.metadata.override_policy ==
+                    deepforge::compiler::ShapeOverridePolicy::kReshape &&
+                reshape_v8_info.metadata.override_role_uids ==
+                    std::vector<std::int64_t>({9201, 9202}),
+            "format-v8 reader preserves RESHAPE role metadata");
+        auto malformed_v9_reduction = reshape_v9;
+        auto const v9_flags =
+            metadata_numbers_offset(malformed_v9_reduction);
+        write_u32(malformed_v9_reduction, v9_flags + 8, 5);
+        refresh_checksum(malformed_v9_reduction);
         status = deepforge::compiler::parse_artifact(
-            malformed_v8_reshape_roles, parsed);
+            malformed_v9_reduction, parsed);
         tests.parse_error(
             status,
-            "format-v8 rejects malformed RESHAPE override role metadata");
+            "format-v9 rejects REDUCTION roles with incompatible maximum shapes");
+        auto v8_reduction_policy = reshape_v8;
+        auto const v8_flags = metadata_numbers_offset(v8_reduction_policy);
+        write_u32(v8_reduction_policy, v8_flags + 8, 5);
+        refresh_checksum(v8_reduction_policy);
+        status = deepforge::compiler::parse_artifact(v8_reduction_policy,
+                                                      parsed);
+        tests.parse_error(
+            status,
+            "format-v8 rejects the format-v9 REDUCTION policy");
 
         auto ragged_sequence_v5 = make_ragged_sequence_v5(first);
         deepforge::compiler::ArtifactInfo ragged_sequence_v5_info;

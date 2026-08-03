@@ -470,8 +470,16 @@ P0-P6 和 MVP 后 C0-C5 已按下面顺序完成：
     lexicographic reshape 顺序。Artifact v8 记录有序 X/Y role，同时保持 v1-v7 可读。
     非连续 stride 执行、reload、错误 span/关系/图、Release、ASan 和 UBSan 覆盖该
     增量，公开 execute/workspace ABI 不变。
+21. 已完成：C6.13 有界 REDUCTION descriptor override。单个标准 f32 `REDUCTION`
+    的全部 9 个已支持 mode 接受 external plain X/Y 的 Frontend UID、shape、stride
+    array，二者保持相同固定 rank。编译最大 shape 冻结归约 axis；runtime Y 在归约
+    axis 保持 1，X 可缩小，完整或 partial override 后保留 axis 的 X/Y extent 必须
+    相同。Dynamic loop 使用最终 output/reduction extent，AVG 使用 runtime reduction
+    count。Artifact v9 记录有序 X/Y role，同时保持 v1-v8 可读。非连续和最大 shape
+    执行、reload、错误关系/图、Release、ASan 和 UBSan 覆盖该增量，公开
+    execute/workspace ABI 不变。
 
-剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE
+剩余 C6 功能工作是已交付 exact-pointwise、单个标准 f32 MATMUL、LOGICAL RESHAPE、REDUCTION
 与 dense 标准 f32 SDPA-forward descriptor-override 子集之外的 dynamic 行为。除 enum 转换外，固定
 v1.24.0 中的 `F16x16` 只有
 attribute round-trip 覆盖，可执行 `INT8x32`

@@ -324,6 +324,48 @@ Status resolve_overrides(
                 ErrorCode::kInvalidShape, "runtime.override",
                 "RESHAPE X and Y runtime element counts must match");
         }
+    } else if (metadata.override_policy ==
+               compiler::ShapeOverridePolicy::kReduction) {
+        if (metadata.override_role_uids.size() != 2) {
+            return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                        "runtime.override",
+                        "REDUCTION override role metadata is malformed");
+        }
+        std::array<ResolvedArgument const*, 2> roles{};
+        std::array<compiler::TensorArgumentMetadata const*, 2> compiled{};
+        for (std::size_t role = 0; role < roles.size(); ++role) {
+            auto const argument = std::find_if(
+                metadata.arguments.begin(), metadata.arguments.end(),
+                [&](compiler::TensorArgumentMetadata const& candidate) {
+                    return candidate.uid == metadata.override_role_uids[role];
+                });
+            if (argument == metadata.arguments.end()) {
+                return fail(ErrorCode::kUnsupportedExecutionMetadata,
+                            "runtime.override",
+                            "REDUCTION override role UID is unresolved");
+            }
+            auto const index = static_cast<std::size_t>(
+                argument - metadata.arguments.begin());
+            roles[role] = &resolved[index];
+            compiled[role] = &*argument;
+        }
+        auto const& x = roles[0]->dimensions;
+        auto const& y = roles[1]->dimensions;
+        auto const& compiled_x = compiled[0]->dimensions;
+        auto const& compiled_y = compiled[1]->dimensions;
+        if (x.size() != y.size()) {
+            return fail(ErrorCode::kInvalidShape, "runtime.override",
+                        "REDUCTION X and Y runtime ranks must match");
+        }
+        for (std::size_t axis = 0; axis < x.size(); ++axis) {
+            auto const reduced = compiled_x[axis] != compiled_y[axis];
+            if ((reduced && y[axis] != 1) ||
+                (!reduced && x[axis] != y[axis])) {
+                return fail(
+                    ErrorCode::kInvalidShape, "runtime.override",
+                    "REDUCTION runtime dimensions do not preserve reduced axes");
+            }
+        }
     }
     output = std::move(resolved);
     return Status::ok();
